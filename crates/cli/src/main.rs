@@ -231,26 +231,25 @@ fn passphrase(explicit: Option<&str>) -> Result<String> {
     )
 }
 
-fn open(project: &Path, explicit: Option<&str>) -> Result<(vault::VaultContents, String)> {
+fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
     let path = vault_path(project);
     if !path.exists() {
         bail!("no vault at {} — run `specshield init` first", path.display());
     }
-    let pw = passphrase(explicit)?;
-    let contents = vault::load(&path, &pw)?;
-    Ok((contents, pw))
+    Ok(vault::Vault::open(&path, &passphrase(explicit)?)?)
 }
 
 /// Rebuild the in-memory graph from stored identities, so aliases stay stable
 /// across invocations (SDD §6.5).
-fn graph_from(contents: &vault::VaultContents) -> Result<Graph> {
-    let style = match contents.alias_style.as_str() {
+fn graph_from(vault: &vault::Vault) -> Result<Graph> {
+    let settings = vault.settings()?;
+    let style = match settings.alias_style.as_str() {
         "opaque" => AliasStyle::Opaque,
         "pseudonymous" => AliasStyle::Pseudonymous,
         _ => AliasStyle::Typed,
     };
-    let mut graph = Graph::new(ProjectKey::from_bytes(contents.project_key), style);
-    for stored in &contents.identities {
+    let mut graph = Graph::new(ProjectKey::from_bytes(settings.project_key), style);
+    for stored in vault.identities()? {
         let entity_type: EntityType = stored
             .entity_type
             .parse()
@@ -266,22 +265,23 @@ fn graph_from(contents: &vault::VaultContents) -> Result<Graph> {
     Ok(graph)
 }
 
-fn detector_from(contents: &vault::VaultContents) -> Result<Detector> {
+fn detector_from(vault: &vault::Vault) -> Result<Detector> {
     let mut detector = Detector::new();
-    for (name, type_name) in &contents.dictionary {
+    for (name, type_name) in vault.dictionary()? {
         let entity_type: EntityType = type_name
             .parse()
             .with_context(|| format!("dictionary holds unknown entity type {type_name:?}"))?;
         detector = detector.with_term(name, entity_type);
     }
-    for term in &contents.allowlist {
+    for term in vault.allowlist()? {
         detector = detector.with_allowed(term);
     }
     Ok(detector)
 }
 
-fn persist(project: &Path, pw: &str, contents: &mut vault::VaultContents, graph: &Graph) -> Result<()> {
-    contents.identities = graph
+/// Write the graph back. Identities are upserted in one transaction — SDD §9.2.
+fn persist(vault: &mut vault::Vault, graph: &Graph) -> Result<()> {
+    let identities: Vec<vault::StoredIdentity> = graph
         .nodes()
         .map(|n| vault::StoredIdentity {
             uuid: n.uuid.to_string(),
@@ -293,7 +293,7 @@ fn persist(project: &Path, pw: &str, contents: &mut vault::VaultContents, graph:
             status: "active".to_owned(),
         })
         .collect();
-    vault::save(&vault_path(project), pw, contents)?;
+    vault.put_identities(&identities)?;
     Ok(())
 }
 
@@ -321,20 +321,18 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
     let mut project_key = [0u8; 32];
     getrandom::fill(&mut project_key).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
 
-    let contents = vault::VaultContents {
+    let settings = vault::Settings {
         project_name: project
             .canonicalize()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "project".to_owned()),
+        root_path: project.display().to_string(),
         alias_style: format!("{style:?}").to_lowercase(),
         scope_strategy: "module".to_owned(),
         project_key,
-        identities: Vec::new(),
-        dictionary: Vec::new(),
-        allowlist: Vec::new(),
     };
-    vault::save(&path, &pw, &contents)?;
+    vault::Vault::create(&path, &pw, &settings)?;
 
     println!("Initialized vault at {}", path.display());
     println!("Alias style: {style:?}");
@@ -345,15 +343,9 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
 }
 
 fn add_term(project: &Path, name: &str, entity_type: EntityType, explicit: Option<&str>) -> Result<()> {
-    let (mut contents, pw) = open(project, explicit)?;
-    let type_name = entity_type.prefix().to_owned();
-
-    if contents.dictionary.iter().any(|(n, _)| n == name) {
-        println!("{name:?} is already in the dictionary");
-        return Ok(());
-    }
-    contents.dictionary.push((name.to_owned(), type_name));
-    vault::save(&vault_path(project), &pw, &contents)?;
+    let vault = open(project, explicit)?;
+    vault.add_term(name, entity_type.prefix())?;
+    vault.log("term.add", None, Some(1), None, None)?;
     println!("Added {name:?} as {}", entity_type.prefix());
     Ok(())
 }
@@ -379,11 +371,11 @@ fn require_parser(file: &Path, content: &str) -> Result<String> {
 }
 
 fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
-    let (contents, _) = open(project, explicit)?;
+    let vault = open(project, explicit)?;
     let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let parser = require_parser(file, &source)?;
 
-    let detector = detector_from(&contents)?;
+    let detector = detector_from(&vault)?;
     let findings = secrets::scan(&source);
     let redacted = secrets::redact(&source, &findings);
     let candidates = detector.scan_text(
@@ -420,12 +412,12 @@ fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
 }
 
 fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool, explicit: Option<&str>) -> Result<()> {
-    let (mut contents, pw) = open(project, explicit)?;
+    let mut vault = open(project, explicit)?;
     let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     require_parser(file, &source)?;
 
-    let mut graph = graph_from(&contents)?;
-    let detector = detector_from(&contents)?;
+    let mut graph = graph_from(&vault)?;
+    let detector = detector_from(&vault)?;
     let scope = file.to_string_lossy().replace('\\', "/");
 
     let result = sanitize::sanitize(&source, &scope, &detector, &mut graph)?;
@@ -435,9 +427,10 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
     let verdict = scanner.scan(&result.twin);
     let secret_findings = secrets::scan(&result.twin);
 
-    persist(project, &pw, &mut contents, &graph)?;
+    persist(&mut vault, &graph)?;
 
     if let verify::Verdict::Blocked(leaks) = &verdict {
+        vault.log("sanitize", Some(1), None, Some("blocked"), None)?;
         eprintln!("EXPORT BLOCKED — {} real name(s) survived into the twin:", leaks.len());
         for leak in leaks {
             eprintln!("  {}:{}:{}  {:?}", file.display(), leak.line, leak.column, leak.matched);
@@ -490,9 +483,9 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
 }
 
 fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
-    let (contents, _) = open(project, explicit)?;
+    let vault = open(project, explicit)?;
     let text = std::fs::read_to_string(file)?;
-    let graph = graph_from(&contents)?;
+    let graph = graph_from(&vault)?;
 
     let scanner = verify::LeakScanner::new(graph.real_names());
     let verdict = scanner.scan(&text);
@@ -525,13 +518,13 @@ fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()>
 }
 
 fn run_restore(project: &Path, input: Option<&Path>, explicit: Option<&str>) -> Result<()> {
-    let (contents, _) = open(project, explicit)?;
+    let vault = open(project, explicit)?;
     let text = match input {
         Some(path) => std::fs::read_to_string(path)?,
         None => std::io::read_to_string(std::io::stdin())?,
     };
 
-    let graph = graph_from(&contents)?;
+    let graph = graph_from(&vault)?;
     let outcome = restore::restore(&text, &Vocabulary::new(graph.vocabulary()));
     print!("{}", outcome.text);
 

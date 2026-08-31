@@ -546,7 +546,30 @@ hope detection was complete"* into *"nothing in the vault appears in the output.
 
 # 9. Mapping Vault
 
-Storage engine: SQLite + SQLCipher, via `rusqlite` with the bundled SQLCipher feature.
+Storage engine: **plain SQLite** (`rusqlite`, bundled amalgamation) with per-value
+**AES-256-GCM** on the sensitive columns — decision D-9.
+
+SQLCipher was specified and is not used: `bundled-sqlcipher-vendored-openssl` fails to build
+on a stock Windows toolchain, because vendored OpenSSL requires Strawberry Perl and NASM.
+Plain bundled SQLite builds in ~5 s on the same machine.
+
+Encrypted: `real_name`, `scope_path`, file paths, project name, dictionary and allowlist
+terms, and the project key. Plaintext: `alias`, `uuid`, `entity_type`, `origin`, `status`,
+byte offsets, and row counts — the first four are sent to the model by design, and the rest
+are the cost of using SQL as the engine.
+
+**Residual leak, stated:** an attacker holding the file learns how many identities the
+project has and of what types, but not one name.
+
+Two supporting mechanisms:
+
+- **Blind index.** AES-GCM is randomized, so an encrypted column can carry neither a UNIQUE
+  constraint nor an equality lookup. Each searchable column also stores
+  `HMAC(index_key, value)`. This is what makes the §5 identity uniqueness constraint
+  enforceable over ciphertext.
+- **Associated data.** Every value is sealed with AAD naming its table, column, and row, so
+  a ciphertext cannot be relocated — swapping two identities' names while the authentication
+  tags still verify.
 
 ## 9.1 Schema
 

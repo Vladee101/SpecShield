@@ -21,3 +21,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Tauri / frontend build output
+/app/dist/
+/app/src-tauri/gen/

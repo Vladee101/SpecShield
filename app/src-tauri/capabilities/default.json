@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Minimum surface for Workflow A. Deliberately grants no network, no shell, and no arbitrary filesystem access: SpecShield claims to work offline (PRD §10), and a capability that could reach the network would make that claim untestable.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

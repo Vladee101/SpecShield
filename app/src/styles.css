@@ -1,0 +1,90 @@
+/* Deliberately small and dependency-free: a design system is not what M2 is
+   for, and every dependency added here is one more thing shipping inside a
+   security tool. */
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --panel-2: #1e222b;
+  --line: #2a2f3a;
+  --text: #e6e8ec;
+  --muted: #9aa1ad;
+  --ok: #3fb950;
+  --block: #f85149;
+  --warn: #d29922;
+  --accent: #58a6ff;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 13px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: #06121f; border-color: transparent; font-weight: 600; }
+
+input, textarea, select {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  width: 100%;
+}
+textarea { font-family: var(--mono); font-size: 12.5px; min-height: 220px; resize: vertical; }
+
+.app { max-width: 1040px; margin: 0 auto; padding: 22px; }
+.row { display: flex; gap: 10px; align-items: center; }
+.grow { flex: 1; }
+.muted { color: var(--muted); }
+.small { font-size: 12.5px; }
+.mono { font-family: var(--mono); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+
+.steps { display: flex; gap: 6px; margin-bottom: 18px; flex-wrap: wrap; }
+.step {
+  padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); font-size: 12.5px; background: var(--panel);
+}
+.step.active { color: var(--text); border-color: var(--accent); }
+.step.done { color: var(--ok); border-color: var(--ok); }
+
+.banner { border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; border: 1px solid; }
+.banner.ok { border-color: var(--ok); background: rgba(63, 185, 80, 0.08); }
+.banner.block { border-color: var(--block); background: rgba(248, 81, 73, 0.09); }
+.banner.warn { border-color: var(--warn); background: rgba(210, 153, 34, 0.09); }
+
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; }
+td.mono { font-family: var(--mono); }
+
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: 4px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+}
+.scroll { max-height: 260px; overflow-y: auto; }
+.error { color: var(--block); }

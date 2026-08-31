@@ -11,12 +11,13 @@ publish.workspace = true
 aes-gcm = "0.11.1"
 argon2 = "0.6.0"
 getrandom = "0.4.3"
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+hmac.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2.workspace = true
 specshield-core.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-zeroize = "1.9.0"
+zeroize = { version = "1.9.0", features = ["derive"] }
 
 [lints]
 workspace = true

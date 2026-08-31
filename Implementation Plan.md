@@ -43,18 +43,36 @@ retained as the rationale trail; reopening any of them after M1 means a vault mi
 | D-6 | Secrets handling | **One-way redaction, separate from the identity graph** (Review A2) |
 | D-7 | YAML/JSON libraries | CST-preserving parsers, not serde round-trip (Review C2) |
 | D-8 | Tauri version | **v2** |
-| D-9 | **Vault storage engine** (raised in M1) | **Open.** SQLCipher via `bundled-sqlcipher-vendored-openssl` does not build on a stock Windows toolchain — vendored OpenSSL needs Strawberry Perl and NASM. Plain `bundled` SQLite builds in 5 s, so the blocker is OpenSSL. Shipping an AES-256-GCM + Argon2id file vault meanwhile. See below. |
+| D-9 | **Vault storage engine** (raised in M1) | **Resolved: option B.** Plain SQLite (bundled) with per-value AES-256-GCM on sensitive columns, plus an HMAC blind index for lookup and uniqueness. |
 
-### D-9 — the storage decision you still owe
+### D-9 — resolved
 
-| Option | Gets you | Costs you |
-|---|---|---|
-| **A. SQLCipher** (as specified) | Whole-file encryption; row counts, entity types, and aliases all hidden | Every dev machine and CI runner needs Perl + NASM, or a system OpenSSL |
-| **B. Plain SQLite + AEAD columns** | Real schema, migrations, incremental writes, query; pure-Rust crypto | Metadata leaks: an attacker with the file sees how many entities and of what types |
-| **C. AEAD file vault** *(shipped in M1)* | Nothing on disk in plaintext, no C toolchain, works everywhere today | No incremental writes, no occurrence or edge tables, no migrations; whole vault rewritten per change |
+SQLCipher via `bundled-sqlcipher-vendored-openssl` does not build on a stock
+Windows toolchain: vendored OpenSSL needs Strawberry Perl and NASM, and its
+`Configure` step aborts without them. Plain bundled SQLite builds in ~5 s on the
+same machine, so the blocker is OpenSSL, not SQLite.
 
-C is fine while the vault holds hundreds of identities. It stops being fine at
-repository scale, which is M4. **Decide before M4 starts.**
+| Option | Gets you | Costs you | |
+|---|---|---|---|
+| **A.** SQLCipher | Whole-file encryption; row counts and types hidden too | Perl + NASM on every dev machine and CI runner | rejected |
+| **B.** Plain SQLite + AEAD columns | Real schema, migrations, incremental writes, query; pure-Rust crypto | Metadata: identity counts and entity types are visible in the file | **chosen** |
+| **C.** AEAD file vault (M1 stopgap) | No plaintext on disk, no C toolchain | No incremental writes, no migrations, whole vault rewritten per change | replaced |
+
+**The stated leak, which belongs in the security one-pager:** an attacker
+holding the vault file learns how many identities the project has and of what
+types, but not a single name. Aliases are deliberately plaintext — they are what
+gets sent to the model anyway.
+
+Two mechanisms make encrypted columns workable and are easy to get wrong:
+
+- **Blind index.** AES-GCM is randomized, so the same name encrypts differently
+  every time and an encrypted column can carry neither a `UNIQUE` constraint nor
+  an equality lookup. Each searchable column stores
+  `HMAC(index_key, value)` alongside the ciphertext. That is what makes the
+  SDD §5 identity uniqueness constraint enforceable at all.
+- **Associated data.** Every value is sealed with AAD naming its table, column,
+  and row. Without it, a ciphertext could be moved between rows — swapping two
+  identities' real names while every authentication tag still verified.
 
 ---
 
@@ -264,6 +282,11 @@ by landing parsers, with no change to the targets.
 ### M2 — Desktop shell, Workflow A end-to-end · weeks 5–6
 
 First demoable build. PRD Workflow A complete.
+
+**Status: started.** Tauri v2 shell builds, frontend typechecks and bundles, and
+every screen of Workflow A is wired to real engine commands. Remaining: the
+Windows clipboard shim (see below), a file picker in place of paste-in
+textareas, and interactive passphrase entry.
 
 **Deliverables**
 - Tauri v2 shell; capability set with **no** `http`/`shell` permissions; CSP locked down.

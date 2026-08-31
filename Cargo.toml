@@ -9,6 +9,7 @@ members = [
     "crates/cli",
     "spikes/ts-rename",
     "spikes/alias-roundtrip",
+    "app/src-tauri",
 ]
 
 [workspace.package]

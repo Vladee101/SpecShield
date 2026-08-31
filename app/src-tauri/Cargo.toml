@@ -1,0 +1,28 @@
+[package]
+name = "specshield-app"
+description = "Tauri v2 desktop shell over specshield-core. Holds no logic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "specshield_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+specshield-core.workspace = true
+specshield-vault.workspace = true
+specshield-parsers.workspace = true
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+getrandom = "0.4.3"
+
+[lints]
+workspace = true
