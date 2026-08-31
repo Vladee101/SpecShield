@@ -1,0 +1,20 @@
+{
+  "description": "Prose entities: org names, business terminology, and service names in a requirements document. No code, so every detection comes from the rule engine and dictionary rather than an AST.",
+  "entities": [
+    { "real_name": "Vantor", "entity_type": "organization", "scope_path": "project" },
+    { "real_name": "Meridian Freight", "entity_type": "organization", "scope_path": "project" },
+    { "real_name": "Paylane", "entity_type": "organization", "scope_path": "project" },
+    { "real_name": "SubscriptionService", "entity_type": "service", "scope_path": "project" },
+    { "real_name": "InvoiceService", "entity_type": "service", "scope_path": "project" },
+    { "real_name": "NotificationService", "entity_type": "service", "scope_path": "project" },
+    { "real_name": "BillingApi", "entity_type": "api", "scope_path": "project" },
+    { "real_name": "CustomerSubscription", "entity_type": "dto", "scope_path": "project" },
+    { "real_name": "PlanTier", "entity_type": "enum", "scope_path": "project" },
+    { "real_name": "SubscriptionCreated", "entity_type": "event", "scope_path": "project" },
+    { "real_name": "InvoiceIssued", "entity_type": "event", "scope_path": "project" },
+    { "real_name": "billing.vantor.internal", "entity_type": "host", "scope_path": "project" },
+    { "real_name": "VANTOR_BILLING_URL", "entity_type": "env_var", "scope_path": "project" },
+    { "real_name": "PAYLANE_WEBHOOK_SECRET", "entity_type": "env_var", "scope_path": "project" }
+  ],
+  "never_alias": ["Postgres", "React", "TypeScript", "Node", "Express", "OpenAPI"]
+}

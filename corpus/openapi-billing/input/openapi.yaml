@@ -1,0 +1,87 @@
+openapi: 3.1.0
+info:
+  title: BillingApi
+  version: "2.4.0"
+  description: Vantor billing surface for freight broker integrators.
+
+servers:
+  - url: https://billing.vantor.internal
+
+paths:
+  /subscriptions:
+    post:
+      operationId: createSubscription
+      summary: Open a CustomerSubscription for a broker account.
+      tags: [SubscriptionService]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubscription"
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CustomerSubscription"
+
+  /invoices/{invoiceId}:
+    get:
+      operationId: getInvoice
+      summary: Fetch a single invoice.
+      tags: [InvoiceService]
+      parameters:
+        - name: invoiceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvoiceSummary"
+
+components:
+  schemas:
+    PlanTier:
+      type: string
+      enum: [trial, standard, enterprise]
+
+    CreateSubscription:
+      type: object
+      required: [customerId, planTier]
+      properties:
+        customerId:
+          type: string
+          format: uuid
+        planTier:
+          $ref: "#/components/schemas/PlanTier"
+
+    CustomerSubscription:
+      type: object
+      properties:
+        subscriptionId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        planTier:
+          $ref: "#/components/schemas/PlanTier"
+
+    InvoiceSummary:
+      type: object
+      properties:
+        invoiceId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        amountCents:
+          type: integer
+          format: int64

@@ -1,0 +1,231 @@
+{
+  "description": "Deliberately hostile inputs (SDD \u00a719). Each fixture targets a specific way the pipeline can silently produce a wrong result rather than an error \u2014 silence is the failure mode that matters in a security tool.",
+  "entities": [
+    {
+      "real_name": "Status",
+      "entity_type": "enum",
+      "scope_path": "modules/order-status.ts::Status",
+      "files": [
+        "modules/order-status.ts"
+      ],
+      "note": "one of three unrelated Status enums; one alias for all three would break the twin and make restore ambiguous"
+    },
+    {
+      "real_name": "Status",
+      "entity_type": "enum",
+      "scope_path": "modules/payment-status.ts::Status",
+      "files": [
+        "modules/payment-status.ts"
+      ]
+    },
+    {
+      "real_name": "Status",
+      "entity_type": "enum",
+      "scope_path": "modules/invoice-status.ts::Status",
+      "files": [
+        "modules/invoice-status.ts"
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.account.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        3,
+        8
+      ],
+      "note": "ten identities sharing one name, differing only by scope"
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        9,
+        14
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        15,
+        20
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.refund.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        21,
+        26
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.dunning_event.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        27,
+        32
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.usage_record.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        33,
+        38
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.credit_note.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        39,
+        44
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.tax_line.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        45,
+        50
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payout.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        51,
+        56
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.audit_entry.customer_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        57,
+        62
+      ]
+    },
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "files": [
+        "homoglyph.md"
+      ]
+    },
+    {
+      "real_name": "V\u0430ntor",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "files": [
+        "homoglyph.md"
+      ],
+      "note": "Cyrillic U+0430 in place of Latin a; a byte-exact detector finds one and misses the other"
+    },
+    {
+      "real_name": "CreateSubscriptionDto",
+      "entity_type": "dto",
+      "scope_path": "secret-beside-dto.ts::CreateSubscriptionDto",
+      "files": [
+        "secret-beside-dto.ts"
+      ],
+      "note": "pseudonymized two-way, three lines from a secret that must be redacted one-way"
+    },
+    {
+      "real_name": "CustomerSubscription",
+      "entity_type": "dto",
+      "scope_path": "shadowed.ts::CustomerSubscription",
+      "files": [
+        "shadowed.ts"
+      ]
+    }
+  ],
+  "secrets": [
+    {
+      "file": "planted-secrets.env",
+      "match": "AKIAIOSFODNN7EXAMPLE",
+      "secret_type": "aws_access_key_id"
+    },
+    {
+      "file": "planted-secrets.env",
+      "match": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      "secret_type": "aws_secret_access_key"
+    },
+    {
+      "file": "planted-secrets.env",
+      "match": "postgres://billing_app:hunter2@db.example.test:5432/billing",
+      "secret_type": "connection_string"
+    },
+    {
+      "file": "planted-secrets.env",
+      "match": "whsec_000000000000000000000000000000000000",
+      "secret_type": "webhook_secret"
+    },
+    {
+      "file": "planted-secrets.env",
+      "match": "billing-ops@example.test",
+      "secret_type": "email",
+      "confidence": "low"
+    },
+    {
+      "file": "secret-beside-dto.ts",
+      "match": "sk_test_00000000000000000000000000000000",
+      "secret_type": "api_key"
+    }
+  ],
+  "never_alias": [
+    "MAX_RETRIES",
+    "DEFAULT_TIMEOUT",
+    "HTTP_OK",
+    "SERVICE_H7K2Q3",
+    "DTO_M4X2Q7",
+    "subscription",
+    "subscription_label"
+  ],
+  "negative_files": [
+    "aliases-in-text.ts"
+  ],
+  "negative_note": "Files where zero detections are expected. Every detection here is a false positive and counts against the PRD \u00a75 precision target: alias-shaped tokens inside strings and comments are not identities, and SCREAMING_SNAKE constants are not aliases."
+}

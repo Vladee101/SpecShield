@@ -1,0 +1,119 @@
+{
+  "description": "Tables and columns, including the repeated customer_id case: one name, three scopes, three identities. Collapsing them by name breaks both anonymization and restore (Design Review B1).",
+  "entities": [
+    {
+      "real_name": "customer_subscription",
+      "entity_type": "table",
+      "scope_path": "billing.public.customer_subscription"
+    },
+    {
+      "real_name": "invoice",
+      "entity_type": "table",
+      "scope_path": "billing.public.invoice"
+    },
+    {
+      "real_name": "payment_attempt",
+      "entity_type": "table",
+      "scope_path": "billing.public.payment_attempt"
+    },
+    {
+      "real_name": "plan_tier",
+      "entity_type": "enum",
+      "scope_path": "billing.public.plan_tier"
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.customer_id",
+      "line_range": [
+        6,
+        16
+      ],
+      "note": "same name as the two below; distinct identity"
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.customer_id",
+      "line_range": [
+        18,
+        24
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.customer_id",
+      "line_range": [
+        26,
+        33
+      ]
+    },
+    {
+      "real_name": "subscription_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.subscription_id",
+      "line_range": [
+        6,
+        12
+      ]
+    },
+    {
+      "real_name": "invoice_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.invoice_id",
+      "line_range": [
+        18,
+        24
+      ]
+    },
+    {
+      "real_name": "amount_cents",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.amount_cents",
+      "line_range": [
+        18,
+        24
+      ]
+    },
+    {
+      "real_name": "attempt_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.attempt_id",
+      "line_range": [
+        26,
+        33
+      ]
+    },
+    {
+      "real_name": "paylane_charge_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.paylane_charge_id",
+      "line_range": [
+        26,
+        33
+      ]
+    },
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "tier",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.tier",
+      "line_range": [
+        6,
+        12
+      ]
+    }
+  ],
+  "never_alias": [
+    "Postgres",
+    "UUID",
+    "TIMESTAMPTZ",
+    "BIGINT",
+    "BOOLEAN"
+  ]
+}
