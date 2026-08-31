@@ -1,0 +1,24 @@
+[package]
+name = "specshield-cli"
+description = "Headless driver over specshield-core: the CI and golden-corpus harness."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "specshield"
+path = "src/main.rs"
+
+[dependencies]
+specshield-core.workspace = true
+specshield-vault.workspace = true
+specshield-index.workspace = true
+specshield-parsers.workspace = true
+specshield-git.workspace = true
+anyhow.workspace = true
+clap = { version = "4.6.6", features = ["derive"] }
+
+[lints]
+workspace = true

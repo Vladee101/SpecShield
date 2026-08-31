@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/parsers",
+    "crates/vault",
+    "crates/index",
+    "crates/git",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+specshield-core = { path = "crates/core" }
+specshield-parsers = { path = "crates/parsers" }
+specshield-vault = { path = "crates/vault" }
+specshield-index = { path = "crates/index" }
+specshield-git = { path = "crates/git" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+blake3 = "1"
+hmac = "0.12"
+sha2 = "0.10"
+data-encoding = "2"
+aho-corasick = "1"
+regex = "1"
+similar = "2"
+rayon = "1"
+tracing = "0.1"
+
+proptest = "1"
+insta = "1"
+
+# Lint policy is defined once here and inherited by every crate via
+# `[lints] workspace = true`. CI runs clippy with `-D warnings`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Dev-time builds of the C-heavy dependencies (SQLCipher, Tree-sitter grammars)
+# are unusably slow at opt-level 0. Build our own code unoptimized, everything
+# else optimized.
+[profile.dev.package."*"]
+opt-level = 2

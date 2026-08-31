@@ -1,0 +1,16 @@
+# Proper nouns that appear in prose documentation and are not code items.
+# ".." keeps clippy's own default list rather than replacing it.
+doc-valid-idents = [
+    "SpecShield",
+    "OpenAPI",
+    "SQLCipher",
+    "SQLite",
+    "TypeScript",
+    "JavaScript",
+    "PostgreSQL",
+    "GitHub",
+    "BLAKE3",
+    "Crockford",
+    "Argon2id",
+    "..",
+]

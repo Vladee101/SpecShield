@@ -1,0 +1,23 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Tauri (M2)
+/app/node_modules/
+/app/dist/
+/app/src-tauri/target/
+
+# SpecShield working data. None of this may ever be committed: vaults hold
+# real names, and twins are derived from real projects.
+*.specshield
+*.specshield-vault
+/.specshield/
+*.vault
+*.key
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

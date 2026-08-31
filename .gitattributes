@@ -1,0 +1,17 @@
+# Normalize to LF in the repository; check out native on Windows.
+* text=auto
+
+# Keep source and fixtures LF on disk so byte-for-byte round-trip assertions
+# and snapshot tests behave identically on every platform. This matters more
+# here than in most projects: the core invariant is a byte comparison.
+*.rs      text eol=lf
+*.toml    text eol=lf
+*.sql     text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.md      text eol=lf
+*.snap    text eol=lf
+
+# Corpus fixtures are compared byte-for-byte; never touch them.
+/corpus/** -text

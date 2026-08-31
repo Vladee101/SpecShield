@@ -392,13 +392,32 @@ Style is fixed at project creation. Changing it requires a re-key (§9.5).
 ## 6.3 Alias grammar
 
 ```
-alias      := prefix "_" suffix [ "_" disambiguator ]
-prefix     := [A-Z][A-Za-z0-9]*
-suffix     := [A-Z0-9]{3,8}
+alias         := prefix "_" suffix [ "_" disambiguator ]
+prefix        := [A-Z] [A-Za-z0-9_]*        -- underscores allowed
+suffix        := [A-Z0-9]{3,8}              -- must contain >= 1 digit
+disambiguator := [0-9]+
 ```
+
+Two constraints are load-bearing and were both found by implementing the
+matcher rather than by reading the grammar:
+
+- **The prefix admits underscores.** `DB_TABLE` is a prefix in §4.4, so a
+  prefix production of `[A-Z][A-Za-z0-9]*` cannot parse its own aliases.
+  The prefix/suffix split is therefore taken at the *rightmost* underscore.
+- **The suffix must contain at least one digit.** Without it, `MAX_RETRIES`,
+  `HTTP_OK`, and `DEFAULT_TIMEOUT` are all grammatical aliases, and every
+  `SCREAMING_SNAKE` constant in a model's response would be reported as an
+  unresolved identity (§12) — drowning the real ones and making the flow
+  unusable. Derivation satisfies the rule by scanning forward through the
+  encoded digest for the first digit-bearing window, which keeps it
+  deterministic; roughly 11% of raw windows are all-letters.
 
 The grammar is frozen before the first release. It is embedded in the vault's
 `schema_version` contract because every stored alias depends on it.
+
+The prompt envelope (§11) deliberately quotes a *looser* pattern than the
+matcher enforces. A model does not need the digit rule explained to it, and a
+looser pattern makes a drifted token more likely to remain recognisable.
 
 ## 6.4 Canonical form (drift tolerance)
 
@@ -669,7 +688,7 @@ merely assumed.
 Restore reliability depends substantially on whether the model was told the placeholders
 are opaque. SpecShield generates the instruction and copies it with the twin:
 
-> Tokens matching `^[A-Z][A-Za-z0-9]*_[A-Z0-9]{3,8}$` are opaque anonymized identifiers.
+> Tokens matching `^[A-Z][A-Za-z0-9_]*_[A-Z0-9]{3,8}$` are opaque anonymized identifiers.
 > Preserve them exactly — do not rename, expand, translate, pluralize, or reformat them.
 > If you introduce a new entity, name it `NEW_<n>` and list every such name at the end of
 > your response.

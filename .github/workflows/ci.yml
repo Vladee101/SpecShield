@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on warnings everywhere, not just in the clippy job.
+  RUSTFLAGS: -D warnings
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the primary target and the one where the SQLCipher build
+        # is most likely to break (Design Review C6 risk register); macOS and
+        # Linux keep the key-management abstraction honest across all three
+        # credential stores.
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Intra-doc links carry the SDD cross-references; a broken one means the
+      # code and the spec have drifted.
+      - run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  # ---------------------------------------------------------------------------
+  # Milestone gates. Each becomes a required check as its milestone lands; they
+  # are the PRD §5 success metrics, enforced rather than aspirational.
+  #
+  # M1  corpus:   detection recall >= 0.95, precision >= 0.90
+  #               `specshield report --corpus corpus/`
+  # M1  roundtrip: restore(sanitize(x)) == x byte-for-byte, 0 silent failures
+  #               (proptest, runs inside `cargo test` once the engine lands)
+  # M1  leakgate: 0 vault real-names in any generated twin
+  #               `specshield verify` exits non-zero on a leak
+  # M4  perf:     cold index of the 1k-file reference project < 30 s
+  #               `cargo bench` against bench/, compared to a stored baseline
+  # M6  offline:  0 outbound connections with egress blocked
+  #               (network namespace + strace, Linux runner only)
+  # ---------------------------------------------------------------------------
