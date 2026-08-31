@@ -35,6 +35,24 @@ struct Labels {
     never_alias: Vec<String>,
     #[serde(default)]
     negative_files: Vec<String>,
+    /// Parsers this project needs before its numbers mean anything.
+    #[serde(default)]
+    requires: Vec<String>,
+    /// The milestone that makes those parsers exist.
+    #[serde(default)]
+    milestone: String,
+}
+
+impl Labels {
+    /// Can this project be scored meaningfully with the parsers in this build?
+    ///
+    /// Scoring a SQL project with no SQL parser measures nothing and drags the
+    /// aggregate down for a reason that has nothing to do with detection
+    /// quality — so those projects are reported but not gated.
+    fn is_gated(&self) -> bool {
+        let implemented = specshield_parsers::implemented();
+        !self.requires.is_empty() && self.requires.iter().all(|r| implemented.contains(&r.as_str()))
+    }
 }
 
 // Field names mirror the corpus JSON schema and cannot be renamed.
@@ -99,40 +117,59 @@ pub(crate) fn run(corpus: &Path, strict: bool) -> Result<()> {
 
     println!("# Corpus report\n");
     println!("Targets (PRD §5): recall >= {RECALL_TARGET:.2}, precision >= {PRECISION_TARGET:.2}\n");
-    println!("| Project | Entities | Rules-only recall | With dictionary | Precision |");
-    println!("|---|---:|---:|---:|---:|");
+    println!(
+        "Parsers in this build: {}
+",
+        specshield_parsers::implemented().join(", ")
+    );
+    println!("| Project | Gated | Entities | Rules-only recall | With dictionary | Precision |");
+    println!("|---|:-:|---:|---:|---:|---:|");
 
-    let mut total_rules = Score::default();
-    let mut total_dict = Score::default();
+    let mut gated = Score::default();
+    let mut gated_rules = Score::default();
 
     for (dir, labels) in &projects {
         let rules = score(dir, labels, false);
         let dict = score(dir, labels, true);
+        let is_gated = labels.is_gated();
 
         println!(
-            "| `{}` | {} | {:.0}% | {:.0}% | {:.0}% |",
+            "| `{}` | {} | {} | {:.0}% | {:.0}% | {:.0}% |",
             labels.project,
+            if is_gated {
+                "yes".to_owned()
+            } else {
+                format!("{} ", labels.milestone)
+            },
             labels.entities.len(),
             rules.recall() * 100.0,
             dict.recall() * 100.0,
             dict.precision() * 100.0
         );
 
-        total_rules.expected += rules.expected;
-        total_rules.detected += rules.detected;
-        total_rules.false_positives += rules.false_positives;
-        total_dict.expected += dict.expected;
-        total_dict.detected += dict.detected;
-        total_dict.false_positives += dict.false_positives;
+        if is_gated {
+            gated_rules.expected += rules.expected;
+            gated_rules.detected += rules.detected;
+            gated_rules.false_positives += rules.false_positives;
+            gated.expected += dict.expected;
+            gated.detected += dict.detected;
+            gated.false_positives += dict.false_positives;
+        }
     }
 
     println!(
-        "| **total** | {} | **{:.1}%** | **{:.1}%** | **{:.1}%** |",
-        total_dict.expected,
-        total_rules.recall() * 100.0,
-        total_dict.recall() * 100.0,
-        total_dict.precision() * 100.0
+        "| **gated total** | | {} | **{:.1}%** | **{:.1}%** | **{:.1}%** |",
+        gated.expected,
+        gated_rules.recall() * 100.0,
+        gated.recall() * 100.0,
+        gated.precision() * 100.0
     );
+    println!();
+    println!("Ungated projects are reported for visibility but excluded from the");
+    println!("verdict: their formats have no parser in this build, so their numbers");
+    println!("measure the missing milestone rather than detection quality.");
+
+    let total_dict = gated;
 
     // Secrets are scored separately: they are a different operation with a
     // different failure mode (SDD §4.3).

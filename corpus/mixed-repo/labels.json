@@ -173,6 +173,13 @@
     }
   ],
   "secrets": [],
+  "requires": [
+    "markdown",
+    "sql",
+    "yaml",
+    "typescript"
+  ],
+  "milestone": "M4",
   "negative_files": [],
   "never_alias": [
     "npm",

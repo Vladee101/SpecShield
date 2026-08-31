@@ -974,6 +974,7 @@ version = "0.1.0"
 dependencies = [
  "specshield-core",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]

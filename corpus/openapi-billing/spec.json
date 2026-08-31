@@ -1,20 +1,86 @@
 {
-  "description": "Endpoints, operationIds, and schema names. CustomerSubscription and PlanTier here must unify with the SQL table and the TypeScript DTO into one identity carrying one alias (SDD §5).",
+  "description": "Endpoints, operationIds, and schema names. CustomerSubscription and PlanTier here must unify with the SQL table and the TypeScript DTO into one identity carrying one alias (SDD \u00a75).",
   "entities": [
-    { "real_name": "BillingApi", "entity_type": "api", "scope_path": "#/info/title" },
-    { "real_name": "createSubscription", "entity_type": "endpoint", "scope_path": "#/paths/~1subscriptions/post" },
-    { "real_name": "getInvoice", "entity_type": "endpoint", "scope_path": "#/paths/~1invoices~1{invoiceId}/get" },
-    { "real_name": "CustomerSubscription", "entity_type": "dto", "scope_path": "#/components/schemas/CustomerSubscription", "note": "unifies with the SQL table customer_subscription and the TS interface" },
-    { "real_name": "CreateSubscription", "entity_type": "dto", "scope_path": "#/components/schemas/CreateSubscription" },
-    { "real_name": "InvoiceSummary", "entity_type": "dto", "scope_path": "#/components/schemas/InvoiceSummary" },
-    { "real_name": "PlanTier", "entity_type": "enum", "scope_path": "#/components/schemas/PlanTier" },
-    { "real_name": "SubscriptionService", "entity_type": "service", "scope_path": "project" },
-    { "real_name": "InvoiceService", "entity_type": "service", "scope_path": "project" },
-    { "real_name": "Vantor", "entity_type": "organization", "scope_path": "project" },
-    { "real_name": "billing.vantor.internal", "entity_type": "host", "scope_path": "#/servers/0/url" },
-    { "real_name": "invoiceId", "entity_type": "column", "scope_path": "#/components/schemas/InvoiceSummary.invoiceId" },
-    { "real_name": "customerId", "entity_type": "column", "scope_path": "#/components/schemas/CustomerSubscription.customerId" },
-    { "real_name": "amountCents", "entity_type": "column", "scope_path": "#/components/schemas/InvoiceSummary.amountCents" }
+    {
+      "real_name": "BillingApi",
+      "entity_type": "api",
+      "scope_path": "#/info/title"
+    },
+    {
+      "real_name": "createSubscription",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1subscriptions/post"
+    },
+    {
+      "real_name": "getInvoice",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1invoices~1{invoiceId}/get"
+    },
+    {
+      "real_name": "CustomerSubscription",
+      "entity_type": "dto",
+      "scope_path": "#/components/schemas/CustomerSubscription",
+      "note": "unifies with the SQL table customer_subscription and the TS interface"
+    },
+    {
+      "real_name": "CreateSubscription",
+      "entity_type": "dto",
+      "scope_path": "#/components/schemas/CreateSubscription"
+    },
+    {
+      "real_name": "InvoiceSummary",
+      "entity_type": "dto",
+      "scope_path": "#/components/schemas/InvoiceSummary"
+    },
+    {
+      "real_name": "PlanTier",
+      "entity_type": "enum",
+      "scope_path": "#/components/schemas/PlanTier"
+    },
+    {
+      "real_name": "SubscriptionService",
+      "entity_type": "service",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "InvoiceService",
+      "entity_type": "service",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "billing.vantor.internal",
+      "entity_type": "host",
+      "scope_path": "#/servers/0/url"
+    },
+    {
+      "real_name": "invoiceId",
+      "entity_type": "column",
+      "scope_path": "#/components/schemas/InvoiceSummary.invoiceId"
+    },
+    {
+      "real_name": "customerId",
+      "entity_type": "column",
+      "scope_path": "#/components/schemas/CustomerSubscription.customerId"
+    },
+    {
+      "real_name": "amountCents",
+      "entity_type": "column",
+      "scope_path": "#/components/schemas/InvoiceSummary.amountCents"
+    }
   ],
-  "never_alias": ["OpenAPI", "uuid", "int64"]
+  "never_alias": [
+    "OpenAPI",
+    "uuid",
+    "int64"
+  ],
+  "requires": [
+    "yaml",
+    "openapi"
+  ],
+  "milestone": "M3"
 }

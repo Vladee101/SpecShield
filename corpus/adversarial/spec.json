@@ -227,5 +227,11 @@
   "negative_files": [
     "aliases-in-text.ts"
   ],
-  "negative_note": "Files where zero detections are expected. Every detection here is a false positive and counts against the PRD \u00a75 precision target: alias-shaped tokens inside strings and comments are not identities, and SCREAMING_SNAKE constants are not aliases."
+  "negative_note": "Files where zero detections are expected. Every detection here is a false positive and counts against the PRD \u00a75 precision target: alias-shaped tokens inside strings and comments are not identities, and SCREAMING_SNAKE constants are not aliases.",
+  "requires": [
+    "typescript",
+    "sql",
+    "markdown"
+  ],
+  "milestone": "M4"
 }

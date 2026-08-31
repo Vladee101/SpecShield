@@ -233,6 +233,10 @@
     }
   ],
   "secrets": [],
+  "requires": [
+    "sql"
+  ],
+  "milestone": "M3",
   "negative_files": [],
   "never_alias": [
     "Postgres",

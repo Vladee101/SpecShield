@@ -156,6 +156,8 @@ def build(project: Path) -> dict:
         "occurrence_count": sum(len(e["occurrences"]) for e in entities),
         "entities": entities,
         "secrets": secrets,
+        "requires": spec.get("requires", []),
+        "milestone": spec.get("milestone", ""),
         "negative_files": negative,
         "never_alias": spec.get("never_alias", []),
         "ignored_paths": spec.get("ignored_paths", []),

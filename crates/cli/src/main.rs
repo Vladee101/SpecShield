@@ -65,6 +65,18 @@ enum Command {
         passphrase: Option<String>,
     },
 
+    /// Report what would be detected in a file, without producing a twin.
+    ///
+    /// The review step of Workflow A: see the entities, secrets, and
+    /// suggestions before anything is aliased.
+    Scan {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        file: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
     /// Generate the semantic twin for a file, verify it, and print it.
     Sanitize {
         #[arg(long, default_value = ".")]
@@ -173,6 +185,11 @@ fn main() -> Result<()> {
             entity_type,
             passphrase,
         } => add_term(&project, &name, entity_type.into(), passphrase.as_deref()),
+        Command::Scan {
+            project,
+            file,
+            passphrase,
+        } => run_scan(&project, &file, passphrase.as_deref()),
         Command::Sanitize {
             project,
             file,
@@ -341,9 +358,71 @@ fn add_term(project: &Path, name: &str, entity_type: EntityType, explicit: Optio
     Ok(())
 }
 
+/// Refuse to process a format we have no parser for.
+///
+/// Running the prose scan over a TypeScript file would alias the names it
+/// happens to recognise and silently leave every declaration, import, and
+/// property untouched — producing a twin that *looks* sanitized and is not. A
+/// tool whose whole job is preventing leaks must not do that; it says no.
+fn require_parser(file: &Path, content: &str) -> Result<String> {
+    match specshield_parsers::for_document(file, content) {
+        Some(parser) => Ok(parser.name().to_owned()),
+        None => bail!(
+            "no parser for {} in this build (have: {}).\n\
+             Refusing to process it: the prose scan alone would produce a twin that\n\
+             looks sanitized but leaves declarations and identifiers untouched.\n\
+             SQL and YAML arrive in M3; TypeScript in M4.",
+            file.display(),
+            specshield_parsers::implemented().join(", ")
+        ),
+    }
+}
+
+fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
+    let (contents, _) = open(project, explicit)?;
+    let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let parser = require_parser(file, &source)?;
+
+    let detector = detector_from(&contents)?;
+    let findings = secrets::scan(&source);
+    let redacted = secrets::redact(&source, &findings);
+    let candidates = detector.scan_text(
+        &redacted,
+        &file.to_string_lossy().replace('\\', "/"),
+        specshield_core::model::OccurrenceKind::Reference,
+    );
+
+    let (confident, suggestions): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|c| c.confidence >= sanitize::AUTO_APPLY_CONFIDENCE);
+
+    println!("{} ({parser})\n", file.display());
+    println!("{} entit(ies) would be aliased:", confident.len());
+    for c in &confident {
+        println!("  {:>5}  {:<10} {}", c.byte_start, c.entity_type.prefix(), c.real_name);
+    }
+    if !suggestions.is_empty() {
+        println!(
+            "\n{} suggestion(s) NOT applied — confirm with `term`:",
+            suggestions.len()
+        );
+        for c in &suggestions {
+            println!("  {:>5}  {:.2}       {}", c.byte_start, c.confidence, c.real_name);
+        }
+    }
+    if !findings.is_empty() {
+        println!("\n{} secret(s) would be redacted one-way:", findings.len());
+        for f in &findings {
+            println!("  line {:<4} {:?}  {}", f.line, f.confidence, f.secret_type);
+        }
+    }
+    Ok(())
+}
+
 fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool, explicit: Option<&str>) -> Result<()> {
     let (mut contents, pw) = open(project, explicit)?;
     let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    require_parser(file, &source)?;
 
     let mut graph = graph_from(&contents)?;
     let detector = detector_from(&contents)?;

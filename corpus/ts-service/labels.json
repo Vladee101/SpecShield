@@ -527,6 +527,10 @@
     }
   ],
   "secrets": [],
+  "requires": [
+    "typescript"
+  ],
+  "milestone": "M4",
   "negative_files": [],
   "never_alias": [
     "Promise",

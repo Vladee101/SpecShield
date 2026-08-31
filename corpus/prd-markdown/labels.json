@@ -269,6 +269,10 @@
     }
   ],
   "secrets": [],
+  "requires": [
+    "markdown"
+  ],
+  "milestone": "M1",
   "negative_files": [],
   "never_alias": [
     "Postgres",

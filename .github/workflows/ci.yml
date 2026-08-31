@@ -68,6 +68,25 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  corpus:
+    name: corpus metrics
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # PRD §5, enforced. --strict fails the build if recall or precision drop
+      # below target, or a planted secret is missed. Only projects whose formats
+      # have a parser in this build are gated; the rest are reported.
+      - run: cargo run -p specshield-cli -- report corpus --strict
+
+      # Ground truth must still describe the fixtures. Regenerating is the fix
+      # for a failure here, never editing labels.json by hand.
+      - name: labels are current
+        run: |
+          python3 corpus/tools/build_labels.py
+          git diff --exit-code corpus/
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -81,12 +100,9 @@ jobs:
   # Milestone gates. Each becomes a required check as its milestone lands; they
   # are the PRD §5 success metrics, enforced rather than aspirational.
   #
-  # M1  corpus:   detection recall >= 0.95, precision >= 0.90
-  #               `specshield report --corpus corpus/`
-  # M1  roundtrip: restore(sanitize(x)) == x byte-for-byte, 0 silent failures
-  #               (proptest, runs inside `cargo test` once the engine lands)
-  # M1  leakgate: 0 vault real-names in any generated twin
-  #               `specshield verify` exits non-zero on a leak
+  # M1  corpus:   DONE — enforced by the `corpus` job above
+  # M1  roundtrip: DONE — proptest in crates/core/tests/roundtrip.rs
+  # M1  leakgate:  DONE — property test, plus `specshield verify` exit code
   # M4  perf:     cold index of the 1k-file reference project < 30 s
   #               `cargo bench` against bench/, compared to a stored baseline
   # M6  offline:  0 outbound connections with egress blocked

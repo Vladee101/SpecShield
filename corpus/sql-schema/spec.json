@@ -115,5 +115,9 @@
     "TIMESTAMPTZ",
     "BIGINT",
     "BOOLEAN"
-  ]
+  ],
+  "requires": [
+    "sql"
+  ],
+  "milestone": "M3"
 }

@@ -1,22 +1,110 @@
 {
   "description": "A small repository spanning Markdown, SQL, YAML, and TypeScript, plus paths that must be excluded. Tests that one identity carries one alias across all four formats, and that ignore rules keep vendored code and build output out of the twin.",
   "entities": [
-    { "real_name": "Vantor", "entity_type": "organization", "scope_path": "project", "files": ["README.md"] },
-    { "real_name": "Meridian Freight", "entity_type": "organization", "scope_path": "project", "files": ["README.md"] },
-    { "real_name": "customer_subscription", "entity_type": "table", "scope_path": "billing.public.customer_subscription", "files": ["db/schema.sql"] },
-    { "real_name": "customer_id", "entity_type": "column", "scope_path": "billing.public.customer_subscription.customer_id", "files": ["db/schema.sql"] },
-    { "real_name": "subscription_id", "entity_type": "column", "scope_path": "billing.public.customer_subscription.subscription_id", "files": ["db/schema.sql"] },
-    { "real_name": "BillingApi", "entity_type": "api", "scope_path": "#/info/title", "files": ["api/openapi.yaml"] },
-    { "real_name": "createSubscription", "entity_type": "endpoint", "scope_path": "#/paths/~1subscriptions/post", "files": ["api/openapi.yaml"] },
-    { "real_name": "SubscriptionService", "entity_type": "service", "scope_path": "src/services/subscription.service.ts::SubscriptionService", "files": ["src/services/subscription.service.ts"] },
-    { "real_name": "CustomerSubscription", "entity_type": "dto", "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription", "files": ["src/services/subscription.service.ts"] },
-    { "real_name": "customerId", "entity_type": "column", "scope_path": "src/services/subscription.service.ts::SubscriptionService.customerId", "files": ["src/services/subscription.service.ts"] },
-    { "real_name": "vantor-billing", "entity_type": "path_segment", "scope_path": "project", "files": ["README.md"] }
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "files": [
+        "README.md"
+      ]
+    },
+    {
+      "real_name": "Meridian Freight",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "files": [
+        "README.md"
+      ]
+    },
+    {
+      "real_name": "customer_subscription",
+      "entity_type": "table",
+      "scope_path": "billing.public.customer_subscription",
+      "files": [
+        "db/schema.sql"
+      ]
+    },
+    {
+      "real_name": "customer_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.customer_id",
+      "files": [
+        "db/schema.sql"
+      ]
+    },
+    {
+      "real_name": "subscription_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.subscription_id",
+      "files": [
+        "db/schema.sql"
+      ]
+    },
+    {
+      "real_name": "BillingApi",
+      "entity_type": "api",
+      "scope_path": "#/info/title",
+      "files": [
+        "api/openapi.yaml"
+      ]
+    },
+    {
+      "real_name": "createSubscription",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1subscriptions/post",
+      "files": [
+        "api/openapi.yaml"
+      ]
+    },
+    {
+      "real_name": "SubscriptionService",
+      "entity_type": "service",
+      "scope_path": "src/services/subscription.service.ts::SubscriptionService",
+      "files": [
+        "src/services/subscription.service.ts"
+      ]
+    },
+    {
+      "real_name": "CustomerSubscription",
+      "entity_type": "dto",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription",
+      "files": [
+        "src/services/subscription.service.ts"
+      ]
+    },
+    {
+      "real_name": "customerId",
+      "entity_type": "column",
+      "scope_path": "src/services/subscription.service.ts::SubscriptionService.customerId",
+      "files": [
+        "src/services/subscription.service.ts"
+      ]
+    },
+    {
+      "real_name": "vantor-billing",
+      "entity_type": "path_segment",
+      "scope_path": "project",
+      "files": [
+        "README.md"
+      ]
+    }
   ],
-  "never_alias": ["npm", "Postgres", "UUID"],
+  "never_alias": [
+    "npm",
+    "Postgres",
+    "UUID"
+  ],
   "ignored_paths": [
     "node_modules/left-pad/index.js",
     "package-lock.json",
     "dist/bundle.js"
-  ]
+  ],
+  "requires": [
+    "markdown",
+    "sql",
+    "yaml",
+    "typescript"
+  ],
+  "milestone": "M4"
 }

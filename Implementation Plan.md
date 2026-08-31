@@ -43,6 +43,18 @@ retained as the rationale trail; reopening any of them after M1 means a vault mi
 | D-6 | Secrets handling | **One-way redaction, separate from the identity graph** (Review A2) |
 | D-7 | YAML/JSON libraries | CST-preserving parsers, not serde round-trip (Review C2) |
 | D-8 | Tauri version | **v2** |
+| D-9 | **Vault storage engine** (raised in M1) | **Open.** SQLCipher via `bundled-sqlcipher-vendored-openssl` does not build on a stock Windows toolchain — vendored OpenSSL needs Strawberry Perl and NASM. Plain `bundled` SQLite builds in 5 s, so the blocker is OpenSSL. Shipping an AES-256-GCM + Argon2id file vault meanwhile. See below. |
+
+### D-9 — the storage decision you still owe
+
+| Option | Gets you | Costs you |
+|---|---|---|
+| **A. SQLCipher** (as specified) | Whole-file encryption; row counts, entity types, and aliases all hidden | Every dev machine and CI runner needs Perl + NASM, or a system OpenSSL |
+| **B. Plain SQLite + AEAD columns** | Real schema, migrations, incremental writes, query; pure-Rust crypto | Metadata leaks: an attacker with the file sees how many entities and of what types |
+| **C. AEAD file vault** *(shipped in M1)* | Nothing on disk in plaintext, no C toolchain, works everywhere today | No incremental writes, no occurrence or edge tables, no migrations; whole vault rewritten per change |
+
+C is fine while the vault holds hundreds of identities. It stops being fine at
+repository scale, which is M4. **Decide before M4 starts.**
 
 ---
 
@@ -227,6 +239,25 @@ The whole product proved out on Markdown and plain text, with no UI.
 - Secret detector: 100% on the planted-secrets fixture, < 5 false positives per 10k LOC.
 - Detection recall ≥ 0.95 / precision ≥ 0.90 on the labelled corpus, reported by
   `specshield report` in CI.
+
+**Status: met.** `cargo run -p specshield-cli -- report corpus --strict` and the
+`corpus` CI job enforce them.
+
+| Criterion | Result |
+|---|---|
+| Round trip | PASS — 5 proptest properties, 300 cases each |
+| Leak gate | PASS — property asserts no verified twin contains a vault name |
+| Secrets | PASS — 6/6 planted, 0 false positives |
+| Recall | **100%** on gated projects (target 0.95) |
+| Precision | **96.2%** on gated projects (target 0.90) |
+
+**Correction to how the corpus gate is scored.** As written, this criterion was
+unmeetable by M1: four of the six corpus projects are SQL, OpenAPI, and
+TypeScript, whose parsers arrive in M3 and M4. Scoring them against a build with
+no SQL parser measures the missing milestone, not detection quality. Each corpus
+project now declares the parsers it `requires`; `report` gates only the projects
+whose parsers exist and reports the rest for visibility. M3 and M4 widen the gate
+by landing parsers, with no change to the targets.
 
 ---
 

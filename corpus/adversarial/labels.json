@@ -312,6 +312,12 @@
       "confidence": "high"
     }
   ],
+  "requires": [
+    "typescript",
+    "sql",
+    "markdown"
+  ],
+  "milestone": "M4",
   "negative_files": [
     "input/aliases-in-text.ts"
   ],

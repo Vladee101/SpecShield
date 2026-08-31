@@ -284,11 +284,18 @@ impl Detector {
             if self.is_allowed(word) {
                 continue;
             }
-            let Some(entity_type) = classify_pascal(word) else {
-                continue;
-            };
+            // An unclassifiable compound is still an entity — `CustomerSubscription`
+            // is every bit as proprietary as `SubscriptionService`, it just has
+            // no suffix telling us what kind of thing it is.
+            //
+            // Guessing the *type* is safe in a way guessing the *name* is not:
+            // the type only picks the alias prefix, so a wrong guess makes the
+            // twin marginally less readable. Failing to detect the name at all
+            // leaks it. The stop-list is what keeps `HttpClient` and `ArrayList`
+            // out.
+            let (entity_type, confidence) = classify_pascal(word).map_or((EntityType::Dto, 0.8), |t| (t, 0.85));
             push(
-                Self::candidate(word, entity_type, scope, m.start(), m.end(), kind, 0.85),
+                Self::candidate(word, entity_type, scope, m.start(), m.end(), kind, confidence),
                 &mut claimed,
                 &mut found,
             );

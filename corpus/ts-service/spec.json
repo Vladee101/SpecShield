@@ -1,26 +1,123 @@
 {
   "description": "Declarations, references, imports, comments, and string literals across six modules. Exercises cross-file rename: SubscriptionService references types declared in four other files, and every import specifier encodes a path that must alias consistently.",
   "entities": [
-    { "real_name": "SubscriptionService", "entity_type": "service", "scope_path": "src/services/subscription.service.ts::SubscriptionService" },
-    { "real_name": "SubscriptionRepository", "entity_type": "interface", "scope_path": "src/repositories/subscription.repository.ts::SubscriptionRepository" },
-    { "real_name": "CustomerSubscription", "entity_type": "dto", "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription", "note": "unifies with the SQL table customer_subscription and the OpenAPI schema" },
-    { "real_name": "CreateSubscriptionDto", "entity_type": "dto", "scope_path": "src/dto/create-subscription.dto.ts::CreateSubscriptionDto" },
-    { "real_name": "InvoiceSummaryDto", "entity_type": "dto", "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto" },
-    { "real_name": "SubscriptionCreated", "entity_type": "event", "scope_path": "src/events/subscription-created.ts::SubscriptionCreated" },
-    { "real_name": "PlanTier", "entity_type": "enum", "scope_path": "src/domain/plan-tier.ts::PlanTier" },
-    { "real_name": "customerId", "entity_type": "column", "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.customerId" },
-    { "real_name": "subscriptionId", "entity_type": "column", "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.subscriptionId" },
-    { "real_name": "amountCents", "entity_type": "column", "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto.amountCents" },
-    { "real_name": "invoiceId", "entity_type": "column", "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto.invoiceId" },
-    { "real_name": "planTier", "entity_type": "column", "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.planTier" },
-    { "real_name": "BillingApi", "entity_type": "api", "scope_path": "project", "note": "appears only in a doc comment — the prose scan must find it" },
-    { "real_name": "Vantor", "entity_type": "organization", "scope_path": "project", "note": "comment-only occurrence" },
-    { "real_name": "Meridian Freight", "entity_type": "organization", "scope_path": "project", "note": "comment-only; the highest-value prose leak in the fixture" },
-    { "real_name": "InvoiceService", "entity_type": "service", "scope_path": "project", "note": "comment-only occurrence" },
-    { "real_name": "customer-subscription", "entity_type": "path_segment", "scope_path": "src/domain/customer-subscription.ts" },
-    { "real_name": "create-subscription", "entity_type": "path_segment", "scope_path": "src/dto/create-subscription.dto.ts" },
-    { "real_name": "subscription-created", "entity_type": "path_segment", "scope_path": "src/events/subscription-created.ts" },
-    { "real_name": "plan-tier", "entity_type": "path_segment", "scope_path": "src/domain/plan-tier.ts" }
+    {
+      "real_name": "SubscriptionService",
+      "entity_type": "service",
+      "scope_path": "src/services/subscription.service.ts::SubscriptionService"
+    },
+    {
+      "real_name": "SubscriptionRepository",
+      "entity_type": "interface",
+      "scope_path": "src/repositories/subscription.repository.ts::SubscriptionRepository"
+    },
+    {
+      "real_name": "CustomerSubscription",
+      "entity_type": "dto",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription",
+      "note": "unifies with the SQL table customer_subscription and the OpenAPI schema"
+    },
+    {
+      "real_name": "CreateSubscriptionDto",
+      "entity_type": "dto",
+      "scope_path": "src/dto/create-subscription.dto.ts::CreateSubscriptionDto"
+    },
+    {
+      "real_name": "InvoiceSummaryDto",
+      "entity_type": "dto",
+      "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto"
+    },
+    {
+      "real_name": "SubscriptionCreated",
+      "entity_type": "event",
+      "scope_path": "src/events/subscription-created.ts::SubscriptionCreated"
+    },
+    {
+      "real_name": "PlanTier",
+      "entity_type": "enum",
+      "scope_path": "src/domain/plan-tier.ts::PlanTier"
+    },
+    {
+      "real_name": "customerId",
+      "entity_type": "column",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.customerId"
+    },
+    {
+      "real_name": "subscriptionId",
+      "entity_type": "column",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.subscriptionId"
+    },
+    {
+      "real_name": "amountCents",
+      "entity_type": "column",
+      "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto.amountCents"
+    },
+    {
+      "real_name": "invoiceId",
+      "entity_type": "column",
+      "scope_path": "src/dto/create-subscription.dto.ts::InvoiceSummaryDto.invoiceId"
+    },
+    {
+      "real_name": "planTier",
+      "entity_type": "column",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription.planTier"
+    },
+    {
+      "real_name": "BillingApi",
+      "entity_type": "api",
+      "scope_path": "project",
+      "note": "appears only in a doc comment \u2014 the prose scan must find it"
+    },
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "note": "comment-only occurrence"
+    },
+    {
+      "real_name": "Meridian Freight",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "note": "comment-only; the highest-value prose leak in the fixture"
+    },
+    {
+      "real_name": "InvoiceService",
+      "entity_type": "service",
+      "scope_path": "project",
+      "note": "comment-only occurrence"
+    },
+    {
+      "real_name": "customer-subscription",
+      "entity_type": "path_segment",
+      "scope_path": "src/domain/customer-subscription.ts"
+    },
+    {
+      "real_name": "create-subscription",
+      "entity_type": "path_segment",
+      "scope_path": "src/dto/create-subscription.dto.ts"
+    },
+    {
+      "real_name": "subscription-created",
+      "entity_type": "path_segment",
+      "scope_path": "src/events/subscription-created.ts"
+    },
+    {
+      "real_name": "plan-tier",
+      "entity_type": "path_segment",
+      "scope_path": "src/domain/plan-tier.ts"
+    }
   ],
-  "never_alias": ["Promise", "Date", "Error", "crypto", "randomUUID", "string", "number"]
+  "never_alias": [
+    "Promise",
+    "Date",
+    "Error",
+    "crypto",
+    "randomUUID",
+    "string",
+    "number"
+  ],
+  "requires": [
+    "typescript"
+  ],
+  "milestone": "M4"
 }
