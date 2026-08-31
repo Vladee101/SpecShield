@@ -7,6 +7,8 @@ members = [
     "crates/index",
     "crates/git",
     "crates/cli",
+    "spikes/ts-rename",
+    "spikes/alias-roundtrip",
 ]
 
 [workspace.package]

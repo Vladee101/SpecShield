@@ -1,0 +1,15 @@
+[package]
+name = "spike-alias-roundtrip"
+description = "M0 spike: which alias format survives a model round trip? Decides the SDD 6.3 grammar."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+specshield-core.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

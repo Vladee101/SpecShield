@@ -29,16 +29,16 @@ Never let the UI own logic. `crates/core` must be usable with zero Tauri depende
 
 These change the on-disk format or the public data model, so they cannot be deferred.
 
-**Status:** all eight were resolved per the recommendation below and are now recorded in
-PRD v1.1 and SDD v1.1. The table is retained as the rationale trail. Reopening any of them
-after M1 means a vault migration.
+**Status:** all eight resolved and recorded in PRD v1.1 and SDD v1.1. D-4 and the alias
+grammar are now backed by measurement rather than argument — see `spikes/`. The table is
+retained as the rationale trail; reopening any of them after M1 means a vault migration.
 
 | # | Decision | Recommendation |
 |---|---|---|
 | D-1 | Alias derivation: sequence counter vs HMAC-derived | **HMAC-derived** (Review A6), sequence mode as a display option |
 | D-2 | Alias style default | **Typed** — `PaymentService_014` (Review D1) |
 | D-3 | Identity key | **`(scope_path, entity_type, real_name)`** (Review B1) |
-| D-4 | TypeScript rename strategy | **Tree-sitter + heuristic scoping**; drop the "must compile" guarantee to "must parse + counts match" (Review C1) |
+| D-4 | TypeScript rename strategy | **Tree-sitter + heuristic scoping** — spike-confirmed for declarations; properties scoped `global` because they are unresolvable without type info (`spikes/M0-tree-sitter-rename.md`) |
 | D-5 | Vault key storage | **OS credential store, optional Argon2id passphrase** (Review A4) |
 | D-6 | Secrets handling | **One-way redaction, separate from the identity graph** (Review A2) |
 | D-7 | YAML/JSON libraries | CST-preserving parsers, not serde round-trip (Review C2) |
@@ -186,6 +186,20 @@ the whole index — that is what will blow the 30 s target.
   each with hand-labelled ground-truth entities.
 
 **Exit:** CI green; SDD updated with decisions; alias grammar frozen.
+
+**Outcome (complete, except the model-call half of the alias spike):**
+
+| Item | Result |
+|---|---|
+| Workspace + CI | Done. 44 tests, clippy clean at `-D warnings` |
+| Golden corpus | Done. 90 entities, 162 occurrences, 6 secrets across 6 projects |
+| Tree-sitter spike | **Run.** Option A confirmed for declarations; 25 property references need type info. Properties scoped `global` in MVP |
+| Alias format spike (part 1, recoverability) | **Run.** Grammar frozen; `delimiter-wrapped` disqualified; affix stripping confirmed load-bearing for M1 |
+| Alias format spike (part 2, drift frequency) | **Not run** — needs billable model API calls. Prompt pack generated and ready |
+
+Two follow-ups carried into M4: re-run the Tree-sitter spike against a real 50+ file
+service (decorators, generics, barrel re-exports are untested), and land affix stripping in
+the M1 restore matcher rather than deferring it again.
 
 ---
 
@@ -373,6 +387,8 @@ gates releases as a report, not a red build.
 2. Scaffold the Cargo workspace and CI (M0).
 3. Build the golden corpus v0 with hand-labelled ground truth — it gates the §5 metrics in
    the PRD and every exit criterion from M1 onward.
-4. Run the two M0 spikes — Tree-sitter rename on a real 50-file service, and the alias-
-   format round-trip test. They are the only things that can still invalidate this plan,
-   and the second one freezes the alias grammar in SDD §6.3.
+4. ~~Run the two M0 spikes.~~ Done — see `spikes/`. Remaining from that work:
+   - Run part 2 of the alias spike (`cargo run -p spike-alias-roundtrip -- --emit-prompts`,
+     then send the 12 prompts to the models you care about). Needs a deliberate,
+     billable API run.
+   - Re-run the Tree-sitter spike against a real 50+ file service before M4.

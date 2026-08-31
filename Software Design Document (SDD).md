@@ -211,7 +211,27 @@ each reference binds to — across re-exports, barrel files, type-only imports, 
 merging, and shadowing. Tree-sitter cannot do this.
 
 MVP therefore uses **Tree-sitter plus heuristic scoping**: a per-file lexical scope stack
-combined with a module-level export/import graph. This is good but not exact.
+combined with a module-level export/import graph. The M0 spike measured this on the corpus
+(`spikes/M0-tree-sitter-rename.md`) and found a sharp split:
+
+| Construct | Result |
+|---|---|
+| Classes, interfaces, enums, functions, type aliases, variables, imports | 100% resolution, correct across files and under shadowing |
+| **Object properties and interface members** | **Unresolvable** — 25 of 47 property-position identifiers |
+
+Deciding whether `x.customerId` refers to `CustomerSubscription.customerId` requires the
+type of `x`. Tree-sitter does not compute it, and no amount of lexical analysis recovers it.
+
+Because `customerId`, `planTier`, and `amountCents` are Column entities — precisely the
+names a database schema leaks — leaving them untouched in TypeScript would produce a twin
+that is internally inconsistent *and* a leak the verification gate would correctly refuse
+to export.
+
+**MVP rule:** properties are scoped `global`. Every property-position identifier matching a
+known member name receives the same alias project-wide, regardless of owning type. The twin
+stays consistent and parses; restore stays unambiguous. The cost is that two unrelated
+interfaces sharing a field name receive the same alias, disclosing that they share it — a
+small, bounded leak. Exact per-type property renaming waits for V1.1.
 
 Accordingly, the guarantee in §7 is *"the twin parses and symbol counts match"*, not *"the
 twin compiles"*. Exact rename via the TypeScript compiler API in a Node sidecar is deferred
@@ -435,6 +455,15 @@ The restore matcher compares **canonical forms**:
 Exact matches restore silently. Canonical-only matches restore **and are flagged** in the
 diff as fuzzy hits. Alias-shaped tokens matching nothing become Unresolved Identities
 (§12).
+
+Step 5 belongs to the matcher rather than the normalizer, because stripping `Impl` is only
+safe when the remainder matches an existing alias exactly. The M0 spike confirmed it is
+load-bearing: **every** candidate alias format fails `SERVICE_014Impl` without it
+(`spikes/M0-alias-format.md`). It ships with the restore engine in M1.
+
+The same spike disqualified a delimiter-wrapped format (`__SERVICE_014__`): canonicalization
+strips non-alphanumerics, so the sentinels are invisible to the matcher and buy no recovery
+at all while lengthening every alias in every prompt.
 
 ## 6.5 Stability
 
