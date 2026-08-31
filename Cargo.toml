@@ -38,10 +38,8 @@ aho-corasick = "1"
 regex = "1"
 similar = "2"
 rayon = "1"
-tracing = "0.1"
 
 proptest = "1"
-insta = "1"
 
 # Lint policy is defined once here and inherited by every crate via
 # `[lints] workspace = true`. CI runs clippy with `-D warnings`.

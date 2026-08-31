@@ -19,6 +19,9 @@ specshield-parsers.workspace = true
 specshield-git.workspace = true
 anyhow.workspace = true
 clap = { version = "4.6.6", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+getrandom = "0.4.3"
 
 [lints]
 workspace = true

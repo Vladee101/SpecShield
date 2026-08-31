@@ -12,5 +12,8 @@ doc-valid-idents = [
     "BLAKE3",
     "Crockford",
     "Argon2id",
+    "PascalCase",
+    "camelCase",
+    "SpecShield's",
     "..",
 ]
