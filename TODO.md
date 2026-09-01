@@ -88,7 +88,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
-| M4 TypeScript + repo scale | parser, index, project export done; P2-6 remains |
+| M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
 | M5 diff + git | not started |
 | M6 hardening + packaging | not started |
 
@@ -289,13 +289,11 @@ dozen tables.
 became gated on their own as the parsers landed, which is what `requires` was
 for.
 
-**P2-6. `files.twin_path` is recorded but never differs from `path`.** The M4
-deliverable list includes path and filename aliasing, and `PathSegment`
-identities exist inside import strings — but `specshield export` writes the twin
-tree at the *real* paths. A directory named after a client is a leak with no
-identifier in it, and the export currently reproduces it. The column, the
-`PathSegment` type, and the vault writer are all in place; what is missing is
-renaming the output tree and teaching restore to map a twin path back.
+**P2-6. Path and filename aliasing. — DONE.** `specshield export` writes the
+twin tree at aliased paths and `specshield restore <twin-dir> --out <dir>`
+puts it back. The rule lives in `crates/core/src/paths.rs` because the parser
+and the export both need it: a file and every import of it must land on the
+same alias or the twin stops resolving.
 
 ---
 

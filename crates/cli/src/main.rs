@@ -10,6 +10,7 @@
 
 mod report;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -109,7 +110,13 @@ enum Command {
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// File containing the model's response; reads stdin when omitted.
+        ///
+        /// A directory is taken as a twin project: every file in it is
+        /// restored, and each one is written back at its real path.
         input: Option<PathBuf>,
+        /// Where to write a restored twin project. Required for a directory.
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         passphrase: Option<String>,
     },
@@ -256,9 +263,10 @@ fn main() -> Result<()> {
         } => run_verify(&project, &file, passphrase.as_deref()),
         Command::Restore {
             project,
+            out,
             input,
             passphrase,
-        } => run_restore(&project, input.as_deref(), passphrase.as_deref()),
+        } => run_restore(&project, input.as_deref(), out.as_deref(), passphrase.as_deref()),
         Command::Unify {
             project,
             confirm,
@@ -355,6 +363,69 @@ fn context_from(vault: &vault::Vault) -> Result<specshield_core::parser::Project
         .map(|i| i.real_name.clone());
     let names = identities.iter().map(|i| i.real_name.clone());
     Ok(specshield_core::parser::ProjectContext::new(members, names))
+}
+
+/// The same context, but from the graph as it stands mid-run rather than from
+/// the vault. The path pass needs what the *content* passes just learned, and
+/// that is not in the vault until `persist`.
+fn context_from_graph(graph: &Graph) -> specshield_core::parser::ProjectContext {
+    let members = graph
+        .nodes()
+        .filter(|n| n.key.entity_type == EntityType::Column)
+        .map(|n| n.key.real_name.clone());
+    let names = graph.nodes().map(|n| n.key.real_name.clone());
+    specshield_core::parser::ProjectContext::new(members, names)
+}
+
+/// Intern every path segment that is an entity, and return the twin path for
+/// each real path — PRD FR-3b.
+///
+/// Run after the content passes, so `thing18.ts` can be recognised as naming
+/// the `Thing18` those passes found. The identities are the same ones the
+/// TypeScript parser uses for import specifiers (`specshield_core::paths`), so
+/// a renamed file and every import of it agree by construction.
+fn twin_paths(
+    index: &specshield_index::Index,
+    detector: &Detector,
+    graph: &mut Graph,
+) -> Result<HashMap<String, String>> {
+    use specshield_core::paths::Component;
+
+    let context = context_from_graph(graph);
+    let mut out = HashMap::new();
+
+    for path in index.files.keys() {
+        let mut failed = None;
+        let twin = specshield_core::paths::twin_path(path, &context, |component| match component {
+            Component::Segment { key, suffix } => {
+                format!("{}{suffix}", graph.intern(key, Origin::Detected).alias)
+            }
+            // Sanitizing the component as if it were a document is not a trick:
+            // it is the same call the file's *contents* go through, which is
+            // exactly why the tree and the import strings come out agreeing.
+            Component::Text { text, suffix } => match sanitize::sanitize(
+                text,
+                specshield_core::paths::PATH_SCOPE,
+                detector,
+                graph,
+                None,
+                &context,
+            ) {
+                Ok(result) => format!("{}{suffix}", result.twin),
+                Err(e) => {
+                    failed = Some(e);
+                    format!("{text}{suffix}")
+                }
+            },
+        });
+
+        if let Some(e) = failed {
+            return Err(e).with_context(|| format!("aliasing the path {path}"));
+        }
+        out.insert(path.clone(), twin);
+    }
+
+    Ok(out)
 }
 
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {
@@ -652,8 +723,76 @@ fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()>
     Ok(())
 }
 
-fn run_restore(project: &Path, input: Option<&Path>, explicit: Option<&str>) -> Result<()> {
+/// Restore a whole twin project, putting every file back at its real path.
+///
+/// The inverse of `export`, and the half of path aliasing that makes it usable:
+/// a twin tree whose directories and filenames are aliases is only reversible
+/// because the vault recorded the mapping. A twin path the vault does not know
+/// is written where it stands rather than guessed at — the alias grammar is
+/// recognisable, but a filename that merely looks like one is not evidence.
+fn restore_project(vault: &vault::Vault, twin_root: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        bail!("{} already exists — refusing to write into it", dest.display());
+    }
+
+    let graph = graph_from(vault)?;
+    let vocabulary = Vocabulary::new(graph.vocabulary());
+
+    let real_of: HashMap<String, String> = vault.files()?.into_iter().map(|f| (f.twin_path, f.path)).collect();
+
+    let index = specshield_index::Index::build(twin_root)?;
+    let mut written = 0usize;
+    let mut unmapped = Vec::new();
+    let mut restored = 0usize;
+
+    for entry in index.files.values() {
+        let source = twin_root.join(&entry.path);
+        let target_relative = real_of.get(&entry.path).cloned().unwrap_or_else(|| {
+            unmapped.push(entry.path.clone());
+            entry.path.clone()
+        });
+
+        if !entry.is_text {
+            write_into(dest, &target_relative, |target| {
+                std::fs::copy(&source, target).map(|_| ())
+            })?;
+            written += 1;
+            continue;
+        }
+
+        let text = std::fs::read_to_string(&source)?;
+        let outcome = restore::restore(&text, &vocabulary);
+        restored += outcome.restored.len();
+        write_into(dest, &target_relative, |target| std::fs::write(target, &outcome.text))?;
+        written += 1;
+    }
+
+    println!("Restored {written} file(s) into {}", dest.display());
+    println!("  {restored} alias occurrence(s) resolved");
+    if unmapped.is_empty() {
+        println!("  every twin path mapped back to a real path");
+    } else {
+        println!(
+            "  {} file(s) the vault has no path mapping for, left where they stand:",
+            unmapped.len()
+        );
+        for path in unmapped.iter().take(20) {
+            println!("      {path}");
+        }
+    }
+    Ok(())
+}
+
+fn run_restore(project: &Path, input: Option<&Path>, out: Option<&Path>, explicit: Option<&str>) -> Result<()> {
     let vault = open(project, explicit)?;
+
+    if input.is_some_and(Path::is_dir) {
+        let Some(out) = out else {
+            bail!("restoring a twin project needs --out: a directory of twins maps back to real paths");
+        };
+        return restore_project(&vault, input.unwrap_or(Path::new(".")), out);
+    }
+
     let text = match input {
         Some(path) => std::fs::read_to_string(path)?,
         None => std::io::read_to_string(std::io::stdin())?,
@@ -839,10 +978,12 @@ fn report_export(
     identities: usize,
     unchecked: usize,
     abandoned: &[(String, String)],
+    renamed: usize,
 ) {
     println!("Exported {} file(s) to {}", written, dest.display());
     println!("  {aliased} alias applications, {identities} identities in the vault");
-    println!("  every file passed the gate (SDD §8)");
+    println!("  every file passed the gate (SDD §8), paths included");
+    println!("  {renamed} path(s) renamed in the twin tree");
     println!("  {unchecked} file(s) had no structure to verify against");
     if abandoned.is_empty() {
         println!("  every parsed file verified structurally (SDD §7.2)");
@@ -895,7 +1036,103 @@ fn learn_project(
         sanitize::sanitize(&source, &entry.path, &detector, graph, parser.as_deref(), &context)?;
     }
 
+    // Filenames last: `thing18.ts` is only recognisable as naming `Thing18`
+    // once the content pass above has found that type.
+    twin_paths(index, &detector, graph)?;
+
     persist(vault, graph)
+}
+
+/// What an exported file carries: a sanitized twin, or the original bytes.
+enum Payload {
+    Text(String),
+    /// A binary. Nothing to sanitize and nothing to verify — it carries no
+    /// identifiers a parser or the gate can read — but it is copied so the
+    /// exported tree is still the project.
+    Copy(PathBuf),
+}
+
+/// Everything the sanitize pass produced, held until the gate has run.
+#[derive(Default)]
+struct Twins {
+    staged: Vec<(String, Payload)>,
+    records: Vec<vault::StoredFile>,
+    blocked: Vec<(String, Vec<String>)>,
+    abandoned: Vec<(String, String)>,
+    aliased: usize,
+    unchecked: usize,
+}
+
+/// Sanitize every file in the project, producing twins but writing nothing.
+fn sanitize_tree(
+    project: &Path,
+    index: &specshield_index::Index,
+    detector: &Detector,
+    context: &specshield_core::parser::ProjectContext,
+    graph: &mut Graph,
+    twin_of: &impl Fn(&String) -> String,
+) -> Result<Twins> {
+    let mut twins = Twins::default();
+
+    for entry in index.files.values() {
+        let source_path = project.join(&entry.path);
+
+        if !entry.is_text {
+            twins.records.push(vault::StoredFile {
+                path: entry.path.clone(),
+                twin_path: twin_of(&entry.path),
+                checksum: entry.checksum.clone(),
+                parser: String::new(),
+            });
+            twins.staged.push((entry.path.clone(), Payload::Copy(source_path)));
+            continue;
+        }
+
+        let source =
+            std::fs::read_to_string(&source_path).with_context(|| format!("reading {}", source_path.display()))?;
+        let parser = specshield_parsers::for_document(&source_path, &source);
+
+        let result = sanitize::sanitize(&source, &entry.path, detector, graph, parser.as_deref(), context)?;
+
+        if secrets::blocks_export(&secrets::scan(&result.twin)) {
+            twins
+                .blocked
+                .push((entry.path.clone(), vec!["unredacted secret".to_owned()]));
+            continue;
+        }
+
+        // SDD §7.2. An abandoned file is not a failure — the original is
+        // preserved, which is the correct outcome — but it is a file the model
+        // will see unaliased, and an export that did not say so would be
+        // reporting a clean run it did not have.
+        match &result.verification {
+            sanitize::Verification::Passed => {}
+            sanitize::Verification::TwinDidNotParse { parser } => {
+                twins
+                    .abandoned
+                    .push((entry.path.clone(), format!("twin no longer parses as {parser}")));
+            }
+            sanitize::Verification::StructureChanged { parser, .. } => {
+                twins
+                    .abandoned
+                    .push((entry.path.clone(), format!("{parser} structure changed")));
+            }
+            sanitize::Verification::Unsupported { .. } | sanitize::Verification::NotAttempted => {
+                twins.unchecked += 1;
+            }
+        }
+
+        twins.aliased += result.applied.len();
+        twins.records.push(vault::StoredFile {
+            path: entry.path.clone(),
+            twin_path: twin_of(&entry.path),
+            checksum: entry.checksum.clone(),
+            parser: parser.as_ref().map_or(String::new(), |p| p.name().to_owned()),
+        });
+        twins.staged.push((entry.path.clone(), Payload::Text(result.twin)));
+    }
+
+    Ok(twins)
 }
 
 fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
@@ -912,73 +1149,13 @@ fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()>
 
     let detector = detector_from(&vault)?;
     let context = context_from(&vault)?;
+    // Every real path to the path it is written under in the twin. Interning
+    // happened in the learning pass; this is the same derivation, so it returns
+    // the aliases already in the graph.
+    let twins = twin_paths(&index, &detector, &mut graph)?;
+    let twin_of = |path: &String| twins.get(path).cloned().unwrap_or_else(|| path.clone());
 
-    let mut written = 0usize;
-    let mut aliased = 0usize;
-    let mut blocked: Vec<(String, Vec<String>)> = Vec::new();
-    let mut staged: Vec<(String, String)> = Vec::new();
-    let mut records: Vec<vault::StoredFile> = Vec::new();
-    let mut abandoned: Vec<(String, String)> = Vec::new();
-    let mut unchecked = 0usize;
-
-    for entry in index.files.values() {
-        let source_path = project.join(&entry.path);
-
-        if !entry.is_text {
-            // Nothing to sanitize and nothing to verify: a binary carries no
-            // identifiers a parser or the gate can read. It is copied so the
-            // exported tree is still the project.
-            records.push(vault::StoredFile {
-                path: entry.path.clone(),
-                twin_path: entry.path.clone(),
-                checksum: entry.checksum.clone(),
-                parser: String::new(),
-            });
-            write_into(dest, &entry.path, |target| {
-                std::fs::copy(&source_path, target).map(|_| ())
-            })?;
-            written += 1;
-            continue;
-        }
-
-        let source =
-            std::fs::read_to_string(&source_path).with_context(|| format!("reading {}", source_path.display()))?;
-        let parser = specshield_parsers::for_document(&source_path, &source);
-        let scope = entry.path.clone();
-
-        let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, parser.as_deref(), &context)?;
-
-        if secrets::blocks_export(&secrets::scan(&result.twin)) {
-            blocked.push((entry.path.clone(), vec!["unredacted secret".to_owned()]));
-            continue;
-        }
-
-        // SDD §7.2. An abandoned file is not a failure — the original is
-        // preserved, which is the correct outcome — but it is a file the model
-        // will see unaliased, and an export that did not say so would be
-        // reporting a clean run it did not have.
-        match &result.verification {
-            sanitize::Verification::Passed => {}
-            sanitize::Verification::TwinDidNotParse { parser } => {
-                abandoned.push((entry.path.clone(), format!("twin no longer parses as {parser}")));
-            }
-            sanitize::Verification::StructureChanged { parser, .. } => {
-                abandoned.push((entry.path.clone(), format!("{parser} structure changed")));
-            }
-            sanitize::Verification::Unsupported { .. } | sanitize::Verification::NotAttempted => {
-                unchecked += 1;
-            }
-        }
-
-        aliased += result.applied.len();
-        records.push(vault::StoredFile {
-            path: entry.path.clone(),
-            twin_path: entry.path.clone(),
-            checksum: entry.checksum.clone(),
-            parser: parser.as_ref().map_or(String::new(), |p| p.name().to_owned()),
-        });
-        staged.push((entry.path.clone(), result.twin));
-    }
+    let mut twins = sanitize_tree(project, &index, &detector, &context, &mut graph, &twin_of)?;
 
     // The graph is persisted either way: those aliases were derived, and
     // throwing them away would hand different aliases to the next run.
@@ -993,9 +1170,10 @@ fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()>
     // seconds on a thousand files; it is O(names) to build and the graph grows
     // with every file.
     let scanner = verify::LeakScanner::new(graph.real_names());
-    for (path, twin) in &staged {
+    for (path, content) in &twins.staged {
+        let Payload::Text(twin) = content else { continue };
         if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
-            blocked.push((
+            twins.blocked.push((
                 path.clone(),
                 leaks
                     .iter()
@@ -1005,19 +1183,40 @@ fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()>
         }
     }
 
-    if !blocked.is_empty() {
+    // The tree is part of the export. A directory named after a client leaks
+    // with no identifier in it at all, so the twin path goes through the same
+    // gate the content does.
+    for record in &twins.records {
+        if let verify::Verdict::Blocked(leaks) = scanner.scan(&record.twin_path) {
+            twins.blocked.push((
+                record.path.clone(),
+                leaks
+                    .iter()
+                    .map(|l| format!("twin path {:?} still contains {:?}", record.twin_path, l.matched))
+                    .collect(),
+            ));
+        }
+    }
+
+    if !twins.blocked.is_empty() {
         vault.log("export", None, None, Some("blocked"), None)?;
-        let _ = std::fs::remove_dir_all(dest);
-        report_blocked(&blocked);
+        report_blocked(&twins.blocked);
         bail!("nothing was written: a partially clean twin project is not clean");
     }
 
-    for (path, twin) in &staged {
-        write_into(dest, path, |target| std::fs::write(target, twin))?;
+    // Only now does anything reach the disk. Writing as we went and deleting
+    // the directory on a block would leave "nothing was written" depending on a
+    // cleanup succeeding.
+    let mut written = 0usize;
+    for (path, content) in &twins.staged {
+        write_into(dest, &twin_of(path), |target| match content {
+            Payload::Text(twin) => std::fs::write(target, twin),
+            Payload::Copy(source) => std::fs::copy(source, target).map(|_| ()),
+        })?;
         written += 1;
     }
 
-    vault.put_files(&records)?;
+    vault.put_files(&twins.records)?;
     vault.log(
         "export",
         Some(i64::try_from(written).unwrap_or(i64::MAX)),
@@ -1026,7 +1225,16 @@ fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()>
         Some(&dest.to_string_lossy()),
     )?;
 
-    report_export(dest, written, aliased, graph.len(), unchecked, &abandoned);
+    let renamed = twins.records.iter().filter(|r| r.path != r.twin_path).count();
+    report_export(
+        dest,
+        written,
+        twins.aliased,
+        graph.len(),
+        twins.unchecked,
+        &twins.abandoned,
+        renamed,
+    );
     Ok(())
 }
 

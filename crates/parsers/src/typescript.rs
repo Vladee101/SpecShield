@@ -47,6 +47,7 @@ use specshield_core::model::{EntityType, OccurrenceKind};
 use specshield_core::parser::{
     AliasMap, ArtifactParser, Candidate, Document, ParseError, Parsed, ProjectContext, StructuralCounts, fold_name,
 };
+use specshield_core::paths::{is_entity_segment, segment_identity};
 use tree_sitter::{Node, Parser as TsParser, Tree};
 
 use crate::text::plan_from_candidates;
@@ -413,13 +414,12 @@ impl Collector<'_> {
         if last.is_empty() || last == "." || last == ".." {
             return;
         }
-        // The extension is not part of the name: `create-subscription.dto` is
-        // the segment `create-subscription`.
-        let stem = last.split('.').next().unwrap_or(last);
-
-        if stem.is_empty() {
-            return;
-        }
+        // The whole component. A specifier carries no module extension — that is
+        // what the resolver adds — so `create-subscription.dto` *is* the name,
+        // and it has to be, because the export names the file the same way. A
+        // parser that stopped at the first dot gave the file one alias and this
+        // import another.
+        let stem = last;
         let offset = specifier.len() - last.len();
         self.pending_paths.push((stem.to_owned(), inner_start + offset));
     }
@@ -427,35 +427,33 @@ impl Collector<'_> {
     /// Decide which import segments are entities, once the file's declarations
     /// are known.
     ///
-    /// Two ways in, and both are needed:
+    /// The rule itself lives in [`specshield_core::paths`], because the export
+    /// applies it to the file tree as well. If the two ever disagreed, a file
+    /// would be written under one name and imported under another and the twin
+    /// would stop resolving.
     ///
-    /// - **Compound.** `customer-subscription` mirrors `CustomerSubscription`
-    ///   and leaks it whether or not this build has seen that type.
-    /// - **A name the project knows.** `thing18.ts` holding `Thing18` is the
-    ///   dominant convention in TypeScript, and the gate — which folds case and
-    ///   separators — flags `thing18` in the import string as the type's name.
-    ///   A parser that skipped it would block every export of such a repo.
-    ///
-    /// Neither: `subscription`, the stem of `subscription.repository.ts`, is a
-    /// common noun and a local variable in half the files. Aliasing it blocked
-    /// the export on every `const subscription = …`. A single-word file name
-    /// that *is* proprietary is what the dictionary is for.
+    /// The one thing added here is the file's own declarations: `thing18.ts`
+    /// holding `Thing18` is recognisable from inside the file, before the
+    /// project has learned anything.
     fn resolve_paths(&mut self) {
         let declared: HashSet<String> = self.declared.keys().map(|n| fold_name(n)).collect();
 
         for (stem, start) in std::mem::take(&mut self.pending_paths) {
-            let folded = fold_name(&stem);
-            let compound = stem.contains(['-', '_']);
-            if !compound && !declared.contains(&folded) && !self.context.knows_folded(&folded) {
+            if !is_entity_segment(&stem, self.context) && !declared.contains(&fold_name(&stem)) {
                 continue;
             }
 
+            let key = segment_identity(&stem);
             self.out.push(Candidate {
                 byte_start: start,
                 byte_end: start + stem.len(),
                 real_name: stem,
-                entity_type: EntityType::PathSegment,
-                scope_path: format!("{}::import", self.scope),
+                entity_type: key.entity_type,
+                // Project-wide: the file and every import of it are one name for
+                // one thing (SDD §5). Scoping this per importing file gave two
+                // importers two different aliases for the same module, and the
+                // file itself could then only be written under one of them.
+                scope_path: key.scope_path,
                 kind: OccurrenceKind::Path,
                 confidence: 1.0,
             });

@@ -92,9 +92,16 @@
       "scope_path": "src/domain/customer-subscription.ts"
     },
     {
-      "real_name": "create-subscription",
+      "real_name": "create-subscription.dto",
       "entity_type": "path_segment",
-      "scope_path": "src/dto/create-subscription.dto.ts"
+      "scope_path": "src/dto/create-subscription.dto.ts",
+      "note": "the whole specifier: folded, it is exactly CreateSubscriptionDto"
+    },
+    {
+      "real_name": "subscription.repository",
+      "entity_type": "path_segment",
+      "scope_path": "src/repositories/subscription.repository.ts",
+      "note": "folded, it is exactly SubscriptionRepository"
     },
     {
       "real_name": "subscription-created",
