@@ -48,8 +48,7 @@ cargo run -p specshield-cli -- report corpus --strict
 cd app && npx tsc --noEmit && npm run build
 ```
 
-All five pass on `main` as of commit `063ca03`. If one fails after your change,
-that is your change.
+All five pass on `main`. If one fails after your change, that is your change.
 
 ---
 
@@ -87,7 +86,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 |---|---|
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
-| M2 Tauri shell | **started** — builds, wired, but see P0-1 |
+| M2 Tauri shell | **started** — launches, Workflow A wired; see P1 |
 | M3 SQL / YAML / OpenAPI | not started |
 | M4 TypeScript + repo scale | not started |
 | M5 diff + git | not started |
@@ -176,6 +175,115 @@ than hand-written Win32 calls or a relaxed lint.
 PRD §10 and SDD §17.5 have been rewritten to describe what exists, including the
 platform gap.
 
-§10 and SDD §17.5 have been rewritten to describe what exists, including the
-platform gap.
+**P1-2. Exercise the running app.** The app launches and Workflow A has been
+walked as far as review: vault created, dictionary seeded, four terms excluded,
+26 entities detected — the same count the CLI reports on that document, so the
+IPC path is behaving.
 
+```bash
+cd app && npm run tauri dev
+```
+
+Still unexercised: sanitize, copy, and restore in the UI, plus every error path.
+The clipboard module is tested against the real Win32 API, but the route from
+the button through IPC to that module is not — the same kind of gap that hid
+P0-1.
+
+**P1-3. No file picker.** `app/src/App.tsx` uses paste-in `<textarea>`s and a
+typed filename. The document is now held once at the top level, so Review and
+Sanitize share it and a user pastes only once — but it still has to be pasted.
+Add `tauri-plugin-dialog` for open/save, and grant only the
+specific dialog permissions in the capability file. Keep the capability set free
+of network and shell.
+
+**P1-4. No interactive passphrase entry in the CLI.**
+`crates/cli/src/main.rs`, `passphrase()` requires `SPECSHIELD_PASSPHRASE` or
+`--passphrase`. Arguments are visible in the process list, so `--passphrase` is
+already the wrong answer for real use. Add a TTY prompt (`rpassword` or
+equivalent) as the default when neither is set.
+
+**P1-5. Thin test coverage in the Tauri layer.** `app/src-tauri/src/state.rs`
+has six tests covering the copyable-twin state machine, and
+`app/src-tauri/src/clipboard.rs` drives the real Win32 path. The *commands* in
+`lib.rs` still have none — they need a harness that can stand up an `AppState`
+and drive `sanitize_text` / `copy_verified_twin` without a window.
+
+---
+
+### P2 — M3, next milestone
+
+**P2-1. SQL parser** (`crates/parsers/src/sql.rs`, new). Use `sqlparser`.
+Tables, columns, constraints, indexes. Scope columns as
+`db.schema.table.column` — `corpus/adversarial` has ten `customer_id` columns
+across ten tables specifically to catch a flat implementation.
+
+**P2-2. YAML and JSON parsers**, CST-preserving. **Not `serde_yaml`** (archived
+2024) and **not** a `serde_json` round-trip: deserializing to a value model and
+re-serializing destroys comments and key order, which SDD §4.2 requires
+preserving. See `crates/parsers/src/lib.rs` for the reasoning.
+
+**P2-3. OpenAPI semantic layer** over the YAML/JSON CST: paths, operationIds,
+schema names, tags.
+
+**P2-4. Cross-artifact unification.** The SQL table `customer_subscription`, the
+OpenAPI schema `CustomerSubscription`, and the TS interface must resolve to
+**one** identity with **one** alias. This is the feature that makes the identity
+graph worth having. `crates/cli/tests/corpus.rs` already asserts the corpus
+contains the case.
+
+**P2-5. Widen the corpus gate.** Each corpus project declares `requires` in its
+`spec.json`. As parsers land, those projects become gated automatically —
+nothing to change in `report.rs`, but re-run `--strict` and expect the aggregate
+to move.
+
+---
+
+### P3 — open questions, not yet decided
+
+**P3-1. Concept vs. surface form.** `PlanTier` and the prose "Plan tiers" become
+two identities with two aliases, so a model sees them as unrelated. This is
+deliberate — interning each variant under its exact surface text is what keeps
+restore byte-for-byte lossless — but linking surface forms to a shared concept
+would produce better twins. See the comment in `crates/core/src/detect.rs`.
+
+**P3-2. Homoglyphs.** `corpus/adversarial/input/homoglyph.md` contains `Vantor`
+and `Vаntor` (Cyrillic U+0430), labelled as two identities. Whether the detector
+should unify them under Unicode confusable folding is undecided; the fixture
+exists to force the decision.
+
+**P3-3. Alias spike part 2 was never run.** `spikes/M0-alias-format.md`.
+Recoverability is settled offline; drift *frequency* needs real model calls. The
+prompt pack is generated:
+
+```bash
+cargo run -p spike-alias-roundtrip -- --emit-prompts spikes/alias-roundtrip/prompts
+```
+
+12 prompts, 6 formats × envelope/no-envelope. Billable API calls — a human
+should trigger this deliberately.
+
+**P3-4. Re-run the Tree-sitter spike against a real service before M4.**
+`spikes/M0-tree-sitter-rename.md` ran on 12 corpus files. Decorators, generics
+with constraints, barrel re-exports, and ambient `.d.ts` are all untested, and
+they are where heuristic scoping is most likely to break.
+
+**P3-5. Unused vault tables.** `redactions` and `edges` exist in the schema with
+no writer. Occurrences have a writer in `crates/vault` but nothing in the CLI or
+app calls it. Either wire them up as their milestones land, or drop them from
+the schema — an empty table is a claim the product does not honour.
+
+---
+
+## 5. Things that will trip you up
+
+- **`cargo fmt` runs on save in this repo's workflow.** Patching Rust files with
+  Python string replacement fights it. Prefer targeted edits.
+- **The corpus `labels.json` files are generated.** Edit `spec.json` and run
+  `python corpus/tools/build_labels.py`. A CI job fails if they drift. Never
+  hand-edit byte offsets.
+- **`clippy.toml` allowlists proper nouns** (`SpecShield`, `OpenAPI`, …) for the
+  `doc_markdown` lint. Add new ones there rather than backticking prose.
+- **The repo lives in OneDrive.** `crates/vault::cloud_sync_root` detects this
+  and the app warns. Moving the working copy out is still on the list.
+- **Windows + SQLCipher does not build.** That is settled (D-9); do not
+  reintroduce `bundled-sqlcipher-vendored-openssl`.
