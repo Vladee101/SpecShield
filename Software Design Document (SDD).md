@@ -907,11 +907,30 @@ The user is warned prominently and offered one-click relocation of the vault.
 
 ## 17.5 Clipboard hardening
 
-- Payloads are marked with `ExcludeClipboardContentFromMonitorProcessing` and
-  `CanIncludeInClipboardHistory = false` on Windows, suppressing clipboard history and
-  Cloud Clipboard synchronization.
-- The clipboard is cleared after a configurable timeout.
-- Original, unsanitized content is never placed on the clipboard by any UI affordance.
+SpecShield sends nothing anywhere — the application holds no network capability. Windows
+does: with Clipboard History and cross-device sync enabled, the OS uploads clipboard text
+to the user's Microsoft account, *after* the verification gate has finished. That is a
+route off the machine the gate cannot see, so the platform default must be opted out of.
+
+- Payloads carry three registered clipboard formats, each a `DWORD 0`:
+
+  | Format | Governs |
+  |---|---|
+  | `ExcludeClipboardContentFromMonitorProcessing` | clipboard monitors and loggers |
+  | `CanIncludeInClipboardHistory` | the local Win+V history |
+  | `CanUploadToCloudClipboard` | cross-device sync to the Microsoft account |
+
+  The third is the one that governs the upload. Setting only the first two suppresses local
+  history and leaves sync running.
+
+- The clipboard is cleared after a timeout, and **only if it still holds SpecShield's own
+  payload** — clearing unconditionally would destroy whatever the user copied since.
+- Original, unsanitized content is never placed on the clipboard by any UI affordance:
+  the copy command reads the twin from session state and takes no text argument.
+- The formats are advisory, not an enforcement boundary. macOS
+  (`org.nspasteboard.ConcealedType`) and Linux opt-outs are not implemented; the audit log
+  records `clipboard(opted-out)` or `clipboard(unprotected)` per export so the difference
+  is visible rather than assumed.
 
 ## 17.6 Threat model
 

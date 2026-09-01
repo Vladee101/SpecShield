@@ -28,3 +28,9 @@ zeroize = "1.9.0"
 
 [lints]
 workspace = true
+
+# Windows clipboard formats (P1-1). Used instead of hand-written Win32 calls
+# because the workspace forbids `unsafe_code`, and this crate wraps the
+# clipboard API safely.
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"

@@ -21,6 +21,7 @@
 // on every command.
 #![allow(clippy::needless_pass_by_value)]
 
+mod clipboard;
 mod state;
 
 use serde::Serialize;
@@ -30,7 +31,7 @@ use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::{AUTO_APPLY_CONFIDENCE, Graph};
 use specshield_core::{alias, restore, sanitize, secrets, verify};
 use specshield_vault as vault;
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use zeroize::Zeroize;
 
@@ -387,37 +388,43 @@ fn copy_verified_twin(app: tauri::AppHandle, state: State<'_, AppState>, with_en
         twin
     };
 
-    // TODO(M2): opt this payload out of Windows clipboard history and cloud
-    // sync, and clear it after a configurable timeout (Design Review A5).
-    //
-    // SpecShield sends nothing anywhere — the capability set has no network
-    // permission. Windows does: with Clipboard History and "Sync across your
-    // devices" enabled, the OS uploads clipboard text to the user's Microsoft
-    // account. That happens *after* the verification gate has finished, so it
-    // is a route off the machine the gate cannot see. Only the twin is ever
-    // copied, never original text, but PRD §4.3 is explicit that a verified
-    // twin is not non-confidential — it still carries business logic in prose.
-    //
-    // Opting out means registering three clipboard formats and setting each on
-    // the clipboard alongside the text:
-    //
-    //   ExcludeClipboardContentFromMonitorProcessing  — clipboard monitors
-    //   CanIncludeInClipboardHistory        (DWORD 0) — local Win+V history
-    //   CanUploadToCloudClipboard           (DWORD 0) — cross-device sync
-    //
-    // The third is the one that governs the Microsoft-account upload; setting
-    // only the first two leaves the actual concern unaddressed, which is the
-    // trap this comment exists to prevent.
-    //
-    // Tauri's clipboard plugin exposes no way to set clipboard formats, so this
-    // needs a small platform shim rather than a flag. Until it exists, PRD §10's
-    // clipboard-hardening claim is unmet.
-    app.clipboard()
-        .write_text(payload.clone())
-        .map_err(|e| fail(format!("clipboard write failed: {e}")))?;
+    // Opt out of platform clipboard retention where we can — see `clipboard`
+    // for what the three Windows formats govern and why the third one matters.
+    let protection = match clipboard::write_protected(&payload)? {
+        clipboard::Protection::OptedOut => clipboard::Protection::OptedOut,
+        clipboard::Protection::NotAvailable => {
+            // No opt-out on this platform: the plugin still has to do the write.
+            app.clipboard()
+                .write_text(payload.clone())
+                .map_err(|e| fail(format!("clipboard write failed: {e}")))?;
+            clipboard::Protection::NotAvailable
+        }
+    };
+
+    // Clear it again after a delay, but only if it is still ours — see
+    // `clear_if_unchanged`. Best-effort: a missed clear is not worth failing a
+    // copy the user already has.
+    let expected = payload.clone();
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(clipboard::CLEAR_AFTER);
+        if clipboard::clear_if_unchanged(&expected).unwrap_or(false) {
+            let state = handle.state::<AppState>();
+            let _ = state.with(|vault, _| {
+                vault.log("clipboard.cleared", None, None, None, Some("clipboard"))?;
+                Ok(())
+            });
+        }
+    });
 
     state.with(|vault, _| {
-        vault.log("export", Some(1), None, Some("clean"), Some("clipboard"))?;
+        // Record whether the opt-out actually applied. A security team reading
+        // this log needs to know which exports the platform may have retained.
+        let destination = match protection {
+            clipboard::Protection::OptedOut => "clipboard(opted-out)",
+            clipboard::Protection::NotAvailable => "clipboard(unprotected)",
+        };
+        vault.log("export", Some(1), None, Some("clean"), Some(destination))?;
         Ok(payload.len())
     })
 }

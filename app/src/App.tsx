@@ -466,7 +466,11 @@ function SanitizePanel({ onError, onDone }: { onError: (e: string | null) => voi
             >
               Copy twin only
             </button>
-            {copied !== null && <span className="small muted">{copied} characters copied</span>}
+            {copied !== null && (
+              <span className="small muted">
+                {copied} characters copied — cleared from the clipboard after 2 minutes
+              </span>
+            )}
           </div>
 
           <details>

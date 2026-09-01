@@ -147,137 +147,35 @@ milestone: M2 clipboard flags, M4 index, M5 diff and git.
 
 ### P1 — finish M2
 
-**P1-1. Windows clipboard hardening.** `app/src-tauri/src/lib.rs`,
-`copy_verified_twin`.
+~~**P1-1. Windows clipboard hardening.**~~ — **implemented** in
+`app/src-tauri/src/clipboard.rs`.
 
-SpecShield sends nothing anywhere — the capability set has no network
-permission. **Windows does.** With Clipboard History and "Sync across your
-devices" enabled, the OS uploads clipboard text to the user's Microsoft account.
-That happens *after* the verification gate has run, so it is a route off the
-machine the gate cannot see. Only the twin is ever copied, never original text,
-but PRD §4.3 is explicit that a verified twin is not non-confidential.
+All three opt-out formats are set (`ExcludeClipboardContentFromMonitorProcessing`,
+`CanIncludeInClipboardHistory`, `CanUploadToCloudClipboard` — the last being the
+one that governs the Microsoft-account upload), plus a 2-minute clear that only
+fires if the clipboard still holds SpecShield's own payload. A test exercises the
+real Win32 path: write, read back, refuse to clear someone else's content, clear
+its own.
 
-Opting out means registering three clipboard formats and setting each alongside
-the text:
+`unsafe_code` is forbidden workspace-wide, so this uses `clipboard-win` rather
+than hand-written Win32 calls or a relaxed lint.
 
-| Format | Governs |
-|---|---|
-| `ExcludeClipboardContentFromMonitorProcessing` | clipboard monitors |
-| `CanIncludeInClipboardHistory` (DWORD 0) | local Win+V history |
-| `CanUploadToCloudClipboard` (DWORD 0) | cross-device sync to the MS account |
+**What remains open, and is now stated rather than implied:**
 
-**The third is the one that governs the Microsoft-account upload.** Setting only
-the first two leaves the actual concern unaddressed while looking done.
+- The formats are advisory. A clipboard manager that ignores them still captures
+  the text; nothing stops a user pasting the twin anywhere.
+- **macOS and Linux have no opt-out.** macOS has
+  `org.nspasteboard.ConcealedType`; Linux depends on the clipboard manager.
+  Neither is implemented, so both report `NotAvailable` and fall back to the
+  Tauri plugin for the write.
+- The audit log records `clipboard(opted-out)` or `clipboard(unprotected)` per
+  export, so which exports the platform may have retained is visible rather than
+  assumed.
+- The clear delay is a constant. Surfacing it in settings is UI work.
 
-Tauri's clipboard plugin exposes no way to set clipboard formats, so this needs
-a small platform shim rather than a flag. Also add clear-after-timeout. Until it
-exists, **PRD §10 and SDD §17.5 assert a clipboard property the code does not
-have** — implement it or downgrade the claim.
+PRD §10 and SDD §17.5 have been rewritten to describe what exists, including the
+platform gap.
 
-**P1-2. The app has never been launched.** Everything typechecks and builds;
-no one has run it. The IPC wiring, error paths, and every screen transition are
-unexercised.
+§10 and SDD §17.5 have been rewritten to describe what exists, including the
+platform gap.
 
-```bash
-cd app && npm run tauri dev
-```
-
-Walk Workflow A end to end against `corpus/prd-markdown/input/PRD.md`, adding
-`Vantor`, `Meridian Freight`, `Paylane` as ORG terms. Expect to find real bugs;
-P0-1 was found by reading, not running.
-
-**P1-3. No file picker.** `app/src/App.tsx` uses paste-in `<textarea>`s and a
-typed filename. Add `tauri-plugin-dialog` for open/save, and grant only the
-specific dialog permissions in the capability file. Keep the capability set free
-of network and shell.
-
-**P1-4. No interactive passphrase entry in the CLI.**
-`crates/cli/src/main.rs`, `passphrase()` requires `SPECSHIELD_PASSPHRASE` or
-`--passphrase`. Arguments are visible in the process list, so `--passphrase` is
-already the wrong answer for real use. Add a TTY prompt (`rpassword` or
-equivalent) as the default when neither is set.
-
-**P1-5. Thin test coverage in the Tauri layer.** `app/src-tauri/src/state.rs`
-now has six tests covering the copyable-twin state machine. The *commands* in
-`lib.rs` still have none — they need a harness that can stand up an `AppState`
-and drive `sanitize_text` / `copy_verified_twin` without a window.
-
----
-
-### P2 — M3, next milestone
-
-**P2-1. SQL parser** (`crates/parsers/src/sql.rs`, new). Use `sqlparser`.
-Tables, columns, constraints, indexes. Scope columns as
-`db.schema.table.column` — `corpus/adversarial` has ten `customer_id` columns
-across ten tables specifically to catch a flat implementation.
-
-**P2-2. YAML and JSON parsers**, CST-preserving. **Not `serde_yaml`** (archived
-2024) and **not** a `serde_json` round-trip: deserializing to a value model and
-re-serializing destroys comments and key order, which SDD §4.2 requires
-preserving. See `crates/parsers/src/lib.rs` for the reasoning.
-
-**P2-3. OpenAPI semantic layer** over the YAML/JSON CST: paths, operationIds,
-schema names, tags.
-
-**P2-4. Cross-artifact unification.** The SQL table `customer_subscription`, the
-OpenAPI schema `CustomerSubscription`, and the TS interface must resolve to
-**one** identity with **one** alias. This is the feature that makes the identity
-graph worth having. `crates/cli/tests/corpus.rs` already asserts the corpus
-contains the case.
-
-**P2-5. Widen the corpus gate.** Each corpus project declares `requires` in its
-`spec.json`. As parsers land, those projects become gated automatically —
-nothing to change in `report.rs`, but re-run `--strict` and expect the aggregate
-to move.
-
----
-
-### P3 — open questions, not yet decided
-
-**P3-1. Concept vs. surface form.** `PlanTier` and the prose "Plan tiers" become
-two identities with two aliases, so a model sees them as unrelated. This is
-deliberate — interning each variant under its exact surface text is what keeps
-restore byte-for-byte lossless — but linking surface forms to a shared concept
-would produce better twins. See the comment in `crates/core/src/detect.rs`.
-
-**P3-2. Homoglyphs.** `corpus/adversarial/input/homoglyph.md` contains `Vantor`
-and `Vаntor` (Cyrillic U+0430), labelled as two identities. Whether the detector
-should unify them under Unicode confusable folding is undecided; the fixture
-exists to force the decision.
-
-**P3-3. Alias spike part 2 was never run.** `spikes/M0-alias-format.md`.
-Recoverability is settled offline; drift *frequency* needs real model calls. The
-prompt pack is generated:
-
-```bash
-cargo run -p spike-alias-roundtrip -- --emit-prompts spikes/alias-roundtrip/prompts
-```
-
-12 prompts, 6 formats × envelope/no-envelope. Billable API calls — a human
-should trigger this deliberately.
-
-**P3-4. Re-run the Tree-sitter spike against a real service before M4.**
-`spikes/M0-tree-sitter-rename.md` ran on 12 corpus files. Decorators, generics
-with constraints, barrel re-exports, and ambient `.d.ts` are all untested, and
-they are where heuristic scoping is most likely to break.
-
-**P3-5. Unused vault tables.** `redactions` and `edges` exist in the schema with
-no writer. Occurrences have a writer in `crates/vault` but nothing in the CLI or
-app calls it. Either wire them up as their milestones land, or drop them from
-the schema — an empty table is a claim the product does not honour.
-
----
-
-## 5. Things that will trip you up
-
-- **`cargo fmt` runs on save in this repo's workflow.** Patching Rust files with
-  Python string replacement fights it. Prefer targeted edits.
-- **The corpus `labels.json` files are generated.** Edit `spec.json` and run
-  `python corpus/tools/build_labels.py`. A CI job fails if they drift. Never
-  hand-edit byte offsets.
-- **`clippy.toml` allowlists proper nouns** (`SpecShield`, `OpenAPI`, …) for the
-  `doc_markdown` lint. Add new ones there rather than backticking prose.
-- **The repo lives in OneDrive.** `crates/vault::cloud_sync_root` detects this
-  and the app warns. Moving the working copy out is still on the list.
-- **Windows + SQLCipher does not build.** That is settled (D-9); do not
-  reintroduce `bundled-sqlcipher-vendored-openssl`.

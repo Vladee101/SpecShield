@@ -521,10 +521,16 @@ exclude binary files, lockfiles, and vendored dependency trees by default.
 - **Cloud-sync detection:** the application warns when the project root or vault path lies
   inside a OneDrive, Dropbox, Google Drive, or iCloud tree, and offers to relocate the
   vault to a local-only path.
-- **Clipboard hardening:** clipboard payloads are marked to exclude them from clipboard
-  history and cloud clipboard synchronization; the clipboard is cleared after a
-  configurable timeout; original, unsanitized content is never placed on the clipboard by
-  any UI affordance.
+- **Clipboard hardening:** on Windows, payloads are marked with the three opt-out
+  clipboard formats — `ExcludeClipboardContentFromMonitorProcessing`,
+  `CanIncludeInClipboardHistory`, and `CanUploadToCloudClipboard`, the last of which
+  governs cross-device sync to the user's Microsoft account. The clipboard is cleared
+  after a timeout, and only if it still holds SpecShield's own payload. Original,
+  unsanitized content is never placed on the clipboard by any UI affordance.
+
+  These formats are advisory: a cooperating OS and clipboard manager honour them, and one
+  that ignores them still captures the text. macOS and Linux opt-outs are not implemented,
+  and the audit log records which exports were protected and which were not.
 - No telemetry, no analytics, no auto-update network dependency
 - No internet required — enforced by a network-capability-free application configuration
   and verified by an egress-blocked test in CI
