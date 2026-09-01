@@ -28,10 +28,20 @@ const ENTITY_TYPES: EntityType[] = [
   "COLUMN", "DTO", "IFACE", "ENUM", "EVENT", "ENV", "HOST", "PATH",
 ];
 
+/// The document under review, held once at the top so Review and Sanitize
+/// operate on the same text. Keeping a copy per panel meant a user reviewed one
+/// document and sanitized whatever they happened to paste next — which is
+/// exactly the mistake this tool exists to prevent.
+interface Doc {
+  filename: string;
+  content: string;
+}
+
 export function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [step, setStep] = useState<Step>("project");
   const [error, setError] = useState<string | null>(null);
+  const [doc, setDoc] = useState<Doc>({ filename: "PRD.md", content: "" });
 
   const refresh = useCallback(async () => {
     try {
@@ -107,8 +117,18 @@ export function App() {
           onError={setError}
         />
       )}
-      {step === "review" && project && <ReviewPanel onError={setError} onTermAdded={refresh} />}
-      {step === "verify" && project && <SanitizePanel onError={setError} onDone={refresh} />}
+      {step === "review" && project && (
+        <ReviewPanel
+          doc={doc}
+          setDoc={setDoc}
+          onError={setError}
+          onTermAdded={refresh}
+          onReviewed={() => setStep("verify")}
+        />
+      )}
+      {step === "verify" && project && (
+        <SanitizePanel doc={doc} setDoc={setDoc} onError={setError} onDone={refresh} />
+      )}
       {step === "restore" && project && <RestorePanel onError={setError} />}
     </div>
   );
@@ -199,14 +219,21 @@ function ProjectPanel({
 }
 
 function ReviewPanel({
+  doc,
+  setDoc,
   onError,
   onTermAdded,
+  onReviewed,
 }: {
+  doc: Doc;
+  setDoc: (d: Doc) => void;
   onError: (e: string | null) => void;
   onTermAdded: () => void;
+  onReviewed: () => void;
 }) {
-  const [filename, setFilename] = useState("PRD.md");
-  const [content, setContent] = useState("");
+  const { filename, content } = doc;
+  const setFilename = (f: string) => setDoc({ ...doc, filename: f });
+  const setContent = (c: string) => setDoc({ ...doc, content: c });
   const [result, setResult] = useState<ScanResult | null>(null);
   const [term, setTerm] = useState("");
   const [termType, setTermType] = useState<EntityType>("ORG");
@@ -286,6 +313,12 @@ function ReviewPanel({
               {result.entities.length} would be aliased
             </h4>
             <span className="tag">{result.parser}</span>
+            {/* The review step had no exit. Reviewing and then hunting for the
+                next tab is how a user ends up sanitizing a document they never
+                reviewed. */}
+            <button className="primary" onClick={onReviewed}>
+              Sanitize this →
+            </button>
           </div>
 
           <div className="scroll">
@@ -373,9 +406,20 @@ function ReviewPanel({
   );
 }
 
-function SanitizePanel({ onError, onDone }: { onError: (e: string | null) => void; onDone: () => void }) {
-  const [filename, setFilename] = useState("PRD.md");
-  const [content, setContent] = useState("");
+function SanitizePanel({
+  doc,
+  setDoc,
+  onError,
+  onDone,
+}: {
+  doc: Doc;
+  setDoc: (d: Doc) => void;
+  onError: (e: string | null) => void;
+  onDone: () => void;
+}) {
+  const { filename, content } = doc;
+  const setFilename = (f: string) => setDoc({ ...doc, filename: f });
+  const setContent = (c: string) => setDoc({ ...doc, content: c });
   const [result, setResult] = useState<SanitizeResult | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
 
