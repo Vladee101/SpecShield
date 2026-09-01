@@ -17,6 +17,7 @@ specshield-vault.workspace = true
 specshield-index.workspace = true
 specshield-parsers.workspace = true
 specshield-git.workspace = true
+uuid.workspace = true
 anyhow.workspace = true
 clap = { version = "4.6.6", features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }

@@ -31,7 +31,7 @@ crates/core/      engine: model, alias, edit, detect, secrets, sanitize, restore
 crates/parsers/   markdown, text, sql, yaml, json, openapi, typescript
 crates/vault/     SQLite + per-value AES-256-GCM + blind index
 crates/index/     walk + BLAKE3 + rescan + staleness (M4)
-crates/git/       STUB — M5
+crates/git/       patch generation, guarded apply, undo (M5)
 crates/cli/       `specshield` binary; the CI and corpus harness
 app/              Tauri v2 shell (src-tauri = Rust, src = React)
 corpus/           golden corpus, labelled ground truth, generator
@@ -89,7 +89,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
-| M5 diff + git | not started |
+| M5 diff + git | engine and CLI done; diff viewer UI remains |
 | M6 hardening + packaging | not started |
 
 Corpus, current: all six projects gated, 98.6% recall / 95.8% precision;
@@ -294,6 +294,15 @@ twin tree at aliased paths and `specshield restore <twin-dir> --out <dir>`
 puts it back. The rule lives in `crates/core/src/paths.rs` because the parser
 and the export both need it: a file and every import of it must land on the
 same alias or the twin stops resolving.
+
+---
+
+**P2-7. The M5 diff viewer UI does not exist.** The engine, the git integration,
+and the CLI (`diff`, `resolve`, `apply`, `undo`) are done and Workflow B runs end
+to end from the command line. What is missing is the Tauri screen: the diff view
+with fuzzy hits and unresolved identities inline, and the form that names an
+invented entity. `crates/core/src/diff.rs` already returns everything that
+screen needs — hunks, per-hunk notes, and the complete note list.
 
 ---
 

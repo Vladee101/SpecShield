@@ -198,6 +198,18 @@ impl Index {
     }
 }
 
+/// The checksum of one file, for a caller that has no reason to walk a tree.
+///
+/// The staleness guard (SDD §13.1) asks about a single file at a time, and
+/// hashing the whole project to answer that would be absurd.
+pub fn checksum_of(path: &Path) -> Result<String, IndexError> {
+    let bytes = std::fs::read(path).map_err(|source| IndexError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
 /// The walk, kept separate from hashing so `build` and `rescan` share it.
 ///
 /// Returns `(absolute path, size, mtime)`: the metadata is already in hand from
@@ -406,6 +418,21 @@ mod tests {
 
         let (_, changes) = index.rescan(project.path()).expect("rescan");
         assert_eq!(changes.modified, vec!["src/a.ts"], "{changes:?}");
+    }
+
+    #[test]
+    fn a_single_file_checksum_matches_the_one_the_walk_computes() {
+        let project = TempProject::new("one-file");
+        project.write(
+            "src/a.ts",
+            b"export const a = 1;
+",
+        );
+
+        let index = Index::build(project.path()).expect("build");
+        let direct = checksum_of(&project.path().join("src/a.ts")).expect("checksum");
+
+        assert_eq!(index.checksum("src/a.ts"), Some(direct.as_str()));
     }
 
     #[test]

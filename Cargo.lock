@@ -3808,6 +3808,7 @@ dependencies = [
  "specshield-index",
  "specshield-parsers",
  "specshield-vault",
+ "uuid",
  "zeroize",
 ]
 
