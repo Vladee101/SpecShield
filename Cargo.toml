@@ -39,6 +39,7 @@ aho-corasick = "1"
 regex = "1"
 similar = "2"
 rayon = "1"
+ignore = "0.4"
 
 proptest = "1"
 

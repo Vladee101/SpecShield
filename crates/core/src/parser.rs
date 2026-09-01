@@ -4,7 +4,7 @@
 //! one output representation: a list of [`Edit`]s over byte ranges. Adding a
 //! language means implementing this trait; nothing else in the pipeline changes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use uuid::Uuid;
@@ -142,11 +142,65 @@ pub trait ArtifactParser: Send + Sync {
 /// Populated from the vault, so knowledge accumulates as artifacts are scanned:
 /// the DTO file teaches the project that `customerId` is a member, and the
 /// service file that merely uses it can then see that too.
+/// Built once per run, never per file. The sets are the size of the project, so
+/// rebuilding them for each document is quadratic in file count — it took a
+/// 1,000-file export from seconds to over ten minutes before the fields were
+/// closed off behind this constructor.
 #[derive(Debug, Default, Clone)]
 pub struct ProjectContext {
-    /// Member names — properties, fields, columns — known anywhere in the
-    /// project.
-    pub known_members: std::collections::BTreeSet<String>,
+    members: HashSet<String>,
+    names: HashSet<String>,
+    folded: HashSet<String>,
+}
+
+impl ProjectContext {
+    /// `members` are property, field, and column names; `names` is every name
+    /// the project knows, of any type.
+    #[must_use]
+    pub fn new(members: impl IntoIterator<Item = String>, names: impl IntoIterator<Item = String>) -> Self {
+        let names: HashSet<String> = names.into_iter().collect();
+        Self {
+            members: members.into_iter().collect(),
+            folded: names.iter().map(|n| fold_name(n)).collect(),
+            names,
+        }
+    }
+
+    /// Is this a member name — a property, field, or column — anywhere in the
+    /// project?
+    #[must_use]
+    pub fn is_member(&self, name: &str) -> bool {
+        self.members.contains(name)
+    }
+
+    /// Does the project know this name, ignoring case and separators?
+    ///
+    /// A file named `thing18.ts` says `Thing18` out loud; without project-wide
+    /// names a parser cannot tell that from `helpers.ts`, which says nothing.
+    #[must_use]
+    pub fn knows_folded(&self, folded: &str) -> bool {
+        self.folded.contains(folded)
+    }
+
+    pub fn members(&self) -> impl Iterator<Item = &String> {
+        self.members.iter()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty() && self.names.is_empty()
+    }
+}
+
+/// A name reduced to what a filename and an identifier have in common:
+/// lowercase, no separators. `customer-subscription` and `CustomerSubscription`
+/// both become `customersubscription`.
+#[must_use]
+pub fn fold_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// A parser's structural fingerprint of a document — SDD §7.2.

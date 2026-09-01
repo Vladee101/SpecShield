@@ -91,6 +91,21 @@ pub struct Settings {
     pub project_key: [u8; 32],
 }
 
+/// One indexed file — the `files` row of SDD §9.1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    /// Project-root-relative, `/`-separated.
+    pub path: String,
+    /// Where this file lands in an exported twin. Equal to `path` until path
+    /// aliasing renames it.
+    pub twin_path: String,
+    /// BLAKE3 of the content this record describes — the staleness gate's
+    /// reference point (SDD §13.1).
+    pub checksum: String,
+    /// The parser that claimed it, or empty for a file no parser handles.
+    pub parser: String,
+}
+
 /// One stored identity — the `identities` row of SDD §9.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredIdentity {
@@ -308,6 +323,82 @@ impl Vault {
                     identity.status,
                     now(),
                 ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Record the index — SDD §9.1, §13.1.
+    ///
+    /// Paths are sealed: a file tree is proprietary on its own. `path_idx` is
+    /// the blind index that makes a path findable and uniquely constrainable
+    /// without storing it.
+    ///
+    /// The batch form to [`Vault::put_file`]'s single row: a 1,000-file rescan
+    /// through one transaction rather than a thousand. The row id is derived
+    /// from the path here, so a rescan lands on the row it wrote last time
+    /// without the caller having to remember an id.
+    pub fn put_files(&mut self, files: &[StoredFile]) -> Result<(), VaultError> {
+        let tx = self.conn.transaction()?;
+        for file in files {
+            let idx = self.keys.blind_index(&file.path);
+            // The row id is derived from the path, not random: an upsert must
+            // land on the same row every rescan, and the AAD binds ciphertext to
+            // that row.
+            let id = idx.clone();
+            tx.execute(
+                FILE_UPSERT,
+                params![
+                    id,
+                    idx,
+                    self.keys.seal(&file.path, &aad("files", "path", &id))?,
+                    self.keys.seal(&file.twin_path, &aad("files", "twin_path", &id))?,
+                    file.checksum,
+                    file.parser,
+                    now(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn files(&self) -> Result<Vec<StoredFile>, VaultError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path_enc, twin_path_enc, checksum, parser FROM files ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, path_enc, twin_enc, checksum, parser) = row?;
+            out.push(StoredFile {
+                path: self.keys.unseal(&path_enc, &aad("files", "path", &id))?,
+                twin_path: self.keys.unseal(&twin_enc, &aad("files", "twin_path", &id))?,
+                checksum,
+                parser,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Drop index rows for files that no longer exist. A rescan that only ever
+    /// upserts would keep a deleted file stale forever.
+    pub fn forget_files(&mut self, paths: &[String]) -> Result<(), VaultError> {
+        let tx = self.conn.transaction()?;
+        for path in paths {
+            tx.execute(
+                "DELETE FROM files WHERE path_idx = ?",
+                params![self.keys.blind_index(path)],
             )?;
         }
         tx.commit()?;
@@ -569,6 +660,15 @@ impl Vault {
     }
 }
 
+const FILE_UPSERT: &str = "INSERT INTO files
+        (id, path_idx, path_enc, twin_path_enc, checksum, parser, indexed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(path_idx) DO UPDATE SET
+        twin_path_enc = excluded.twin_path_enc,
+        checksum = excluded.checksum,
+        parser = excluded.parser,
+        indexed_at = excluded.indexed_at";
+
 const IDENTITY_UPSERT: &str = "INSERT INTO identities
         (uuid, identity_idx, scope_path_enc, entity_type, real_name_enc, alias, origin, status, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -765,6 +865,68 @@ mod tests {
         v.put_identity(&a).unwrap();
         v.put_identity(&b).unwrap();
         assert_eq!(v.identities().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_file_index_round_trips_through_sealed_paths() {
+        let t = TempVault::new("files");
+        let mut v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        let files = vec![
+            StoredFile {
+                path: "src/domain/customer-subscription.ts".to_owned(),
+                twin_path: "src/domain/PATH_A1B2C3.ts".to_owned(),
+                checksum: "abc123".to_owned(),
+                parser: "typescript".to_owned(),
+            },
+            StoredFile {
+                path: "README.md".to_owned(),
+                twin_path: "README.md".to_owned(),
+                checksum: "def456".to_owned(),
+                parser: "markdown".to_owned(),
+            },
+        ];
+        v.put_files(&files).unwrap();
+
+        let mut back = v.files().unwrap();
+        back.sort_by(|a, b| a.path.cmp(&b.path));
+        let mut expected = files.clone();
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(back, expected);
+
+        // A rescan updates in place rather than accumulating rows.
+        let mut edited = files.clone();
+        edited[0].checksum = "999999".to_owned();
+        v.put_files(&edited).unwrap();
+        assert_eq!(v.files().unwrap().len(), 2);
+        assert!(v.files().unwrap().iter().any(|f| f.checksum == "999999"));
+
+        v.forget_files(&["README.md".to_owned()]).unwrap();
+        let left = v.files().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, "src/domain/customer-subscription.ts");
+    }
+
+    #[test]
+    fn no_path_appears_in_the_vault_file() {
+        // The tree itself is proprietary: a directory named after a client is a
+        // leak with no identifier in it at all.
+        let t = TempVault::new("paths-sealed");
+        let mut v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        v.put_files(&[StoredFile {
+            path: "src/meridian-freight/billing.ts".to_owned(),
+            twin_path: "src/PATH_QQ11ZZ/billing.ts".to_owned(),
+            checksum: "abc".to_owned(),
+            parser: "typescript".to_owned(),
+        }])
+        .unwrap();
+        drop(v);
+
+        let raw = std::fs::read(t.path()).unwrap();
+        let needle = b"meridian-freight";
+        assert!(
+            !raw.windows(needle.len()).any(|w| w == needle),
+            "a path reached the vault file in plaintext"
+        );
     }
 
     #[test]

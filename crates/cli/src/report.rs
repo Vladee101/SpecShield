@@ -301,14 +301,14 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
     // The project's known members, as the vault would supply them after a scan.
     // Without this the TypeScript parser sees each file in isolation and misses
     // every property *reference*, which is most of them.
-    let context = specshield_core::parser::ProjectContext {
-        known_members: labels
+    let context = specshield_core::parser::ProjectContext::new(
+        labels
             .entities
             .iter()
             .filter(|e| e.entity_type == "column")
-            .map(|e| e.real_name.clone())
-            .collect(),
-    };
+            .map(|e| e.real_name.clone()),
+        labels.entities.iter().map(|e| e.real_name.clone()),
+    );
 
     let negative: HashSet<&str> = labels.negative_files.iter().map(String::as_str).collect();
     let files: HashSet<&str> = labels

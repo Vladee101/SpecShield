@@ -128,6 +128,40 @@ enum Command {
         passphrase: Option<String>,
     },
 
+    /// Walk the project, hash every file, and record the index (SDD §4.1).
+    ///
+    /// Ignored files are ignored: `node_modules` is not the user's code.
+    Index {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Re-walk and report what changed since the last index (SDD §13.1).
+    ///
+    /// The staleness half of the same operation: a twin made from a file that
+    /// has since been edited would revert that edit when its patch is applied.
+    Rescan {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Sanitize every parseable file in the project into a twin directory.
+    ///
+    /// The gate runs per file. One blocked file blocks the export: a directory
+    /// that is clean apart from one leak is not clean.
+    Export {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Directory to write the twin project into. Must not already exist.
+        dest: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
     /// Measure detection recall and precision against the labelled corpus
     /// (PRD §5). Consumed by CI.
     Report {
@@ -230,6 +264,13 @@ fn main() -> Result<()> {
             confirm,
             passphrase,
         } => run_unify(&project, confirm.as_deref(), passphrase.as_deref()),
+        Command::Index { project, passphrase } => run_index(&project, passphrase.as_deref()),
+        Command::Rescan { project, passphrase } => run_rescan(&project, passphrase.as_deref()),
+        Command::Export {
+            project,
+            dest,
+            passphrase,
+        } => run_export(&project, &dest, passphrase.as_deref()),
         Command::Report {
             corpus,
             strict,
@@ -307,13 +348,13 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
 /// What the project knows, for parsers that cannot resolve everything from one
 /// file — see `ProjectContext`.
 fn context_from(vault: &vault::Vault) -> Result<specshield_core::parser::ProjectContext> {
-    let mut context = specshield_core::parser::ProjectContext::default();
-    for identity in vault.identities()? {
-        if identity.entity_type == EntityType::Column.prefix() {
-            context.known_members.insert(identity.real_name);
-        }
-    }
-    Ok(context)
+    let identities = vault.identities()?;
+    let members = identities
+        .iter()
+        .filter(|i| i.entity_type == EntityType::Column.prefix())
+        .map(|i| i.real_name.clone());
+    let names = identities.iter().map(|i| i.real_name.clone());
+    Ok(specshield_core::parser::ProjectContext::new(members, names))
 }
 
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {
@@ -646,6 +687,358 @@ fn run_restore(project: &Path, input: Option<&Path>, explicit: Option<&str>) -> 
         );
     }
     Ok(())
+}
+
+/// Walk the project and record what is in it — SDD §4.1.
+///
+/// The index is what makes the other repo-scale commands possible: `rescan`
+/// compares against it, and `export` iterates it rather than re-walking.
+fn run_index(project: &Path, explicit: Option<&str>) -> Result<()> {
+    let mut vault = open(project, explicit)?;
+
+    let started = std::time::Instant::now();
+    let index = specshield_index::Index::build(project)?;
+    let walked = started.elapsed();
+
+    let files: Vec<vault::StoredFile> = index
+        .files
+        .values()
+        .map(|entry| vault::StoredFile {
+            path: entry.path.clone(),
+            // Path aliasing has not run yet. The twin path is the real path
+            // until something renames it, and saying so is better than storing
+            // an empty column that later reads as "no twin".
+            twin_path: entry.path.clone(),
+            checksum: entry.checksum.clone(),
+            parser: parser_for(project, entry),
+        })
+        .collect();
+
+    vault.put_files(&files)?;
+    vault.log(
+        "index",
+        Some(i64::try_from(files.len()).unwrap_or(i64::MAX)),
+        None,
+        None,
+        None,
+    )?;
+
+    let text = index.text_files().count();
+    let parseable = files.iter().filter(|f| !f.parser.is_empty()).count();
+
+    println!("Indexed {} file(s) in {:.2}s", index.len(), walked.as_secs_f64());
+    println!("  {text} text, {parseable} with a parser in this build");
+    println!("  {} binary or unparseable", index.len() - parseable);
+    Ok(())
+}
+
+/// Re-walk and say what moved — SDD §13.1.
+fn run_rescan(project: &Path, explicit: Option<&str>) -> Result<()> {
+    let mut vault = open(project, explicit)?;
+
+    let recorded = vault.files()?;
+    if recorded.is_empty() {
+        bail!("no index for this project yet — run `specshield index` first");
+    }
+
+    let previous = specshield_index::Index {
+        root: project.to_path_buf(),
+        files: recorded
+            .iter()
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    specshield_index::Entry {
+                        path: f.path.clone(),
+                        checksum: f.checksum.clone(),
+                        size: 0,
+                        modified: None,
+                        is_text: true,
+                    },
+                )
+            })
+            .collect(),
+    };
+
+    let started = std::time::Instant::now();
+    let (index, changes) = previous.rescan(project)?;
+    let elapsed = started.elapsed();
+
+    let updated: Vec<vault::StoredFile> = index
+        .files
+        .values()
+        .map(|entry| vault::StoredFile {
+            path: entry.path.clone(),
+            twin_path: entry.path.clone(),
+            checksum: entry.checksum.clone(),
+            parser: parser_for(project, entry),
+        })
+        .collect();
+    vault.put_files(&updated)?;
+    vault.forget_files(&changes.removed)?;
+
+    println!("Rescanned {} file(s) in {:.2}s", index.len(), elapsed.as_secs_f64());
+    println!(
+        "  {} added, {} modified, {} removed, {} unchanged",
+        changes.added.len(),
+        changes.modified.len(),
+        changes.removed.len(),
+        changes.unchanged
+    );
+
+    for (label, paths) in [
+        ("added", &changes.added),
+        ("modified", &changes.modified),
+        ("removed", &changes.removed),
+    ] {
+        for path in paths.iter().take(20) {
+            println!("  {label:>8}  {path}");
+        }
+        if paths.len() > 20 {
+            println!("  {:>8}  … and {} more", "", paths.len() - 20);
+        }
+    }
+
+    // The point of the exercise: which twins can no longer be trusted.
+    let pairs: Vec<(String, String)> = recorded.into_iter().map(|f| (f.path, f.checksum)).collect();
+    let stale = index.stale(&pairs);
+    if stale.is_empty() {
+        println!("\nNo stale twins: every recorded checksum still matches the file on disk.");
+    } else {
+        println!(
+            "\n{} file(s) have changed since their twin was made. Applying a patch",
+            stale.len()
+        );
+        println!("built from those twins would revert the intervening edits — re-sanitize first:");
+        for path in stale.iter().take(20) {
+            println!("  {path}");
+        }
+    }
+    Ok(())
+}
+
+/// Sanitize the whole project into a directory — the M4 twin export.
+///
+/// Every file is written, not only the parseable ones: a twin project that is
+/// missing its `package.json` is not the project. Files no parser handles are
+/// copied through unchanged, and the gate still runs over them — a name in an
+/// unparsed file is a leak exactly like a name in a parsed one.
+/// Place one file in the twin tree, creating the directories it needs.
+fn write_into(dest: &Path, relative: &str, put: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<()> {
+    let target = dest.join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    put(&target).with_context(|| format!("writing {}", target.display()))
+}
+
+fn report_export(
+    dest: &Path,
+    written: usize,
+    aliased: usize,
+    identities: usize,
+    unchecked: usize,
+    abandoned: &[(String, String)],
+) {
+    println!("Exported {} file(s) to {}", written, dest.display());
+    println!("  {aliased} alias applications, {identities} identities in the vault");
+    println!("  every file passed the gate (SDD §8)");
+    println!("  {unchecked} file(s) had no structure to verify against");
+    if abandoned.is_empty() {
+        println!("  every parsed file verified structurally (SDD §7.2)");
+    } else {
+        println!(
+            "  {} file(s) exported UNALIASED — aliasing was abandoned:",
+            abandoned.len()
+        );
+        for (path, why) in abandoned.iter().take(20) {
+            println!("      {path}: {why}");
+        }
+    }
+}
+
+fn report_blocked(blocked: &[(String, Vec<String>)]) {
+    eprintln!("EXPORT BLOCKED — {} file(s) did not verify:", blocked.len());
+    for (path, leaks) in blocked.iter().take(20) {
+        eprintln!("  {path}");
+        for leak in leaks.iter().take(5) {
+            eprintln!("      {leak}");
+        }
+    }
+}
+
+/// The first of the export's two passes: sanitize everything and keep only what
+/// it taught the graph.
+///
+/// A single pass has no order that works. `customerId` is declared in the DTO
+/// and merely *used* in the service; whichever file the walk reaches first, the
+/// other one was sanitized by a build that had not learned the name yet — and
+/// the gate, which runs over the finished graph, then blocks on it.
+///
+/// This is the rule that already holds between CLI invocations — a name found
+/// in one artifact is found in every artifact — applied inside one command.
+fn learn_project(
+    project: &Path,
+    index: &specshield_index::Index,
+    vault: &mut vault::Vault,
+    graph: &mut Graph,
+) -> Result<()> {
+    let detector = detector_from(vault)?;
+    let context = context_from(vault)?;
+
+    for entry in index.files.values().filter(|e| e.is_text) {
+        let source_path = project.join(&entry.path);
+        let Ok(source) = std::fs::read_to_string(&source_path) else {
+            continue;
+        };
+        let parser = specshield_parsers::for_document(&source_path, &source);
+        sanitize::sanitize(&source, &entry.path, &detector, graph, parser.as_deref(), &context)?;
+    }
+
+    persist(vault, graph)
+}
+
+fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
+    if dest.exists() {
+        bail!("{} already exists — refusing to write into it", dest.display());
+    }
+
+    let mut vault = open(project, explicit)?;
+    let index = specshield_index::Index::build(project)?;
+
+    let mut graph = graph_from(&vault)?;
+
+    learn_project(project, &index, &mut vault, &mut graph)?;
+
+    let detector = detector_from(&vault)?;
+    let context = context_from(&vault)?;
+
+    let mut written = 0usize;
+    let mut aliased = 0usize;
+    let mut blocked: Vec<(String, Vec<String>)> = Vec::new();
+    let mut staged: Vec<(String, String)> = Vec::new();
+    let mut records: Vec<vault::StoredFile> = Vec::new();
+    let mut abandoned: Vec<(String, String)> = Vec::new();
+    let mut unchecked = 0usize;
+
+    for entry in index.files.values() {
+        let source_path = project.join(&entry.path);
+
+        if !entry.is_text {
+            // Nothing to sanitize and nothing to verify: a binary carries no
+            // identifiers a parser or the gate can read. It is copied so the
+            // exported tree is still the project.
+            records.push(vault::StoredFile {
+                path: entry.path.clone(),
+                twin_path: entry.path.clone(),
+                checksum: entry.checksum.clone(),
+                parser: String::new(),
+            });
+            write_into(dest, &entry.path, |target| {
+                std::fs::copy(&source_path, target).map(|_| ())
+            })?;
+            written += 1;
+            continue;
+        }
+
+        let source =
+            std::fs::read_to_string(&source_path).with_context(|| format!("reading {}", source_path.display()))?;
+        let parser = specshield_parsers::for_document(&source_path, &source);
+        let scope = entry.path.clone();
+
+        let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, parser.as_deref(), &context)?;
+
+        if secrets::blocks_export(&secrets::scan(&result.twin)) {
+            blocked.push((entry.path.clone(), vec!["unredacted secret".to_owned()]));
+            continue;
+        }
+
+        // SDD §7.2. An abandoned file is not a failure — the original is
+        // preserved, which is the correct outcome — but it is a file the model
+        // will see unaliased, and an export that did not say so would be
+        // reporting a clean run it did not have.
+        match &result.verification {
+            sanitize::Verification::Passed => {}
+            sanitize::Verification::TwinDidNotParse { parser } => {
+                abandoned.push((entry.path.clone(), format!("twin no longer parses as {parser}")));
+            }
+            sanitize::Verification::StructureChanged { parser, .. } => {
+                abandoned.push((entry.path.clone(), format!("{parser} structure changed")));
+            }
+            sanitize::Verification::Unsupported { .. } | sanitize::Verification::NotAttempted => {
+                unchecked += 1;
+            }
+        }
+
+        aliased += result.applied.len();
+        records.push(vault::StoredFile {
+            path: entry.path.clone(),
+            twin_path: entry.path.clone(),
+            checksum: entry.checksum.clone(),
+            parser: parser.as_ref().map_or(String::new(), |p| p.name().to_owned()),
+        });
+        staged.push((entry.path.clone(), result.twin));
+    }
+
+    // The graph is persisted either way: those aliases were derived, and
+    // throwing them away would hand different aliases to the next run.
+    persist(&mut vault, &graph)?;
+
+    // One gate over the finished graph, not one per file.
+    //
+    // Stronger and faster for the same reason: the vault knows more after the
+    // last file than it did after the first, so a name interned in file 900 is
+    // now checked against file 3's twin — which a per-file scan would have
+    // passed. Building the automaton once also takes the export from minutes to
+    // seconds on a thousand files; it is O(names) to build and the graph grows
+    // with every file.
+    let scanner = verify::LeakScanner::new(graph.real_names());
+    for (path, twin) in &staged {
+        if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
+            blocked.push((
+                path.clone(),
+                leaks
+                    .iter()
+                    .map(|l| format!("{}:{} {:?}", l.line, l.column, l.matched))
+                    .collect(),
+            ));
+        }
+    }
+
+    if !blocked.is_empty() {
+        vault.log("export", None, None, Some("blocked"), None)?;
+        let _ = std::fs::remove_dir_all(dest);
+        report_blocked(&blocked);
+        bail!("nothing was written: a partially clean twin project is not clean");
+    }
+
+    for (path, twin) in &staged {
+        write_into(dest, path, |target| std::fs::write(target, twin))?;
+        written += 1;
+    }
+
+    vault.put_files(&records)?;
+    vault.log(
+        "export",
+        Some(i64::try_from(written).unwrap_or(i64::MAX)),
+        Some(i64::try_from(graph.len()).unwrap_or(i64::MAX)),
+        Some("clean"),
+        Some(&dest.to_string_lossy()),
+    )?;
+
+    report_export(dest, written, aliased, graph.len(), unchecked, &abandoned);
+    Ok(())
+}
+
+/// Which parser claims this file, or empty. Reads the file only when a parser
+/// might need the content to decide — OpenAPI is a YAML file until you look.
+fn parser_for(project: &Path, entry: &specshield_index::Entry) -> String {
+    if !entry.is_text {
+        return String::new();
+    }
+    let path = project.join(&entry.path);
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    specshield_parsers::for_document(&path, &content).map_or(String::new(), |p| p.name().to_owned())
 }
 
 fn run_unify(project: &Path, confirm: Option<&str>, explicit: Option<&str>) -> Result<()> {

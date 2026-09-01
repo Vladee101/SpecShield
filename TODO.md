@@ -28,9 +28,9 @@ When code and docs disagree, that is a bug in one of them. Say which.
 
 ```
 crates/core/      engine: model, alias, edit, detect, secrets, sanitize, restore, verify, diff
-crates/parsers/   markdown + text today; sql/yaml/openapi = M3, typescript = M4
+crates/parsers/   markdown, text, sql, yaml, json, openapi, typescript
 crates/vault/     SQLite + per-value AES-256-GCM + blind index
-crates/index/     STUB — M4
+crates/index/     walk + BLAKE3 + rescan + staleness (M4)
 crates/git/       STUB — M5
 crates/cli/       `specshield` binary; the CI and corpus harness
 app/              Tauri v2 shell (src-tauri = Rust, src = React)
@@ -88,13 +88,17 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
-| M4 TypeScript + repo scale | not started |
+| M4 TypeScript + repo scale | parser, index, project export done; P2-6 remains |
 | M5 diff + git | not started |
 | M6 hardening + packaging | not started |
 
-Corpus, current: `prd-markdown` 100% recall / 96.2% precision (gated); secrets
-6/6, 0 false positives. Projects whose parsers do not exist yet are reported but
-not gated — see `crates/cli/src/report.rs`.
+Corpus, current: all six projects gated, 98.6% recall / 95.8% precision;
+secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
+excluded from the verdict — see `crates/cli/src/report.rs`.
+
+Repo scale, measured on a synthetic 1,000-file / 151k-LOC TypeScript project
+(release build, this machine): index 0.03 s, full project export 11.5 s, rescan
+0.44 s. The M4 exit criteria are < 30 s and < 2 s.
 
 ---
 
@@ -280,10 +284,18 @@ unrelated `Status` enums and a name match is not evidence. A proposal needs two
 *different* compatible kinds. Columns are never unified — `customer_id` is in a
 dozen tables.
 
-**P2-5. Widen the corpus gate.** Each corpus project declares `requires` in its
-`spec.json`. As parsers land, those projects become gated automatically —
-nothing to change in `report.rs`, but re-run `--strict` and expect the aggregate
-to move.
+**P2-5. Widen the corpus gate. — DONE in M4.** All six projects are gated:
+98.6% recall / 95.8% precision. Nothing in `report.rs` changed; the projects
+became gated on their own as the parsers landed, which is what `requires` was
+for.
+
+**P2-6. `files.twin_path` is recorded but never differs from `path`.** The M4
+deliverable list includes path and filename aliasing, and `PathSegment`
+identities exist inside import strings — but `specshield export` writes the twin
+tree at the *real* paths. A directory named after a client is a leak with no
+identifier in it, and the export currently reproduces it. The column, the
+`PathSegment` type, and the vault writer are all in place; what is missing is
+renaming the output tree and teaching restore to map a twin path back.
 
 ---
 
@@ -311,14 +323,17 @@ cargo run -p spike-alias-roundtrip -- --emit-prompts spikes/alias-roundtrip/prom
 12 prompts, 6 formats × envelope/no-envelope. Billable API calls — a human
 should trigger this deliberately.
 
-**P3-4. Re-run the Tree-sitter spike against a real service before M4.**
-`spikes/M0-tree-sitter-rename.md` ran on 12 corpus files. Decorators, generics
-with constraints, barrel re-exports, and ambient `.d.ts` are all untested, and
-they are where heuristic scoping is most likely to break.
+**P3-4. Re-run the Tree-sitter spike against a *real* service.** Still open, and
+now more pointed: the M4 parser has been exercised on the six-file corpus service
+and on a 1,000-file synthetic repo, but a synthetic repo only contains the shapes
+its generator knew to emit. Decorators, generics with constraints, barrel
+re-exports, and ambient `.d.ts` remain untested, and they are where heuristic
+scoping is most likely to break.
 
 **P3-5. Unused vault tables.** `redactions` and `edges` exist in the schema with
 no writer. Occurrences have a writer in `crates/vault` but nothing in the CLI or
-app calls it. Either wire them up as their milestones land, or drop them from
+app calls it. (`files` gained one in M4: `specshield index`, `rescan`, and
+`export` all write it.) Either wire them up as their milestones land, or drop them from
 the schema — an empty table is a claim the product does not honour.
 
 ---

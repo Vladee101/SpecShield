@@ -203,6 +203,22 @@ pub struct Detector {
     dictionary: Vec<(String, EntityType)>,
     /// Terms that must never be aliased, beyond [`STOP_LIST`].
     allowlist: HashSet<String>,
+    /// One automaton over the whole dictionary, built on first use.
+    ///
+    /// The dictionary is not a handful of user terms any more: it is seeded
+    /// from the vault, so a repo-scale project puts tens of thousands of names
+    /// in it. Scanning each term across each file separately made a 1,000-file
+    /// export run for over ten minutes. Aho-Corasick makes it one pass over the
+    /// text regardless of how many names the project knows — the same reason
+    /// the export gate uses it (SDD §8).
+    matcher: std::sync::OnceLock<aho_corasick::AhoCorasick>,
+    /// The dictionary's case variants, as one case-insensitive automaton.
+    ///
+    /// The variant pass used to scan the text once per variant. At project
+    /// scale that is tens of thousands of substring searches per file, and it
+    /// was the single slowest thing in a repo-wide export — 115 ms per file at
+    /// 5,000 known names, against 2 ms at 100.
+    variants: std::sync::OnceLock<(aho_corasick::AhoCorasick, Vec<EntityType>)>,
 }
 
 impl Detector {
@@ -214,9 +230,54 @@ impl Detector {
     #[must_use]
     pub fn with_term(mut self, name: impl Into<String>, entity_type: EntityType) -> Self {
         self.dictionary.push((name.into(), entity_type));
-        // Longest first, so `Meridian Freight` is matched before `Meridian`.
-        self.dictionary.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+        // Deliberately not sorted here. `Meridian Freight` still wins over
+        // `Meridian` — leftmost-longest is the automaton's match semantics —
+        // and re-sorting on every insertion turned seeding 24,000 vault names
+        // into the slowest part of an export.
+        self.matcher.take();
+        self.variants.take();
         self
+    }
+
+    /// The case-variant automaton over the dictionary, built once.
+    ///
+    /// Variants of names found in *this* document are handled separately: there
+    /// are a handful of them and they change per file.
+    fn variant_matcher(&self) -> &(aho_corasick::AhoCorasick, Vec<EntityType>) {
+        self.variants.get_or_init(|| {
+            let mut patterns: Vec<String> = Vec::new();
+            let mut types: Vec<EntityType> = Vec::new();
+            for (term, entity_type) in &self.dictionary {
+                for variant in crate::verify::case_variants(term) {
+                    if variant == *term || variant.len() < 4 || self.is_allowed(&variant) {
+                        continue;
+                    }
+                    patterns.push(variant);
+                    types.push(*entity_type);
+                }
+            }
+            let automaton = aho_corasick::AhoCorasick::builder()
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                // The gate matches this way too (SDD §8). A case-sensitive pass
+                // finds `plan tiers` but not the `Plan tiers` in the heading,
+                // and the gate then blocks on it.
+                .ascii_case_insensitive(true)
+                .build(&patterns)
+                .expect("variant automaton");
+            (automaton, types)
+        })
+    }
+
+    /// The dictionary automaton, built once.
+    fn matcher(&self) -> &aho_corasick::AhoCorasick {
+        self.matcher.get_or_init(|| {
+            aho_corasick::AhoCorasick::builder()
+                // Longest wins, so `Meridian Freight` is never shadowed by
+                // `Meridian`. This is what the old length sort was for.
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .build(self.dictionary.iter().map(|(term, _)| term))
+                .expect("dictionary automaton")
+        })
     }
 
     #[must_use]
@@ -257,15 +318,21 @@ impl Detector {
         claimed.extend(protected_regions(text));
 
         // 1. Dictionary — highest confidence, claims spans first.
-        for (term, entity_type) in &self.dictionary {
-            for (start, end) in whole_token_spans(text, term) {
+        if !self.dictionary.is_empty() {
+            for m in self.matcher().find_iter(text) {
+                // The automaton matches substrings; an entity is a whole token.
+                // `plan` inside `planning` is not the term.
+                if !is_whole_token(text, m.start(), m.end()) {
+                    continue;
+                }
+                let (term, entity_type) = &self.dictionary[m.pattern().as_usize()];
                 push(
                     Candidate {
                         real_name: term.clone(),
                         entity_type: *entity_type,
                         scope_path: scope.to_owned(),
-                        byte_start: start,
-                        byte_end: end,
+                        byte_start: m.start(),
+                        byte_end: m.end(),
                         kind,
                         confidence: 1.0,
                     },
@@ -357,11 +424,35 @@ impl Detector {
         // is that one concept can hold two identities and therefore two
         // aliases, so a model sees them as unrelated. Linking surface forms to
         // a shared concept is a post-MVP refinement.
+        if !self.dictionary.is_empty() {
+            let (automaton, types) = self.variant_matcher();
+            for m in automaton.find_iter(text) {
+                if !is_whole_token(text, m.start(), m.end()) {
+                    continue;
+                }
+                push(
+                    Candidate {
+                        // The exact surface text, so restore is lossless.
+                        real_name: text[m.start()..m.end()].to_owned(),
+                        entity_type: types[m.pattern().as_usize()],
+                        scope_path: scope.to_owned(),
+                        byte_start: m.start(),
+                        byte_end: m.end(),
+                        kind,
+                        confidence: 0.82,
+                    },
+                    &mut claimed,
+                    &mut found,
+                );
+            }
+        }
+
+        // Names found in *this* document, whose variants no precomputed
+        // automaton could hold.
         let known: Vec<(String, EntityType)> = found
             .iter()
             .filter(|c| c.confidence >= 0.8)
             .map(|c| (c.real_name.clone(), c.entity_type))
-            .chain(self.dictionary.iter().cloned())
             .collect();
 
         for (name, entity_type) in known {
@@ -452,6 +543,16 @@ fn is_sentence_noise(phrase: &str, text: &str, start: usize) -> bool {
 }
 
 /// Whole-token byte spans, so `invoice` does not match inside `invoice_id`.
+/// Is `text[start..end]` bounded by something that is not part of a name?
+///
+/// `_` counts as part of a name, which is what lets the gate see `customer_id`
+/// inside `old_customer_id_v2`.
+#[must_use]
+pub fn is_whole_token(text: &str, start: usize, end: usize) -> bool {
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    boundary(text[..start].chars().next_back()) && boundary(text[end..].chars().next())
+}
+
 pub fn whole_token_spans(text: &str, needle: &str) -> Vec<(usize, usize)> {
     if needle.is_empty() {
         return Vec::new();
@@ -543,6 +644,46 @@ pub fn whole_token_spans_ci(text: &str, needle: &str) -> Vec<(usize, usize)> {
         start = found + 1;
     }
     spans
+}
+
+#[cfg(test)]
+mod scale {
+    use super::*;
+
+    /// The detector's cost must not grow with the size of the project.
+    ///
+    /// It did, twice: once per dictionary term and once per case variant of
+    /// each term, both scanning the whole text. Seeding the dictionary from the
+    /// vault turned that into 15,000 substring searches per file and a
+    /// 1,000-file export into a ten-minute one. The ratio below is generous —
+    /// the regression it guards was roughly a hundredfold.
+    #[test]
+    fn scan_cost_does_not_grow_with_the_dictionary() {
+        let text = "export class Service0 { method0(): number { return 1; } }\n".repeat(150);
+
+        let time_with = |n: usize| {
+            let mut d = Detector::new();
+            for i in 0..n {
+                d = d.with_term(format!("Name{i}Thing"), EntityType::Dto);
+            }
+            // Both automatons are built on first use; the build is once per
+            // project, not per file, so it is not what this measures.
+            let _ = d.scan_text(&text, "s", OccurrenceKind::Reference);
+
+            let start = std::time::Instant::now();
+            for _ in 0..20 {
+                let _ = d.scan_text(&text, "s", OccurrenceKind::Reference);
+            }
+            start.elapsed()
+        };
+
+        let small = time_with(100);
+        let large = time_with(5000);
+        assert!(
+            large < small * 15 + std::time::Duration::from_millis(50),
+            "50x the names should not cost meaningfully more per file: {small:?} -> {large:?}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -528,13 +528,13 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
 /// The members the project already knows, so a file that only *uses* a property
 /// still recognises it — SDD §5.
 fn context_from(vault: &vault::Vault) -> Result<ProjectContext> {
-    let mut context = ProjectContext::default();
-    for identity in vault.identities()? {
-        if identity.entity_type == EntityType::Column.prefix() {
-            context.known_members.insert(identity.real_name);
-        }
-    }
-    Ok(context)
+    let identities = vault.identities()?;
+    let members = identities
+        .iter()
+        .filter(|i| i.entity_type == EntityType::Column.prefix())
+        .map(|i| i.real_name.clone());
+    let names = identities.iter().map(|i| i.real_name.clone());
+    Ok(ProjectContext::new(members, names))
 }
 
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {

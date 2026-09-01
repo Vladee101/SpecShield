@@ -45,7 +45,7 @@ use specshield_core::detect::classify_pascal;
 use specshield_core::edit::Edit;
 use specshield_core::model::{EntityType, OccurrenceKind};
 use specshield_core::parser::{
-    AliasMap, ArtifactParser, Candidate, Document, ParseError, Parsed, ProjectContext, StructuralCounts,
+    AliasMap, ArtifactParser, Candidate, Document, ParseError, Parsed, ProjectContext, StructuralCounts, fold_name,
 };
 use tree_sitter::{Node, Parser as TsParser, Tree};
 
@@ -116,13 +116,16 @@ impl ArtifactParser for TypeScriptParser {
             source,
             scope: scope.to_owned(),
             declared: HashMap::new(),
-            // Seeded with what the project knows, so a file that only *uses* a
-            // property still recognises it. The M0 spike's global-property rule
-            // needs project-wide knowledge to mean anything.
-            properties: context.known_members.iter().cloned().collect(),
+            // Borrowed, not copied. The project's names are seeded from the
+            // vault and number in the thousands; cloning them into a per-file
+            // set is quadratic in the size of the project.
+            context,
+            properties: HashSet::new(),
+            pending_paths: Vec::new(),
             out: Vec::new(),
         };
         collector.walk_declarations(tree.root_node());
+        collector.resolve_paths();
         collector.walk_references(tree.root_node());
 
         let mut out = std::mem::take(&mut collector.out);
@@ -239,12 +242,25 @@ struct Collector<'a> {
     /// Declared name -> the identity it belongs to. Used so a reference gets the
     /// same entity type and scope as its declaration.
     declared: HashMap<String, (EntityType, String)>,
-    /// Property names declared anywhere in this file.
+    /// What the project knows, from the vault. Consulted alongside `properties`
+    /// so a file that only *uses* a member still recognises it — the M0 spike's
+    /// global-property rule needs project-wide knowledge to mean anything.
+    context: &'a ProjectContext,
+    /// Property names declared in this file.
     properties: HashSet<String>,
+    /// Import segments, held until declarations are complete. An import sits at
+    /// the top of the file, so deciding about it in place would ask whether a
+    /// name is declared before the walk has seen the declaration.
+    pending_paths: Vec<(String, usize)>,
     out: Vec<Candidate>,
 }
 
 impl Collector<'_> {
+    /// A member of this file, or one the project learned elsewhere.
+    fn knows_member(&self, name: &str) -> bool {
+        self.properties.contains(name) || self.context.is_member(name)
+    }
+
     fn text(&self, node: Node<'_>) -> &str {
         &self.source[node.byte_range()]
     }
@@ -401,28 +417,49 @@ impl Collector<'_> {
         // the segment `create-subscription`.
         let stem = last.split('.').next().unwrap_or(last);
 
-        // Only compound names. `customer-subscription` mirrors the type
-        // `CustomerSubscription` and leaks it; `subscription`, from
-        // `subscription.repository.ts`, is a common noun that is also a local
-        // variable in half the files. Aliasing it made the gate block on every
-        // `const subscription = …` in the service.
-        //
-        // A single-word file name that *is* proprietary is what the dictionary
-        // is for.
-        if stem.is_empty() || !stem.contains(['-', '_']) {
+        if stem.is_empty() {
             return;
         }
         let offset = specifier.len() - last.len();
+        self.pending_paths.push((stem.to_owned(), inner_start + offset));
+    }
 
-        self.out.push(Candidate {
-            real_name: stem.to_owned(),
-            entity_type: EntityType::PathSegment,
-            scope_path: format!("{}::import", self.scope),
-            byte_start: inner_start + offset,
-            byte_end: inner_start + offset + stem.len(),
-            kind: OccurrenceKind::Path,
-            confidence: 1.0,
-        });
+    /// Decide which import segments are entities, once the file's declarations
+    /// are known.
+    ///
+    /// Two ways in, and both are needed:
+    ///
+    /// - **Compound.** `customer-subscription` mirrors `CustomerSubscription`
+    ///   and leaks it whether or not this build has seen that type.
+    /// - **A name the project knows.** `thing18.ts` holding `Thing18` is the
+    ///   dominant convention in TypeScript, and the gate — which folds case and
+    ///   separators — flags `thing18` in the import string as the type's name.
+    ///   A parser that skipped it would block every export of such a repo.
+    ///
+    /// Neither: `subscription`, the stem of `subscription.repository.ts`, is a
+    /// common noun and a local variable in half the files. Aliasing it blocked
+    /// the export on every `const subscription = …`. A single-word file name
+    /// that *is* proprietary is what the dictionary is for.
+    fn resolve_paths(&mut self) {
+        let declared: HashSet<String> = self.declared.keys().map(|n| fold_name(n)).collect();
+
+        for (stem, start) in std::mem::take(&mut self.pending_paths) {
+            let folded = fold_name(&stem);
+            let compound = stem.contains(['-', '_']);
+            if !compound && !declared.contains(&folded) && !self.context.knows_folded(&folded) {
+                continue;
+            }
+
+            self.out.push(Candidate {
+                byte_start: start,
+                byte_end: start + stem.len(),
+                real_name: stem,
+                entity_type: EntityType::PathSegment,
+                scope_path: format!("{}::import", self.scope),
+                kind: OccurrenceKind::Path,
+                confidence: 1.0,
+            });
+        }
     }
 
     /// Pass 2: references to anything pass 1 declared.
@@ -444,7 +481,7 @@ impl Collector<'_> {
         // consistent; restore maps the alias back to the one name either way.
         if kind == "identifier" {
             let name = self.text(node).to_owned();
-            if self.properties.contains(&name) && !self.declared.contains_key(&name) {
+            if self.knows_member(&name) && !self.declared.contains_key(&name) {
                 self.push(
                     node,
                     EntityType::Column,
@@ -458,7 +495,7 @@ impl Collector<'_> {
         // by name against the file's declared members, which is the global rule.
         if matches!(kind, "property_identifier" | "shorthand_property_identifier") {
             let name = self.text(node).to_owned();
-            if self.properties.contains(&name) {
+            if self.knows_member(&name) {
                 self.push(
                     node,
                     EntityType::Column,
@@ -690,6 +727,23 @@ interface R {
         let found = candidates(source);
         let hits = found.iter().filter(|c| c.real_name == "customerId").count();
         assert!(hits >= 2, "the parameter must move with the member: {found:#?}");
+    }
+
+    #[test]
+    fn a_module_named_after_a_type_it_declares_is_a_path_segment() {
+        // The dominant TypeScript convention: `thing18.ts` holds `Thing18`. The
+        // gate folds case and separators, so it reads the import string as the
+        // type's name — the parser has to agree, or the export never passes.
+        let source = "import { Thing18 } from \"../mod00/thing18\";
+export const x: Thing18 = 1;
+";
+        let found = candidates(source);
+        let segments: Vec<&str> = found
+            .iter()
+            .filter(|c| c.entity_type == EntityType::PathSegment)
+            .map(|c| c.real_name.as_str())
+            .collect();
+        assert_eq!(segments, vec!["thing18"], "{found:#?}");
     }
 
     #[test]
