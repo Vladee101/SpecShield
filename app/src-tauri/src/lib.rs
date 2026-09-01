@@ -32,6 +32,7 @@ use specshield_core::{alias, restore, sanitize, secrets, verify};
 use specshield_vault as vault;
 use tauri::State;
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use zeroize::Zeroize;
 
 use crate::state::AppState;
 
@@ -188,6 +189,8 @@ fn create_project(
         scope_strategy: "module".to_owned(),
         project_key,
     };
+    // The vault owns the key now; clear our copy off the stack.
+    project_key.zeroize();
     vault::Vault::create(&vault_path, &passphrase, &settings)?;
     state.open(&root, &passphrase)?;
     project_info(state)
@@ -204,8 +207,10 @@ fn project_info(state: State<'_, AppState>) -> Result<ProjectInfo> {
     state.with(|vault, root| {
         let settings = vault.settings()?;
         Ok(ProjectInfo {
-            name: settings.project_name,
-            alias_style: settings.alias_style,
+            // `Settings` clears its key on drop, which makes it non-movable
+            // field-by-field. Clone the two strings we need.
+            name: settings.project_name.clone(),
+            alias_style: settings.alias_style.clone(),
             identity_count: vault.identities()?.len(),
             term_count: vault.dictionary()?.len(),
             cloud_sync_warning: vault::cloud_sync_root(root).map(|provider| {
@@ -466,7 +471,8 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
         "pseudonymous" => alias::AliasStyle::Pseudonymous,
         _ => alias::AliasStyle::Typed,
     };
-    let mut graph = Graph::new(alias::ProjectKey::from_bytes(settings.project_key), style);
+    let mut settings = settings;
+    let mut graph = Graph::new(alias::ProjectKey::take_bytes(&mut settings.project_key), style);
     for stored in vault.identities()? {
         let entity_type: EntityType = stored
             .entity_type

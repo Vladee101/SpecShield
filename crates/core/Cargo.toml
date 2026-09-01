@@ -17,6 +17,7 @@ data-encoding.workspace = true
 aho-corasick.workspace = true
 regex.workspace = true
 similar.workspace = true
+zeroize = { version = "1.9.0", features = ["derive"] }
 
 [dev-dependencies]
 proptest.workspace = true

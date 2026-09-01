@@ -21,6 +21,7 @@ use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::Graph;
 use specshield_core::{restore, sanitize, secrets, verify};
 use specshield_vault as vault;
+use zeroize::Zeroize;
 
 /// Default vault filename inside a project.
 const VAULT_FILE: &str = ".specshield/vault.bin";
@@ -248,7 +249,8 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
         "pseudonymous" => AliasStyle::Pseudonymous,
         _ => AliasStyle::Typed,
     };
-    let mut graph = Graph::new(ProjectKey::from_bytes(settings.project_key), style);
+    let mut settings = settings;
+    let mut graph = Graph::new(ProjectKey::take_bytes(&mut settings.project_key), style);
     for stored in vault.identities()? {
         let entity_type: EntityType = stored
             .entity_type
@@ -332,6 +334,8 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
         scope_strategy: "module".to_owned(),
         project_key,
     };
+    // The vault owns the key now; clear our copy off the stack.
+    project_key.zeroize();
     vault::Vault::create(&path, &pw, &settings)?;
 
     println!("Initialized vault at {}", path.display());

@@ -29,6 +29,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
 use crate::crypto::{Keys, SALT_LEN};
 pub use crate::schema::SCHEMA_VERSION;
 
@@ -69,11 +71,19 @@ pub(crate) fn random_bytes(buf: &mut [u8]) -> Result<(), VaultError> {
 }
 
 /// Project settings. Everything here is non-secret except the project key.
-#[derive(Debug, Clone)]
+///
+/// Clears its key material on drop: `settings()` hands raw key bytes to a
+/// caller, and a `Settings` living in a local outlasts the moment the key was
+/// actually needed.
+#[derive(Debug, Clone, ZeroizeOnDrop)]
 pub struct Settings {
+    #[zeroize(skip)]
     pub project_name: String,
+    #[zeroize(skip)]
     pub root_path: String,
+    #[zeroize(skip)]
     pub alias_style: String,
+    #[zeroize(skip)]
     pub scope_strategy: String,
     /// The HMAC key aliases are derived from (SDD §6.1). Two machines sharing it
     /// produce identical twins with no coordination — which is why it is
@@ -232,6 +242,8 @@ impl Vault {
             .unseal(&key_enc, &aad("project", "project_key", &self.project_id))?;
         let mut project_key = [0u8; 32];
         unhex(&key_hex, &mut project_key)?;
+        let mut key_hex = key_hex;
+        key_hex.zeroize();
 
         Ok(Settings {
             project_name: self.keys.unseal(&name_enc, &aad("project", "name", &self.project_id))?,

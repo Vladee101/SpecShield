@@ -129,17 +129,19 @@ real fingerprint (outline, per-depth heading counts, fences, lines) that catches
 an invented heading or a broken fence; plain text returns `None` deliberately,
 because counting words would reject correct sanitizes of multi-word entities.
 
-**P0-3. `ProjectKey` is not zeroized.**
-`crates/core/src/alias.rs:62` — `TODO(M1)`, carried past M1.
+~~**P0-3. `ProjectKey` is not zeroized.**~~ — **fixed**. `ProjectKey` derives
+`ZeroizeOnDrop`, with a compile-time assertion of the trait bound: a runtime
+test would have to read freed memory, so asserting the bound is the strongest
+honest guarantee and it fails the build if the derive is ever dropped.
 
-`ProjectKey` holds 32 bytes of key material with no `Drop`. `crates/vault`
-already zeroizes its own keys (`crates/vault/src/crypto.rs`), so this is the odd
-one out.
+Zeroizing the key was not enough on its own — the copies around it outlived it.
+Also cleared: `vault::Settings` (which hands raw key bytes to callers) now
+clears them on drop, the generated array in both `init` paths is wiped once the
+vault owns it, and `ProjectKey::take_bytes` clears the caller's array as it takes
+ownership. `from_bytes` is still available and now documents that it copies.
 
-Fix: `impl Drop for ProjectKey` using `zeroize`, or derive `ZeroizeOnDrop`. Add
-`zeroize` to `specshield-core`'s dependencies.
-
-Done when: no key material outlives its owner, and the TODO is gone.
+**P0 is clear.** The only remaining `TODO(` markers in the codebase name their
+milestone: M2 clipboard flags, M4 index, M5 diff and git.
 
 ---
 

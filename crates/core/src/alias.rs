@@ -15,6 +15,7 @@ use std::sync::LazyLock;
 use data_encoding::{Encoding, Specification};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::model::IdentityKey;
 
@@ -41,11 +42,28 @@ pub const ENVELOPE_PATTERN: &str = r"^[A-Z][A-Za-z0-9_]*_[A-Z0-9]{3,8}$";
 /// aliases with no coordination.
 ///
 /// Not `Debug`-printable and not `Clone`: it is key material.
+#[derive(ZeroizeOnDrop)]
 pub struct ProjectKey([u8; 32]);
 
 impl ProjectKey {
+    /// Take ownership of key bytes.
+    ///
+    /// The caller's array is *copied*, and this type can only zeroize its own
+    /// copy. Zeroize the source too — [`take_bytes`] does that for you.
+    ///
+    /// [`take_bytes`]: ProjectKey::take_bytes
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    /// Take key bytes and clear the caller's copy.
+    ///
+    /// Prefer this at every site that generates or loads a key: a 32-byte array
+    /// left on the stack is exactly the residue this type exists to avoid.
+    pub fn take_bytes(bytes: &mut [u8; 32]) -> Self {
+        let key = Self(*bytes);
+        bytes.zeroize();
+        key
     }
 
     pub const fn as_bytes(&self) -> &[u8; 32] {
@@ -59,8 +77,15 @@ impl std::fmt::Debug for ProjectKey {
     }
 }
 
-// TODO(M1): `impl Drop for ProjectKey` with `zeroize`, once the vault crate
-// owns key lifecycle (SDD §9.4).
+/// Compile-time proof that the key clears itself on drop — SDD §9.4.
+///
+/// A runtime test cannot check this without reading freed memory, which is
+/// undefined behaviour. Asserting the trait bound is the strongest honest
+/// guarantee available, and it fails the build if the derive is ever removed.
+const _: () = {
+    const fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<ProjectKey>();
+};
 
 /// Alias readability, traded against protection — SDD §6.2.
 ///
