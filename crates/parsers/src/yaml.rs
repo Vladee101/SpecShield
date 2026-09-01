@@ -45,24 +45,13 @@ use crate::text::plan_from_candidates;
 const YAML_EXTENSIONS: &[&str] = &["yaml", "yml"];
 const JSON_EXTENSIONS: &[&str] = &["json"];
 
-/// Does this document declare itself an API specification?
+/// Declines API specifications — see [`crate::openapi`], which owns them.
 ///
-/// An OpenAPI spec puts its proprietary names in *keys* — schema names, path
-/// templates — which the generic parser deliberately will not touch. Processing
-/// one here produces a twin with the values aliased and the schema names intact:
-/// the gate then refuses it, correctly but confusingly, complaining about names
-/// the user never had a chance to review.
-///
-/// So the generic parser declines these, and `require_parser` says which
-/// milestone owns them. Refusing with a reason beats half-processing.
-fn is_api_specification(content: &str) -> bool {
-    content
-        .lines()
-        .take(40)
-        .any(|line| line.starts_with("openapi:") || line.starts_with("swagger:"))
-        || content.contains("\"openapi\":")
-        || content.contains("\"swagger\":")
-}
+/// Their proprietary names are keys that only the specification's own
+/// vocabulary can classify. Processing one here aliases the values, leaves the
+/// schema names, and yields a twin that looks clean while operation identifiers
+/// and paths sit in it untouched.
+use crate::openapi::is_specification as is_api_specification;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct YamlParser;

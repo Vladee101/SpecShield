@@ -87,7 +87,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
-| M3 SQL / YAML / OpenAPI | SQL done; YAML/JSON/OpenAPI next |
+| M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | not started |
 | M5 diff + git | not started |
 | M6 hardening + packaging | not started |
@@ -243,8 +243,25 @@ names live in keys that only the OpenAPI layer can classify. Processing them
 here yields a twin with values aliased and schema names intact — the gate
 refuses it, correctly but confusingly.
 
-**P2-3. OpenAPI semantic layer** over the YAML/JSON CST: paths, operationIds,
-schema names, tags.
+~~**P2-3. OpenAPI semantic layer**~~ — **done**.
+`crates/parsers/src/openapi.rs`, a layer over the YAML node index rather than a
+second parser. It supplies the one thing the grammar cannot: which keys are
+names.
+
+Detects `info.title`, schema names (typed Enum when the schema declares one),
+properties, `required` entries, operationIds, parameter names, `$ref` targets,
+and `{param}` in path templates. The last two matter most: a `$ref` still
+pointing at the real schema name leaves it in the twin *and* breaks the spec,
+and `/invoices/{invoiceId}` carries a field name in the URL.
+
+openapi-billing: 5% → **100% recall, 100% precision**, and now gated. Gated
+total across Markdown, SQL, and OpenAPI: 82 entities, 100% recall, 97.6%
+precision.
+
+Two properties the corpus never labelled (`planTier`, `subscriptionId`) were
+added, on the same rule already applied to SQL columns: a spec with `customerId`
+aliased and `planTier` intact is inconsistent, and which field names are
+proprietary is not a judgement the tool can make.
 
 **P2-4. Cross-artifact unification.** The SQL table `customer_subscription`, the
 OpenAPI schema `CustomerSubscription`, and the TS interface must resolve to

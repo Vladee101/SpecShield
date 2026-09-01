@@ -9,7 +9,7 @@
 //! | Markdown, plain text | prose scan over the raw source | M1 |
 //! | SQL | `sqlparser`, AST-driven with byte spans | M3 |
 //! | YAML, JSON | `saphyr`, spanned nodes; JSON read as YAML 1.2 | M3 |
-//! | OpenAPI | semantic layer over the YAML/JSON CST | M3 |
+//! | OpenAPI | semantic layer over the YAML/JSON node index | M3 |
 //! | TypeScript / JavaScript | Tree-sitter + heuristic scoping | M4 |
 //!
 //! Three deliberate choices, all from the design review or the M0 spikes:
@@ -26,6 +26,7 @@
 //!   such as skipping fenced code. See [`markdown`].
 
 pub mod markdown;
+pub mod openapi;
 pub mod sql;
 pub mod text;
 pub mod yaml;
@@ -35,6 +36,7 @@ use std::path::Path;
 pub use specshield_core::parser::{ArtifactParser, Candidate, Document, ParseError, Parsed};
 
 pub use crate::markdown::MarkdownParser;
+pub use crate::openapi::OpenApiParser;
 pub use crate::sql::SqlParser;
 pub use crate::text::TextParser;
 pub use crate::yaml::{JsonParser, YamlParser};
@@ -47,6 +49,9 @@ pub fn registry() -> Vec<Box<dyn ArtifactParser>> {
     vec![
         Box::new(MarkdownParser),
         Box::new(SqlParser),
+        // Ahead of the generic YAML parser: a specification is recognised by
+        // content, and only this layer knows which of its keys are names.
+        Box::new(OpenApiParser),
         Box::new(YamlParser),
         Box::new(JsonParser),
         Box::new(TextParser),
@@ -93,6 +98,9 @@ mod tests {
 
     #[test]
     fn implemented_names_are_stable() {
-        assert_eq!(implemented(), vec!["markdown", "sql", "yaml", "json", "text"]);
+        assert_eq!(
+            implemented(),
+            vec!["markdown", "sql", "openapi", "yaml", "json", "text"]
+        );
     }
 }

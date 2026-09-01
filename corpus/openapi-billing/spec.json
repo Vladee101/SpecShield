@@ -1,5 +1,5 @@
 {
-  "description": "Endpoints, operationIds, and schema names. CustomerSubscription and PlanTier here must unify with the SQL table and the TypeScript DTO into one identity carrying one alias (SDD \u00a75).",
+  "description": "Endpoints, operationIds, schema names, and every declared property. Property completeness follows the same rule as sql-schema: a spec with customerId aliased and planTier intact is inconsistent, and which field names are proprietary is not a judgement the tool can make - that is what the allowlist is for. CustomerSubscription and PlanTier here must unify with the SQL table and the TypeScript DTO (SDD 5).",
   "entities": [
     {
       "real_name": "BillingApi",
@@ -71,6 +71,17 @@
       "real_name": "amountCents",
       "entity_type": "column",
       "scope_path": "#/components/schemas/InvoiceSummary.amountCents"
+    },
+    {
+      "real_name": "planTier",
+      "entity_type": "column",
+      "scope_path": "#/components/schemas/CustomerSubscription.planTier",
+      "note": "declared in two schemas and named again in a required list"
+    },
+    {
+      "real_name": "subscriptionId",
+      "entity_type": "column",
+      "scope_path": "#/components/schemas/CustomerSubscription.subscriptionId"
     }
   ],
   "never_alias": [
