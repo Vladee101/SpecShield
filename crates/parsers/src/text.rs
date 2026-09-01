@@ -46,6 +46,12 @@ impl ArtifactParser for TextParser {
     fn plan_edits(&self, parsed: &Parsed<'_>, aliases: &AliasMap) -> Vec<Edit> {
         plan_from_candidates(&self.extract(parsed), aliases)
     }
+
+    // `structural_counts` is deliberately left at its default `None`. Plain text
+    // has no structure to preserve, and inventing one — comparing word or line
+    // counts — would reject correct sanitizes: a multi-word entity legitimately
+    // becomes a single token. The caller reports this as
+    // `Verification::Unsupported` rather than as a pass.
 }
 
 impl TextParser {

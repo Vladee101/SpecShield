@@ -258,7 +258,7 @@ fn scan_text(state: State<'_, AppState>, filename: String, content: String) -> R
             .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE);
 
         Ok(ScanResult {
-            parser: parser.clone(),
+            parser: parser.name().to_owned(),
             entities: confident.iter().map(to_wire).collect(),
             suggestions: suggestions.iter().map(to_wire).collect(),
             secrets: findings.iter().map(to_secret_wire).collect(),
@@ -268,12 +268,12 @@ fn scan_text(state: State<'_, AppState>, filename: String, content: String) -> R
 
 #[tauri::command]
 fn sanitize_text(state: State<'_, AppState>, filename: String, content: String) -> Result<SanitizeResult> {
-    require_parser(&filename, &content)?;
+    let parser = require_parser(&filename, &content)?;
     let result = state.with(|vault, _| {
         let mut graph = graph_from(vault)?;
         let detector = detector_from(vault)?;
 
-        let result = sanitize::sanitize(&content, &filename, &detector, &mut graph)
+        let result = sanitize::sanitize(&content, &filename, &detector, &mut graph, Some(parser.as_ref()))
             .map_err(|e| fail(format!("sanitize failed: {e}")))?;
 
         persist(vault, &graph)?;
@@ -429,18 +429,16 @@ fn supported_formats() -> Vec<String> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn require_parser(filename: &str, content: &str) -> Result<String> {
-    specshield_parsers::for_document(std::path::Path::new(filename), content)
-        .map(|p| p.name().to_owned())
-        .ok_or_else(|| {
-            fail(format!(
-                "No parser for {filename} in this build (have: {}). \
+fn require_parser(filename: &str, content: &str) -> Result<Box<dyn specshield_core::parser::ArtifactParser>> {
+    specshield_parsers::for_document(std::path::Path::new(filename), content).ok_or_else(|| {
+        fail(format!(
+            "No parser for {filename} in this build (have: {}). \
                  Processing it anyway would produce a twin that looks sanitized while \
                  leaving declarations and identifiers untouched. SQL and YAML arrive in M3; \
                  TypeScript in M4.",
-                specshield_parsers::implemented().join(", ")
-            ))
-        })
+            specshield_parsers::implemented().join(", ")
+        ))
+    })
 }
 
 fn to_wire(c: &specshield_core::parser::Candidate) -> DetectedEntity {

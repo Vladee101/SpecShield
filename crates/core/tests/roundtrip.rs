@@ -62,7 +62,7 @@ proptest! {
     fn restore_undoes_sanitize(source in document()) {
         for style in [AliasStyle::Opaque, AliasStyle::Typed, AliasStyle::Pseudonymous] {
             let mut g = graph(style);
-            let out = sanitize(&source, "project", &detector(), &mut g).unwrap();
+            let out = sanitize(&source, "project", &detector(), &mut g, None).unwrap();
             let back = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
             prop_assert_eq!(&back.text, &source, "style {:?}", style);
         }
@@ -73,7 +73,7 @@ proptest! {
     #[test]
     fn the_twin_never_contains_a_known_real_name(source in document()) {
         let mut g = graph(AliasStyle::Opaque);
-        let out = sanitize(&source, "project", &detector(), &mut g).unwrap();
+        let out = sanitize(&source, "project", &detector(), &mut g, None).unwrap();
         let scanner = LeakScanner::new(g.real_names());
         prop_assert!(scanner.scan(&out.twin).is_clean(), "leaked: {:?}", out.twin);
     }
@@ -83,8 +83,8 @@ proptest! {
     #[test]
     fn sanitize_is_idempotent(source in document()) {
         let mut g = graph(AliasStyle::Opaque);
-        let once = sanitize(&source, "project", &detector(), &mut g).unwrap();
-        let twice = sanitize(&once.twin, "project", &detector(), &mut g).unwrap();
+        let once = sanitize(&source, "project", &detector(), &mut g, None).unwrap();
+        let twice = sanitize(&once.twin, "project", &detector(), &mut g, None).unwrap();
         prop_assert_eq!(&twice.twin, &once.twin);
     }
 
@@ -101,7 +101,7 @@ proptest! {
     #[test]
     fn every_applied_alias_resolves(source in document()) {
         let mut g = graph(AliasStyle::Opaque);
-        let out = sanitize(&source, "project", &detector(), &mut g).unwrap();
+        let out = sanitize(&source, "project", &detector(), &mut g, None).unwrap();
         let back = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
         prop_assert!(
             back.unresolved.is_empty(),

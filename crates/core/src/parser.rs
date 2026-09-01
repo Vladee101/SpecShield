@@ -4,7 +4,7 @@
 //! one output representation: a list of [`Edit`]s over byte ranges. Adding a
 //! language means implementing this trait; nothing else in the pipeline changes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use uuid::Uuid;
@@ -71,6 +71,66 @@ pub trait ArtifactParser: Send + Sync {
     /// Plan non-overlapping replacements. Never rewrites the file itself —
     /// the returned edits are validated and applied by [`crate::edit::apply`].
     fn plan_edits(&self, parsed: &Parsed<'_>, aliases: &AliasMap) -> Vec<Edit>;
+
+    /// Structural fingerprint of `source`, for the SDD §7.2 verification pass.
+    ///
+    /// Sanitization replaces identifiers; it must not change a document's
+    /// *shape*. Comparing this fingerprint before and after is what turns "we
+    /// think the transformation was right" into "the twin parses and has the
+    /// same structure as the original".
+    ///
+    /// Returns `None` when this parser has no structure to compare — which is
+    /// reported as [`Verification::Unsupported`] rather than silently treated
+    /// as a pass. Returning `Some` for input that does not parse is a bug;
+    /// return `None` for unparseable input and the caller will reject the
+    /// twin.
+    ///
+    /// [`Verification::Unsupported`]: crate::sanitize::Verification::Unsupported
+    fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
+        let _ = source;
+        None
+    }
+}
+
+/// A parser's structural fingerprint of a document — SDD §7.2.
+///
+/// Deliberately a bag of named counts rather than a fixed struct: what counts
+/// as structure differs per format. Markdown cares about headings and fences;
+/// TypeScript will care about declarations and references.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructuralCounts {
+    counts: BTreeMap<&'static str, usize>,
+}
+
+impl StructuralCounts {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with(mut self, kind: &'static str, count: usize) -> Self {
+        self.counts.insert(kind, count);
+        self
+    }
+
+    pub fn get(&self, kind: &str) -> usize {
+        self.counts.get(kind).copied().unwrap_or(0)
+    }
+
+    /// Kinds whose counts differ, with both values. Empty means the structures
+    /// match.
+    pub fn differences(&self, other: &Self) -> Vec<(&'static str, usize, usize)> {
+        self.counts
+            .keys()
+            .chain(other.counts.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|kind| {
+                let (before, after) = (self.get(kind), other.get(kind));
+                (before != after).then_some((*kind, before, after))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

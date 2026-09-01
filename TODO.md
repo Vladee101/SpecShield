@@ -115,26 +115,19 @@ previous twin.
 Still unverified by hand: nobody has clicked the button in a running app
 (P1-2). The Windows format flags remain open (P1-1).
 
-**P0-2. `sanitize` does not perform the SDD §7.2 verification pass it documents.**
-`crates/core/src/sanitize.rs` — the module doc claims "the twin parses, and its
-declaration and reference counts match the original… where that cannot be met,
-the file is emitted unaliased and reported". No such check exists.
+~~**P0-2. `sanitize` does not perform the SDD §7.2 verification pass it
+documents.**~~ — **fixed**. `ArtifactParser::structural_counts` supplies a
+per-format fingerprint; `sanitize` compares it before and after and returns a
+`Verification` describing what happened. A twin whose structure changed, or that
+no longer parses, is abandoned: the unaliased original is returned with `applied`
+empty, per SDD §16. Secrets stay redacted through that path — rejecting the alias
+pass must not turn a verification failure into a leak.
 
-For Markdown and text this is harmless (there is nothing to re-parse), which is
-why it has not bitten yet. It becomes load-bearing the moment the TypeScript
-parser lands in M4, and a doc comment that overstates what the code does is how
-that gets missed.
-
-Fix now (cheap, and correct for every future parser):
-- Add a `verify_twin` step to `sanitize()` that re-parses the twin with the same
-  parser and compares node counts against the original.
-- On mismatch: return the file unaliased plus a diagnostic, rather than the
-  transformed twin.
-- Wire it through `ArtifactParser` so each parser supplies its own count.
-- Until a parser implements counting, the check is a no-op that *says so*.
-
-Done when: `sanitize` cannot return a twin that fails its own re-parse, and the
-`spikes/ts-rename` verification approach has a home in production code.
+`Verification::NotAttempted` and `Unsupported` are distinct from `Passed`, so
+"no check ran" can never be read as "verified". The markdown parser implements a
+real fingerprint (outline, per-depth heading counts, fences, lines) that catches
+an invented heading or a broken fence; plain text returns `None` deliberately,
+because counting words would reject correct sanitizes of multi-word entities.
 
 **P0-3. `ProjectKey` is not zeroized.**
 `crates/core/src/alias.rs:62` — `TODO(M1)`, carried past M1.

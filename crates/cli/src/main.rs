@@ -356,9 +356,9 @@ fn add_term(project: &Path, name: &str, entity_type: EntityType, explicit: Optio
 /// happens to recognise and silently leave every declaration, import, and
 /// property untouched — producing a twin that *looks* sanitized and is not. A
 /// tool whose whole job is preventing leaks must not do that; it says no.
-fn require_parser(file: &Path, content: &str) -> Result<String> {
+fn require_parser(file: &Path, content: &str) -> Result<Box<dyn specshield_core::parser::ArtifactParser>> {
     match specshield_parsers::for_document(file, content) {
-        Some(parser) => Ok(parser.name().to_owned()),
+        Some(parser) => Ok(parser),
         None => bail!(
             "no parser for {} in this build (have: {}).\n\
              Refusing to process it: the prose scan alone would produce a twin that\n\
@@ -388,7 +388,7 @@ fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
         .into_iter()
         .partition(|c| c.confidence >= sanitize::AUTO_APPLY_CONFIDENCE);
 
-    println!("{} ({parser})\n", file.display());
+    println!("{} ({})\n", file.display(), parser.name());
     println!("{} entit(ies) would be aliased:", confident.len());
     for c in &confident {
         println!("  {:>5}  {:<10} {}", c.byte_start, c.entity_type.prefix(), c.real_name);
@@ -414,13 +414,13 @@ fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
 fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool, explicit: Option<&str>) -> Result<()> {
     let mut vault = open(project, explicit)?;
     let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    require_parser(file, &source)?;
+    let parser = require_parser(file, &source)?;
 
     let mut graph = graph_from(&vault)?;
     let detector = detector_from(&vault)?;
     let scope = file.to_string_lossy().replace('\\', "/");
 
-    let result = sanitize::sanitize(&source, &scope, &detector, &mut graph)?;
+    let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()))?;
 
     // SDD §8 — nothing is emitted before the gate passes.
     let scanner = verify::LeakScanner::new(graph.real_names());
@@ -464,6 +464,28 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
         result.applied.len(),
         scanner.pattern_count()
     );
+    // Two different checks, reported separately. The gate above proves no vault
+    // name survived; this proves the twin still has the original's shape.
+    match &result.verification {
+        sanitize::Verification::Passed => {
+            eprintln!("  structure verified against the original (SDD §7.2)");
+        }
+        sanitize::Verification::Unsupported { parser } => {
+            eprintln!("  structure NOT checked: the {parser} parser has no structure to compare");
+        }
+        sanitize::Verification::NotAttempted => {
+            eprintln!("  structure NOT checked: no parser supplied");
+        }
+        sanitize::Verification::TwinDidNotParse { parser } => {
+            eprintln!("  aliasing ABANDONED: the twin no longer parses as {parser}");
+        }
+        sanitize::Verification::StructureChanged { parser, differences } => {
+            eprintln!("  aliasing ABANDONED: {parser} structure changed");
+            for (kind, before, after) in differences {
+                eprintln!("      {kind}: {before} -> {after}");
+            }
+        }
+    }
     eprintln!(
         "  {} secret(s) redacted (one-way, never restored)",
         result.secrets.len()

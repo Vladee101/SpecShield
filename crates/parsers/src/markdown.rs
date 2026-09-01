@@ -24,7 +24,7 @@ use std::path::Path;
 use specshield_core::detect::Detector;
 use specshield_core::edit::Edit;
 use specshield_core::model::OccurrenceKind;
-use specshield_core::parser::{AliasMap, ArtifactParser, Candidate, Document, ParseError, Parsed};
+use specshield_core::parser::{AliasMap, ArtifactParser, Candidate, Document, ParseError, Parsed, StructuralCounts};
 
 use crate::text::plan_from_candidates;
 
@@ -80,6 +80,47 @@ impl ArtifactParser for MarkdownParser {
     fn plan_edits(&self, parsed: &Parsed<'_>, aliases: &AliasMap) -> Vec<Edit> {
         plan_from_candidates(&self.extract(parsed), aliases)
     }
+
+    /// Markdown's structure is its outline and its fences — SDD §7.2.
+    ///
+    /// Aliasing replaces words inside a heading; it must never add, remove, or
+    /// re-level one, and it must never open or close a code fence. Both are
+    /// reachable by a plausible bug: an alias containing `#` at a line start
+    /// invents a heading, and one containing a backtick run breaks fencing for
+    /// the rest of the document.
+    ///
+    /// Prose word counts are deliberately *not* compared. A multi-word entity
+    /// like `Meridian Freight` legitimately becomes one token, so counting
+    /// words would reject every correct sanitize of a document containing one.
+    fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
+        let outline = outline(source);
+        let mut counts = StructuralCounts::new()
+            .with("headings", outline.headings.len())
+            .with("fences", count_fences(source))
+            .with("lines", source.lines().count());
+
+        for depth in 1..=6 {
+            counts = counts.with(
+                DEPTH_KINDS[depth - 1],
+                outline.headings.iter().filter(|(_, d, _)| *d == depth).count(),
+            );
+        }
+        Some(counts)
+    }
+}
+
+/// Static keys for per-depth heading counts, so `StructuralCounts` can hold
+/// `&'static str` without leaking.
+const DEPTH_KINDS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
+
+fn count_fences(source: &str) -> usize {
+    source
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            t.starts_with("```") || t.starts_with("~~~")
+        })
+        .count()
 }
 
 impl MarkdownParser {
@@ -193,5 +234,65 @@ mod tests {
         let d = doc("just prose, no structure at all\n");
         let parsed = MarkdownParser.parse(&d).unwrap();
         assert!(MarkdownParser::outline_of(&parsed).unwrap().headings.is_empty());
+    }
+
+    // -- SDD §7.2 structural fingerprint ------------------------------------
+
+    fn counts(source: &str) -> StructuralCounts {
+        MarkdownParser
+            .structural_counts(source)
+            .expect("markdown always counts")
+    }
+
+    #[test]
+    fn replacing_words_leaves_the_structure_unchanged() {
+        // The normal case: aliasing swaps words inside headings and prose. Same
+        // outline, same fences, same line count.
+        let before = counts("# Vantor\n\nRun by Vantor.\n\n## Plan tiers\n\n```ts\nx\n```\n");
+        let after = counts("# ORG_H7K2Q3\n\nRun by ORG_H7K2Q3.\n\n## ENUM_M4X2Q7\n\n```ts\nx\n```\n");
+        assert!(
+            before.differences(&after).is_empty(),
+            "{:?}",
+            before.differences(&after)
+        );
+    }
+
+    #[test]
+    fn an_invented_heading_is_caught() {
+        // An alias that starts a line with `#` would silently restructure the
+        // document. This is the check that notices.
+        let before = counts("Vantor ships weekly.\n");
+        let after = counts("# ORG_H7K2Q3 ships weekly.\n");
+        let diffs = before.differences(&after);
+        assert!(diffs.iter().any(|(kind, _, _)| *kind == "headings"), "{diffs:?}");
+    }
+
+    #[test]
+    fn a_broken_fence_is_caught() {
+        // An alias containing a backtick run reopens a fence and swallows the
+        // rest of the document.
+        let before = counts("```ts\ncode\n```\n\ndone\n");
+        let after = counts("```ts\ncode\n```\n\n```\n");
+        let diffs = before.differences(&after);
+        assert!(diffs.iter().any(|(kind, _, _)| *kind == "fences"), "{diffs:?}");
+    }
+
+    #[test]
+    fn a_changed_heading_level_is_caught() {
+        let before = counts("# Title\n");
+        let after = counts("## Title\n");
+        let diffs = before.differences(&after);
+        assert!(diffs.iter().any(|(kind, _, _)| *kind == "h1"), "{diffs:?}");
+        assert!(diffs.iter().any(|(kind, _, _)| *kind == "h2"), "{diffs:?}");
+    }
+
+    #[test]
+    fn a_multi_word_entity_collapsing_to_one_token_is_not_a_failure() {
+        // `Meridian Freight` -> `ORG_H7K2Q3` removes a word. Counting words
+        // would reject this correct sanitize, which is why the fingerprint
+        // counts structure rather than tokens.
+        let before = counts("Meridian Freight is the largest account.\n");
+        let after = counts("ORG_H7K2Q3 is the largest account.\n");
+        assert!(before.differences(&after).is_empty());
     }
 }
