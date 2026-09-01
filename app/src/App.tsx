@@ -14,14 +14,17 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
+  type AppliedPatch,
+  type DiffReview,
   type EntityType,
+  type PatchStatus,
   type ProjectInfo,
   type RestoreResult,
   type SanitizeResult,
   type ScanResult,
 } from "./api";
 
-type Step = "project" | "review" | "verify" | "restore";
+type Step = "project" | "review" | "verify" | "restore" | "apply";
 
 const ENTITY_TYPES: EntityType[] = [
   "ORG", "SERVICE", "API", "ENDPOINT", "DB_TABLE",
@@ -42,6 +45,10 @@ export function App() {
   const [step, setStep] = useState<Step>("project");
   const [error, setError] = useState<string | null>(null);
   const [doc, setDoc] = useState<Doc>({ filename: "PRD.md", content: "" });
+  /// The twin from the last sanitize that passed the gate, held here so the
+  /// diff screen compares against what was actually sent rather than asking the
+  /// user to paste it back and trust that they pasted the right thing.
+  const [twin, setTwin] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -95,14 +102,23 @@ export function App() {
       )}
 
       <nav className="steps">
-        {(["project", "review", "verify", "restore"] as Step[]).map((s, i) => (
+        {(["project", "review", "verify", "restore", "apply"] as Step[]).map((s, i) => (
           <button
             key={s}
             className={`step ${step === s ? "active" : ""}`}
             disabled={s !== "project" && !project}
             onClick={() => setStep(s)}
           >
-            {i + 1}. {{ project: "Project", review: "Review", verify: "Sanitize & verify", restore: "Restore" }[s]}
+            {i + 1}.{" "}
+            {
+              {
+                project: "Project",
+                review: "Review",
+                verify: "Sanitize & verify",
+                restore: "Restore",
+                apply: "Diff & apply",
+              }[s]
+            }
           </button>
         ))}
       </nav>
@@ -127,9 +143,10 @@ export function App() {
         />
       )}
       {step === "verify" && project && (
-        <SanitizePanel doc={doc} setDoc={setDoc} onError={setError} onDone={refresh} />
+        <SanitizePanel doc={doc} setDoc={setDoc} onError={setError} onDone={refresh} setTwin={setTwin} />
       )}
       {step === "restore" && project && <RestorePanel onError={setError} />}
+      {step === "apply" && project && <DiffPanel doc={doc} twin={twin} onError={setError} />}
     </div>
   );
 }
@@ -411,11 +428,13 @@ function SanitizePanel({
   setDoc,
   onError,
   onDone,
+  setTwin,
 }: {
   doc: Doc;
   setDoc: (d: Doc) => void;
   onError: (e: string | null) => void;
   onDone: () => void;
+  setTwin: (twin: string | null) => void;
 }) {
   const { filename, content } = doc;
   const setFilename = (f: string) => setDoc({ ...doc, filename: f });
@@ -436,10 +455,16 @@ function SanitizePanel({
               onError(null);
               setCopied(null);
               try {
-                setResult(await api.sanitize(filename, content));
+                const sanitized = await api.sanitize(filename, content);
+                setResult(sanitized);
+                // Only a twin that passed the gate. A blocked sanitize returns
+                // none, and clearing it here stops the diff screen comparing
+                // against a twin from some earlier document.
+                setTwin(sanitized.twin);
                 onDone();
               } catch (e) {
                 setResult(null);
+                setTwin(null);
                 onError(String(e));
               }
             }}
@@ -613,5 +638,332 @@ function RestorePanel({ onError }: { onError: (e: string | null) => void }) {
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Workflow B, as a screen — SDD §13 and §14.
+ *
+ * Three versions are compared and two of them belong to the model: the twin
+ * that was sent and the twin that came back. What the user is asked to accept is
+ * the third comparison — the file on disk against the restored output — because
+ * that is what a patch would write.
+ *
+ * The panel refuses in the same places the engine does, and says the same thing.
+ * Disabling a button is a courtesy; every guard here is re-checked in Rust.
+ */
+function DiffPanel({
+  doc,
+  twin,
+  onError,
+}: {
+  doc: Doc;
+  twin: string | null;
+  onError: (e: string | null) => void;
+}) {
+  const [aiTwin, setAiTwin] = useState("");
+  const [pastedTwin, setPastedTwin] = useState("");
+  const [review, setReview] = useState<DiffReview | null>(null);
+  const [status, setStatus] = useState<PatchStatus | null>(null);
+  const [applied, setApplied] = useState<AppliedPatch | null>(null);
+  const [branch, setBranch] = useState("specshield/restore");
+
+  const sentTwin = twin ?? pastedTwin;
+
+  const run = useCallback(async () => {
+    onError(null);
+    setApplied(null);
+    try {
+      setReview(await api.reviewDiff(doc.content, sentTwin, aiTwin));
+      setStatus(await api.patchStatus(doc.filename));
+    } catch (e) {
+      setReview(null);
+      onError(String(e));
+    }
+  }, [doc.content, doc.filename, sentTwin, aiTwin, onError]);
+
+  // Why a patch cannot be offered, in the order the engine checks it.
+  const refusal =
+    review?.blocks_patch
+      ? "Unresolved identities remain. Name them below — SpecShield never guesses a name into your repository."
+      : status && !status.file_exists
+        ? `${doc.filename} is not a file under the project root, so there is nothing to patch.`
+        : status?.stale
+          ? "This file has changed since it was indexed. A patch built from this twin could apply cleanly and silently revert those edits — re-sanitize first."
+          : status && !status.git_available
+            ? status.git_explain
+            : null;
+
+  return (
+    <>
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Diff &amp; apply</h3>
+        <p className="muted small">
+          Paste what the model returned. It is compared against the twin that was sent and
+          against <span className="mono">{doc.filename}</span> as it stands on disk.
+        </p>
+
+        {!twin && (
+          <div className="banner warn">
+            <strong>No twin from this session.</strong>
+            <div className="small" style={{ marginTop: 4 }}>
+              Sanitize the document first, or paste the twin you sent below. Without it the
+              model-side comparison cannot be shown — the restored diff still can.
+            </div>
+            <textarea
+              style={{ marginTop: 8 }}
+              value={pastedTwin}
+              onChange={(e) => setPastedTwin(e.target.value)}
+              placeholder="The twin you sent (optional)…"
+            />
+          </div>
+        )}
+
+        <textarea
+          value={aiTwin}
+          onChange={(e) => setAiTwin(e.target.value)}
+          placeholder="Paste the model's response here…"
+        />
+        <div className="row" style={{ marginTop: 10 }}>
+          <button className="primary" disabled={!aiTwin || !doc.content} onClick={run}>
+            Review
+          </button>
+          {!doc.content && (
+            <span className="muted small">Load the original document on the Review step first.</span>
+          )}
+        </div>
+      </div>
+
+      {review && (
+        <div className="panel">
+          <div className="row small muted" style={{ marginBottom: 10 }}>
+            <span>{review.changes.length} change(s)</span>
+            <span>· {review.substantive} substantive</span>
+            <span>· {review.model_changes} model-side edit(s)</span>
+          </div>
+
+          {review.changes.length === 0 && (
+            <div className="banner ok">
+              <strong>No changes.</strong> The restored output is identical to the file on disk.
+            </div>
+          )}
+
+          {review.changes.map((hunk, i) => (
+            <div key={i} className="hunk">
+              <div className="hunk-head mono small">
+                @@ −{hunk.before_start} +{hunk.after_start} @@{" "}
+                <span className={hunk.kind === "formatting" ? "muted" : ""}>
+                  {hunk.kind === "formatting" ? "formatting only" : hunk.kind}
+                </span>
+              </div>
+              <pre className="mono small diff">
+                {hunk.lines.map((line, j) => (
+                  <div key={j} className={line.added ? "add" : "del"}>
+                    {line.added ? "+" : "−"}
+                    {line.text.replace(/\n$/, "")}
+                  </div>
+                ))}
+              </pre>
+              {hunk.notes.map((note, j) => (
+                <div key={j} className={`note ${note.kind}`}>
+                  {note.detail}
+                </div>
+              ))}
+            </div>
+          ))}
+
+          {review.notes.length > 0 && (
+            <>
+              <h4>Everything worth checking</h4>
+              <p className="muted small">
+                Including anything that changed nothing visible — a loose match can restore to
+                exactly the original text, and the guess still wrote a real name.
+              </p>
+              <table>
+                <thead>
+                  <tr><th>Line</th><th>Kind</th><th>Detail</th></tr>
+                </thead>
+                <tbody>
+                  {review.notes.map((note, i) => (
+                    <tr key={i}>
+                      <td className="muted">{note.line}</td>
+                      <td className={note.kind === "unresolved" ? "error" : "muted"}>{note.kind}</td>
+                      <td className="small">{note.detail}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </div>
+      )}
+
+      {review && review.unresolved.length > 0 && (
+        <UnresolvedPanel tokens={review.unresolved} onError={onError} onResolved={run} />
+      )}
+
+      {review && (
+        <div className="panel">
+          <h4 style={{ marginTop: 0 }}>Apply</h4>
+
+          {refusal ? (
+            <div className="banner block">
+              <strong>Cannot apply.</strong>
+              <div className="small" style={{ marginTop: 4 }}>{refusal}</div>
+            </div>
+          ) : (
+            <>
+              <div className="row small muted" style={{ marginBottom: 10 }}>
+                <span>on branch <span className="mono">{status?.branch}</span></span>
+                {status?.dirty && <span>· working tree has uncommitted changes</span>}
+                {status?.not_indexed && <span>· no checksum on file for this path</span>}
+              </div>
+              {status?.dirty && (
+                <div className="banner warn small">
+                  Undo reverses this patch and will fail if your own edits overlap it. Commit
+                  first if you want a clean undo.
+                </div>
+              )}
+              <div className="row">
+                <input
+                  className="grow mono"
+                  value={branch}
+                  onChange={(e) => setBranch(e.target.value)}
+                />
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    onError(null);
+                    try {
+                      setApplied(await api.applyPatch(doc.filename, review.restored, branch));
+                      setStatus(await api.patchStatus(doc.filename));
+                    } catch (e) {
+                      onError(String(e));
+                    }
+                  }}
+                >
+                  Apply to branch
+                </button>
+              </div>
+              <p className="muted small" style={{ marginTop: 8 }}>
+                Never applied to main, master, develop, or trunk. The patch is dry-run first,
+                so a patch that would not apply changes nothing.
+              </p>
+            </>
+          )}
+
+          {applied && (
+            <div className="banner ok" style={{ marginTop: 12 }}>
+              <strong>Applied to {applied.branch}.</strong>
+              <div className="small" style={{ marginTop: 4 }}>
+                {applied.created_branch
+                  ? `Branch created; you were on ${applied.previous_branch}.`
+                  : `Already on ${applied.branch}.`}{" "}
+                Review with <span className="mono">git diff</span>, then commit normally.
+              </div>
+              <button
+                style={{ marginTop: 8 }}
+                onClick={async () => {
+                  onError(null);
+                  try {
+                    const now = await api.undoPatch();
+                    setApplied(null);
+                    onError(null);
+                    setStatus(await api.patchStatus(doc.filename));
+                    alert(`Reversed. You are on ${now}.`);
+                  } catch (e) {
+                    onError(String(e));
+                  }
+                }}
+              >
+                Undo
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * SDD §12 — the user names entities the model invented.
+ *
+ * No suggestion is offered and no default is filled in. A plausible-looking
+ * guess is how a wrong identifier gets committed to a real repository.
+ */
+function UnresolvedPanel({
+  tokens,
+  onError,
+  onResolved,
+}: {
+  tokens: string[];
+  onError: (e: string | null) => void;
+  onResolved: () => void;
+}) {
+  const [names, setNames] = useState<Record<string, string>>({});
+  const [types, setTypes] = useState<Record<string, EntityType>>({});
+
+  return (
+    <div className="panel">
+      <div className="banner block">
+        <strong>{tokens.length} unresolved identit(ies).</strong>
+        <div className="small" style={{ marginTop: 4 }}>
+          The model used alias-shaped tokens this project never issued. They stay in the
+          restored text, and block applying, until you name them.
+        </div>
+      </div>
+
+      <table>
+        <thead>
+          <tr><th>Alias</th><th>Real name</th><th>Type</th><th /></tr>
+        </thead>
+        <tbody>
+          {tokens.map((token) => (
+            <tr key={token}>
+              <td className="mono">{token}</td>
+              <td>
+                <input
+                  value={names[token] ?? ""}
+                  placeholder="you supply this"
+                  onChange={(e) => setNames({ ...names, [token]: e.target.value })}
+                />
+              </td>
+              <td>
+                <select
+                  value={types[token] ?? "SERVICE"}
+                  onChange={(e) => setTypes({ ...types, [token]: e.target.value as EntityType })}
+                >
+                  {ENTITY_TYPES.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </td>
+              <td>
+                <button
+                  disabled={!names[token]}
+                  onClick={async () => {
+                    onError(null);
+                    try {
+                      await api.resolveIdentity(
+                        token,
+                        names[token] ?? "",
+                        types[token] ?? "SERVICE",
+                        "project",
+                      );
+                      onResolved();
+                    } catch (e) {
+                      onError(String(e));
+                    }
+                  }}
+                >
+                  Name it
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

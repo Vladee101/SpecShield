@@ -89,7 +89,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
-| M5 diff + git | engine and CLI done; diff viewer UI remains |
+| M5 diff + git | done — engine, git, CLI, and the diff screen |
 | M6 hardening + packaging | not started |
 
 Corpus, current: all six projects gated, 98.6% recall / 95.8% precision;
@@ -297,12 +297,15 @@ same alias or the twin stops resolving.
 
 ---
 
-**P2-7. The M5 diff viewer UI does not exist.** The engine, the git integration,
-and the CLI (`diff`, `resolve`, `apply`, `undo`) are done and Workflow B runs end
-to end from the command line. What is missing is the Tauri screen: the diff view
-with fuzzy hits and unresolved identities inline, and the form that names an
-invented entity. `crates/core/src/diff.rs` already returns everything that
-screen needs — hunks, per-hunk notes, and the complete note list.
+**P2-7. The M5 diff viewer UI. — DONE.** Step 5, "Diff & apply", in
+`app/src/App.tsx`. Hunks with inline notes, the complete note list, the SDD §12
+naming form, and patch application with undo.
+
+What was *not* done: the screen has never been driven through a running Tauri
+app. It was rendered against a stubbed IPC layer in a browser — which confirms
+the markup, the CSS, and the refusal logic — and the guards behind it are tested
+in Rust (`app/src-tauri/src/lib.rs`). The gap is the real IPC round trip and
+anything that depends on a live vault, and it is the same gap P1-5 describes.
 
 ---
 

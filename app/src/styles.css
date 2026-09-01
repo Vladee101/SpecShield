@@ -88,3 +88,25 @@ td.mono { font-family: var(--mono); }
 }
 .scroll { max-height: 260px; overflow-y: auto; }
 .error { color: var(--block); }
+
+/* Diff viewer — SDD §13. Colour carries meaning here, so each line also
+   carries its own +/− marker: a red/green pair is unreadable to a good number
+   of people and the sign is what a patch actually uses. */
+.hunk { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+.hunk-head {
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+pre.diff { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; }
+pre.diff .add { color: var(--ok); }
+pre.diff .del { color: var(--block); }
+.note {
+  padding: 6px 10px;
+  font-size: 12.5px;
+  border-top: 1px solid var(--line);
+}
+.note.fuzzy { color: var(--warn); }
+.note.unresolved { color: var(--block); }
+.note.redaction { color: var(--muted); }

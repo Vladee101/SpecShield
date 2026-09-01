@@ -87,6 +87,64 @@ export interface RestoreResult {
   redactions_preserved: number;
 }
 
+/** One changed line. `added` distinguishes the two sides of a hunk. */
+export interface DiffLine {
+  added: boolean;
+  number: number;
+  text: string;
+}
+
+export interface DiffNote {
+  /** "fuzzy" | "unresolved" | "redaction" */
+  kind: string;
+  line: number;
+  detail: string;
+  /** The token to name, for unresolved notes. Empty otherwise. */
+  token: string;
+}
+
+export interface DiffHunk {
+  /** "added" | "removed" | "changed" | "formatting" */
+  kind: string;
+  before_start: number;
+  after_start: number;
+  lines: DiffLine[];
+  notes: DiffNote[];
+}
+
+export interface DiffReview {
+  restored: string;
+  changes: DiffHunk[];
+  /** How many edits the model itself made, in twin space. */
+  model_changes: number;
+  substantive: number;
+  /**
+   * Every note, including ones that fall inside no hunk. A fuzzy match can
+   * restore to text identical to the original — the guess still happened.
+   */
+  notes: DiffNote[];
+  blocks_patch: boolean;
+  unresolved: string[];
+}
+
+export interface PatchStatus {
+  file_exists: boolean;
+  git_available: boolean;
+  git_explain: string;
+  branch: string;
+  dirty: boolean;
+  /** The file has changed since it was indexed — SDD §13.1. */
+  stale: boolean;
+  not_indexed: boolean;
+}
+
+export interface AppliedPatch {
+  branch: string;
+  previous_branch: string;
+  created_branch: boolean;
+  files: number;
+}
+
 export interface AuditRow {
   ts: number;
   operation: string;
@@ -118,6 +176,19 @@ export const api = {
     invoke<SanitizeResult>("sanitize_text", { filename, content }),
 
   restore: (content: string) => invoke<RestoreResult>("restore_text", { content }),
+
+  reviewDiff: (original: string, twin: string, aiTwin: string) =>
+    invoke<DiffReview>("review_diff", { original, twin, aiTwin }),
+
+  resolveIdentity: (alias: string, name: string, entityType: EntityType, scope: string) =>
+    invoke<void>("resolve_identity", { alias, name, entityType, scope }),
+
+  patchStatus: (filename: string) => invoke<PatchStatus>("patch_status", { filename }),
+
+  applyPatch: (filename: string, restored: string, branch: string) =>
+    invoke<AppliedPatch>("apply_patch", { filename, restored, branch }),
+
+  undoPatch: () => invoke<string>("undo_patch"),
 
   copyVerifiedTwin: (withEnvelope: boolean) =>
     invoke<number>("copy_verified_twin", { withEnvelope }),

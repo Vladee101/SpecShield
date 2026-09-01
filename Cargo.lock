@@ -3785,12 +3785,15 @@ dependencies = [
  "serde",
  "serde_json",
  "specshield-core",
+ "specshield-git",
+ "specshield-index",
  "specshield-parsers",
  "specshield-vault",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "thiserror 2.0.20",
+ "uuid",
  "zeroize",
 ]
 

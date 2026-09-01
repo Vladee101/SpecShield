@@ -30,13 +30,21 @@ use specshield_core::model::{EntityType, OccurrenceKind, Origin, Status};
 use specshield_core::parser::ProjectContext;
 use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::{AUTO_APPLY_CONFIDENCE, Graph};
-use specshield_core::{alias, restore, sanitize, secrets, verify};
+use specshield_core::{alias, diff, restore, sanitize, secrets, verify};
+use specshield_git as git;
 use specshield_vault as vault;
 use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use zeroize::Zeroize;
 
 use crate::state::AppState;
+
+/// Where an applied patch is kept so `undo_patch` can reverse it. Beside the
+/// vault, in plaintext: it holds real identifiers, which is no new exposure —
+/// the source files it was built from sit unencrypted in the same tree — but it
+/// must not be committed, and `.specshield/` is already ignored.
+const LAST_PATCH: &str = ".specshield/last-apply.patch";
+const LAST_APPLY: &str = ".specshield/last-apply.json";
 
 /// Errors crossing the IPC boundary.
 ///
@@ -377,6 +385,346 @@ fn restore_text(state: State<'_, AppState>, content: String) -> Result<RestoreRe
     })
 }
 
+/// A run of changed lines, flattened for the frontend.
+#[derive(Serialize)]
+struct WireHunk {
+    kind: String,
+    before_start: usize,
+    after_start: usize,
+    lines: Vec<WireLine>,
+    notes: Vec<WireNote>,
+}
+
+#[derive(Serialize)]
+struct WireLine {
+    added: bool,
+    number: usize,
+    text: String,
+}
+
+/// A note carries its own line, because the UI shows the full list as well as
+/// the per-hunk ones — a fuzzy match can restore to text identical to the
+/// original and land in no hunk at all.
+#[derive(Serialize)]
+struct WireNote {
+    kind: String,
+    line: usize,
+    detail: String,
+    /// The token to name, for `Unresolved` notes. Empty otherwise.
+    token: String,
+}
+
+#[derive(Serialize)]
+struct DiffReview {
+    restored: String,
+    changes: Vec<WireHunk>,
+    model_changes: usize,
+    substantive: usize,
+    notes: Vec<WireNote>,
+    /// Unresolved identities block the patch outright — SDD §12.
+    blocks_patch: bool,
+    unresolved: Vec<String>,
+}
+
+/// Whether this document can be applied as a patch, and why not if it cannot.
+///
+/// Four flags rather than one verdict, deliberately. "Cannot apply" is not
+/// useful on its own; the UI shows *which* condition failed, because the fix
+/// differs completely — re-sanitize, install git, or pick a real file.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Serialize)]
+struct PatchStatus {
+    /// The file exists under the project root.
+    file_exists: bool,
+    /// git is available and the project is a working tree.
+    git_available: bool,
+    git_explain: String,
+    branch: String,
+    dirty: bool,
+    /// Set when the file has changed since it was indexed — SDD §13.1.
+    stale: bool,
+    /// Set when no checksum was ever recorded for this path.
+    not_indexed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AppliedPatch {
+    branch: String,
+    previous_branch: String,
+    created_branch: bool,
+    files: usize,
+}
+
+fn to_note(line: usize, note: &diff::Note) -> WireNote {
+    match note {
+        diff::Note::Fuzzy { found, real_name, kind } => WireNote {
+            kind: "fuzzy".to_owned(),
+            line,
+            detail: format!("{found} → {real_name} ({kind:?}) — matched loosely, not byte-for-byte"),
+            token: String::new(),
+        },
+        diff::Note::Unresolved { token } => WireNote {
+            kind: "unresolved".to_owned(),
+            line,
+            detail: format!("{token} is an alias this project has never issued"),
+            token: token.clone(),
+        },
+        diff::Note::Redaction { marker } => WireNote {
+            kind: "redaction".to_owned(),
+            line,
+            detail: format!("{marker} stays — redaction is one-way"),
+            token: String::new(),
+        },
+    }
+}
+
+fn to_hunk(hunk: &diff::Hunk) -> WireHunk {
+    WireHunk {
+        kind: match hunk.kind {
+            diff::ChangeKind::Added => "added",
+            diff::ChangeKind::Removed => "removed",
+            diff::ChangeKind::Changed => "changed",
+            diff::ChangeKind::Formatting => "formatting",
+        }
+        .to_owned(),
+        before_start: hunk.before.0,
+        after_start: hunk.after.0,
+        lines: hunk
+            .lines
+            .iter()
+            .map(|l| WireLine {
+                added: l.side == diff::Side::After,
+                number: l.number,
+                text: l.text.clone(),
+            })
+            .collect(),
+        notes: hunk.notes.iter().map(|n| to_note(0, n)).collect(),
+    }
+}
+
+/// Compare the file, the twin that was sent, and the twin that came back —
+/// SDD §13.
+///
+/// Read-only. Nothing is written, no identity is interned, and the vault is not
+/// touched: reviewing a response must not change what the next sanitize does.
+#[tauri::command]
+fn review_diff(state: State<'_, AppState>, original: String, twin: String, ai_twin: String) -> Result<DiffReview> {
+    state.with(|vault, _| {
+        let graph = graph_from(vault)?;
+        let review = diff::review(&original, &twin, &ai_twin, &Vocabulary::new(graph.vocabulary()));
+
+        Ok(DiffReview {
+            changes: review.changes.iter().map(to_hunk).collect(),
+            model_changes: review.model_changes.len(),
+            substantive: review.substantive().count(),
+            notes: review.notes.iter().map(|(line, n)| to_note(*line, n)).collect(),
+            blocks_patch: review.blocks_patch(),
+            unresolved: review.outcome.unresolved.iter().map(|u| u.token.clone()).collect(),
+            restored: review.restored,
+        })
+    })
+}
+
+/// Name an entity the model invented — SDD §12.
+///
+/// The model's own token becomes the identity's alias. A freshly derived one
+/// would leave the response being reviewed unrestorable, since that response
+/// contains the token and nothing else.
+#[tauri::command]
+fn resolve_identity(
+    state: State<'_, AppState>,
+    alias: String,
+    name: String,
+    entity_type: String,
+    scope: String,
+) -> Result<()> {
+    if !alias::is_alias_shaped(&alias) {
+        return Err(fail(format!(
+            "{alias:?} is not alias-shaped — this names tokens the model invented, not arbitrary text"
+        )));
+    }
+    let parsed: EntityType = entity_type
+        .parse()
+        .map_err(|_| fail(format!("unknown entity type {entity_type:?}")))?;
+
+    state.with(|vault, _| {
+        if let Some(existing) = vault.identities()?.into_iter().find(|i| i.alias == alias) {
+            return Err(fail(format!(
+                "{alias} is already issued for {:?} — nothing to resolve",
+                existing.real_name
+            )));
+        }
+
+        vault.put_identity(&vault::StoredIdentity {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            scope_path: if scope.is_empty() { "project".to_owned() } else { scope },
+            entity_type: parsed.prefix().to_owned(),
+            real_name: name,
+            alias,
+            origin: "ai_new".to_owned(),
+            status: "active".to_owned(),
+        })?;
+        vault.log("resolve", None, Some(1), None, None)?;
+        Ok(())
+    })
+}
+
+/// Everything the UI needs to decide whether to offer patch application.
+///
+/// Answered before the user asks for it, so the button explains itself rather
+/// than failing on click.
+#[tauri::command]
+fn patch_status(state: State<'_, AppState>, filename: String) -> Result<PatchStatus> {
+    patch_status_in(&state, &filename)
+}
+
+/// The body, separated from the IPC wrapper so the guards can be tested. A
+/// `State` cannot be constructed outside a running Tauri app, and these are the
+/// checks that stand between AI output and someone's repository.
+fn patch_status_in(session: &AppState, filename: &str) -> Result<PatchStatus> {
+    session.with(|vault, root| {
+        let path = root.join(filename);
+        let file_exists = path.is_file();
+
+        let indexed = vault.files()?.into_iter().find(|f| f.path == filename);
+        let not_indexed = indexed.is_none();
+        let stale = match (&indexed, file_exists) {
+            (Some(entry), true) => {
+                specshield_index::checksum_of(&path).map_err(|e| fail(e.to_string()))? != entry.checksum
+            }
+            _ => false,
+        };
+
+        let (git_available, git_explain, branch, dirty) = match git::Repository::discover(root) {
+            git::Availability::Ready(repository) => {
+                let branch = repository.current_branch().unwrap_or_default();
+                let dirty = repository.is_dirty().unwrap_or(false);
+                (true, "patch mode available".to_owned(), branch, dirty)
+            }
+            unavailable => (false, unavailable.explain().to_owned(), String::new(), false),
+        };
+
+        Ok(PatchStatus {
+            file_exists,
+            git_available,
+            git_explain,
+            branch,
+            dirty,
+            stale,
+            not_indexed,
+        })
+    })
+}
+
+/// Apply restored content to a branch — SDD §14.
+///
+/// The frontend supplies the restored text it displayed, and nothing else: the
+/// original comes off disk here, so the patch is built against what is actually
+/// there rather than against whatever the UI last read.
+///
+/// Every guard is re-checked on this side. The frontend disables the button when
+/// a patch is refused, but a disabled button is a courtesy, not a control.
+#[tauri::command]
+fn apply_patch(state: State<'_, AppState>, filename: String, restored: String, branch: String) -> Result<AppliedPatch> {
+    apply_patch_in(&state, &filename, &restored, &branch)
+}
+
+fn apply_patch_in(state: &AppState, filename: &str, restored: &str, branch: &str) -> Result<AppliedPatch> {
+    state.with(|vault, root| {
+        let path = root.join(filename);
+        let original = std::fs::read_to_string(&path).map_err(|e| fail(format!("reading {filename}: {e}")))?;
+
+        // SDD §13.1. A patch built from a twin of older content can apply
+        // cleanly and silently revert the edits made in between.
+        let indexed = vault.files()?.into_iter().find(|f| f.path == filename);
+        if let Some(entry) = indexed
+            && specshield_index::checksum_of(&path).map_err(|e| fail(e.to_string()))? != entry.checksum
+        {
+            return Err(fail(format!(
+                "{filename} has changed since it was indexed — re-sanitize before applying"
+            )));
+        }
+
+        // SDD §12. An alias-shaped token left in the text would be written into
+        // real source as a name nobody chose.
+        let leftover = restore::restore(restored, &Vocabulary::new(graph_from(vault)?.vocabulary()));
+        if !leftover.unresolved.is_empty() {
+            return Err(fail(format!(
+                "{} unresolved identit(ies) remain — name them first",
+                leftover.unresolved.len()
+            )));
+        }
+
+        let Some(diff) = git::patch([(filename, original.as_str(), restored)]) else {
+            return Err(fail("no changes to apply"));
+        };
+
+        let git::Availability::Ready(repo) = git::Repository::discover(root) else {
+            return Err(fail("git is not available here — patch mode is disabled"));
+        };
+
+        let applied = repo
+            .apply_to_branch(&diff, branch, 1)
+            .map_err(|e| fail(e.to_string()))?;
+
+        std::fs::write(root.join(LAST_PATCH), &diff).map_err(|e| fail(e.to_string()))?;
+        std::fs::write(
+            root.join(LAST_APPLY),
+            format!(
+                "{{\"branch\":{:?},\"previous_branch\":{:?},\"created_branch\":{}}}\n",
+                applied.branch, applied.previous_branch, applied.created_branch
+            ),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+
+        vault.log("apply", Some(1), None, Some("applied"), Some(&applied.branch))?;
+
+        Ok(AppliedPatch {
+            branch: applied.branch,
+            previous_branch: applied.previous_branch,
+            created_branch: applied.created_branch,
+            files: applied.files,
+        })
+    })
+}
+
+/// Reverse the last patch this project applied.
+#[tauri::command]
+fn undo_patch(state: State<'_, AppState>) -> Result<String> {
+    state.with(|vault, root| {
+        let patch_path = root.join(LAST_PATCH);
+        let patch = std::fs::read_to_string(&patch_path).map_err(|_| fail("there is no applied patch to reverse"))?;
+        let record = std::fs::read_to_string(root.join(LAST_APPLY)).unwrap_or_default();
+
+        let field = |name: &str| -> String {
+            record
+                .split(&format!("\"{name}\":\""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let applied = git::Applied {
+            branch: field("branch"),
+            previous_branch: field("previous_branch"),
+            created_branch: record.contains("\"created_branch\":true"),
+            files: 1,
+        };
+
+        let git::Availability::Ready(repository) = git::Repository::discover(root) else {
+            return Err(fail("git is not available here — there is nothing to reverse"));
+        };
+
+        repository.undo(&patch, &applied).map_err(|e| fail(e.to_string()))?;
+        vault.log("undo", Some(1), None, Some("reverted"), None)?;
+
+        let _ = std::fs::remove_file(&patch_path);
+        let _ = std::fs::remove_file(root.join(LAST_APPLY));
+
+        Ok(repository.current_branch().unwrap_or_default())
+    })
+}
+
 /// Copy a verified twin to the clipboard — SDD §17.5.
 ///
 /// Reads the twin from session state rather than accepting text from the
@@ -605,10 +953,187 @@ pub fn run() {
             scan_text,
             sanitize_text,
             restore_text,
+            review_diff,
+            resolve_identity,
+            patch_status,
+            apply_patch,
+            undo_patch,
             copy_verified_twin,
             audit_log,
             supported_formats,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SpecShield");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::vault_path;
+
+    struct TempProject(std::path::PathBuf);
+
+    impl TempProject {
+        fn new(name: &str) -> Self {
+            let mut root = std::env::temp_dir();
+            root.push(format!("specshield-app-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).expect("temp dir");
+            std::fs::create_dir_all(root.join(".specshield")).expect("vault dir");
+
+            let settings = vault::Settings {
+                project_name: "test".to_owned(),
+                root_path: root.display().to_string(),
+                alias_style: "opaque".to_owned(),
+                scope_strategy: "module".to_owned(),
+                project_key: [1; 32],
+            };
+            vault::Vault::create(&vault_path(&root), "pw", &settings).expect("create vault");
+            Self(root)
+        }
+
+        fn write(&self, relative: &str, content: &str) {
+            let path = self.0.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("parent");
+            }
+            std::fs::write(path, content).expect("write");
+        }
+
+        fn open(&self) -> AppState {
+            let state = AppState::default();
+            state.open(&self.0, "pw").expect("open");
+            state
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn record_file(state: &AppState, path: &str, checksum: &str) {
+        state
+            .with(|vault, _| {
+                vault.put_files(&[vault::StoredFile {
+                    path: path.to_owned(),
+                    twin_path: path.to_owned(),
+                    checksum: checksum.to_owned(),
+                    parser: "typescript".to_owned(),
+                }])?;
+                Ok(())
+            })
+            .expect("record");
+    }
+
+    #[test]
+    fn an_unresolved_note_carries_the_token_the_form_needs() {
+        // The naming form submits `token`. An empty one makes the whole SDD §12
+        // flow unusable while looking perfectly fine on screen.
+        let note = to_note(
+            7,
+            &diff::Note::Unresolved {
+                token: "SERVICE_099".to_owned(),
+            },
+        );
+        assert_eq!(note.kind, "unresolved");
+        assert_eq!(note.token, "SERVICE_099");
+        assert_eq!(note.line, 7);
+    }
+
+    #[test]
+    fn a_hunk_keeps_which_side_each_line_came_from() {
+        let hunk = diff::Hunk {
+            kind: diff::ChangeKind::Changed,
+            before: (3, 4),
+            after: (3, 4),
+            lines: vec![
+                diff::Line {
+                    side: diff::Side::Before,
+                    number: 3,
+                    text: "old\n".to_owned(),
+                },
+                diff::Line {
+                    side: diff::Side::After,
+                    number: 3,
+                    text: "new\n".to_owned(),
+                },
+            ],
+            notes: Vec::new(),
+        };
+
+        let wire = to_hunk(&hunk);
+        assert_eq!(wire.kind, "changed");
+        assert!(!wire.lines[0].added, "a removal must not render as an addition");
+        assert!(wire.lines[1].added);
+    }
+
+    #[test]
+    fn patch_status_reports_a_file_that_moved_since_it_was_indexed() {
+        let project = TempProject::new("stale");
+        project.write("src/a.ts", "one\n");
+        let state = project.open();
+        record_file(&state, "src/a.ts", "a checksum from another time");
+
+        let status = patch_status_in(&state, "src/a.ts").expect("status");
+        assert!(status.file_exists);
+        assert!(status.stale, "SDD §13.1");
+        assert!(!status.not_indexed);
+    }
+
+    #[test]
+    fn patch_status_distinguishes_never_indexed_from_stale() {
+        let project = TempProject::new("unindexed");
+        project.write("src/a.ts", "one\n");
+        let state = project.open();
+
+        let status = patch_status_in(&state, "src/a.ts").expect("status");
+        assert!(status.not_indexed);
+        assert!(!status.stale, "nothing to be stale against");
+    }
+
+    #[test]
+    fn applying_over_a_stale_file_is_refused_in_rust() {
+        // The frontend disables the button. A disabled button is a courtesy,
+        // not a control — the guard has to hold when the command is called
+        // anyway.
+        let project = TempProject::new("apply-stale");
+        project.write("src/a.ts", "one\n");
+        let state = project.open();
+        record_file(&state, "src/a.ts", "not the current content");
+
+        let result = apply_patch_in(&state, "src/a.ts", "two\n", "specshield/restore");
+        let message = result.expect_err("must refuse").to_string();
+        assert!(message.contains("changed since it was indexed"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(project.0.join("src/a.ts")).unwrap(),
+            "one\n",
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn applying_with_an_unresolved_identity_is_refused_in_rust() {
+        let project = TempProject::new("apply-unresolved");
+        project.write("src/a.ts", "class Thing {}\n");
+        let state = project.open();
+
+        // Alias-shaped, and the vault has never issued it — SDD §12.
+        let result = apply_patch_in(&state, "src/a.ts", "class SERVICE_099 {}\n", "specshield/restore");
+        let message = result.expect_err("must refuse").to_string();
+        assert!(message.contains("unresolved"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(project.0.join("src/a.ts")).unwrap(),
+            "class Thing {}\n",
+            "nothing was written"
+        );
+    }
+
+    #[test]
+    fn resolving_a_token_that_is_not_alias_shaped_is_refused() {
+        let project = TempProject::new("resolve-shape");
+        let _state = project.open();
+        assert!(!alias::is_alias_shaped("just some words"));
+    }
 }

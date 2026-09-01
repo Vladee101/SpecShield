@@ -17,6 +17,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 specshield-core.workspace = true
 specshield-vault.workspace = true
+specshield-git.workspace = true
+specshield-index.workspace = true
+uuid.workspace = true
 specshield-parsers.workspace = true
 tauri = { version = "2", features = [] }
 serde.workspace = true
