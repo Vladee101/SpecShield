@@ -72,6 +72,20 @@ pub trait ArtifactParser: Send + Sync {
     /// the returned edits are validated and applied by [`crate::edit::apply`].
     fn plan_edits(&self, parsed: &Parsed<'_>, aliases: &AliasMap) -> Vec<Edit>;
 
+    /// Entities the format's own syntax identifies, with byte spans.
+    ///
+    /// This is where a parser earns its place over the prose scan: the AST
+    /// knows that `customer_id` in one table is a different identity from
+    /// `customer_id` in another, and no heuristic over text can.
+    ///
+    /// The default is empty — Markdown and plain text have no syntax to read,
+    /// and every entity they carry comes from the prose scan. The caller merges
+    /// both, with these taking precedence where they overlap.
+    fn structural_candidates(&self, source: &str, scope: &str) -> Vec<Candidate> {
+        let (_, _) = (source, scope);
+        Vec::new()
+    }
+
     /// Structural fingerprint of `source`, for the SDD §7.2 verification pass.
     ///
     /// Sanitization replaces identifiers; it must not change a document's

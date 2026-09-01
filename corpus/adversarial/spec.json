@@ -180,6 +180,366 @@
       "files": [
         "shadowed.ts"
       ]
+    },
+    {
+      "real_name": "account",
+      "entity_type": "table",
+      "scope_path": "billing.public.account",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        3,
+        8
+      ]
+    },
+    {
+      "real_name": "account_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.account.account_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        3,
+        8
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.account.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        3,
+        8
+      ]
+    },
+    {
+      "real_name": "invoice",
+      "entity_type": "table",
+      "scope_path": "billing.public.invoice",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        9,
+        14
+      ]
+    },
+    {
+      "real_name": "invoice_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.invoice_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        9,
+        14
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        9,
+        14
+      ]
+    },
+    {
+      "real_name": "payment_attempt",
+      "entity_type": "table",
+      "scope_path": "billing.public.payment_attempt",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        15,
+        20
+      ]
+    },
+    {
+      "real_name": "payment_attempt_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.payment_attempt_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        15,
+        20
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        15,
+        20
+      ]
+    },
+    {
+      "real_name": "refund",
+      "entity_type": "table",
+      "scope_path": "billing.public.refund",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        21,
+        26
+      ]
+    },
+    {
+      "real_name": "refund_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.refund.refund_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        21,
+        26
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.refund.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        21,
+        26
+      ]
+    },
+    {
+      "real_name": "dunning_event",
+      "entity_type": "table",
+      "scope_path": "billing.public.dunning_event",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        27,
+        32
+      ]
+    },
+    {
+      "real_name": "dunning_event_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.dunning_event.dunning_event_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        27,
+        32
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.dunning_event.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        27,
+        32
+      ]
+    },
+    {
+      "real_name": "usage_record",
+      "entity_type": "table",
+      "scope_path": "billing.public.usage_record",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        33,
+        38
+      ]
+    },
+    {
+      "real_name": "usage_record_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.usage_record.usage_record_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        33,
+        38
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.usage_record.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        33,
+        38
+      ]
+    },
+    {
+      "real_name": "credit_note",
+      "entity_type": "table",
+      "scope_path": "billing.public.credit_note",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        39,
+        44
+      ]
+    },
+    {
+      "real_name": "credit_note_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.credit_note.credit_note_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        39,
+        44
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.credit_note.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        39,
+        44
+      ]
+    },
+    {
+      "real_name": "tax_line",
+      "entity_type": "table",
+      "scope_path": "billing.public.tax_line",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        45,
+        50
+      ]
+    },
+    {
+      "real_name": "tax_line_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.tax_line.tax_line_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        45,
+        50
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.tax_line.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        45,
+        50
+      ]
+    },
+    {
+      "real_name": "payout",
+      "entity_type": "table",
+      "scope_path": "billing.public.payout",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        51,
+        56
+      ]
+    },
+    {
+      "real_name": "payout_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payout.payout_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        51,
+        56
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.payout.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        51,
+        56
+      ]
+    },
+    {
+      "real_name": "audit_entry",
+      "entity_type": "table",
+      "scope_path": "billing.public.audit_entry",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        57,
+        62
+      ]
+    },
+    {
+      "real_name": "audit_entry_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.audit_entry.audit_entry_id",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        57,
+        62
+      ]
+    },
+    {
+      "real_name": "created_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.audit_entry.created_at",
+      "files": [
+        "customer-id-ten-tables.sql"
+      ],
+      "line_range": [
+        57,
+        62
+      ]
     }
   ],
   "secrets": [

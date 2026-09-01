@@ -7,7 +7,7 @@
 //! | Format | Parser | Milestone |
 //! |---|---|---|
 //! | Markdown, plain text | prose scan over the raw source | M1 |
-//! | SQL | `sqlparser` | M3 |
+//! | SQL | `sqlparser`, AST-driven with byte spans | M3 |
 //! | JSON, YAML | CST-preserving | M3 |
 //! | OpenAPI | semantic layer over the YAML/JSON CST | M3 |
 //! | TypeScript / JavaScript | Tree-sitter + heuristic scoping | M4 |
@@ -26,6 +26,7 @@
 //!   such as skipping fenced code. See [`markdown`].
 
 pub mod markdown;
+pub mod sql;
 pub mod text;
 
 use std::path::Path;
@@ -33,6 +34,7 @@ use std::path::Path;
 pub use specshield_core::parser::{ArtifactParser, Candidate, Document, ParseError, Parsed};
 
 pub use crate::markdown::MarkdownParser;
+pub use crate::sql::SqlParser;
 pub use crate::text::TextParser;
 
 /// Every parser this build supports, in priority order.
@@ -40,7 +42,7 @@ pub use crate::text::TextParser;
 /// The names match the `requires` field in the corpus specs, so the corpus
 /// report can gate only the projects whose formats actually have a parser.
 pub fn registry() -> Vec<Box<dyn ArtifactParser>> {
-    vec![Box::new(MarkdownParser), Box::new(TextParser)]
+    vec![Box::new(MarkdownParser), Box::new(SqlParser), Box::new(TextParser)]
 }
 
 /// Names of the implemented parsers — `["markdown", "text"]` today.
@@ -73,7 +75,7 @@ mod tests {
     fn unsupported_formats_return_none() {
         // SQL, YAML, and TypeScript arrive in M3 and M4. Claiming them now
         // would silently produce an unaliased twin.
-        for path in ["schema.sql", "openapi.yaml", "service.ts", "image.png"] {
+        for path in ["openapi.yaml", "service.ts", "image.png"] {
             assert!(
                 for_document(Path::new(path), "").is_none(),
                 "{path} should not be claimed yet"
@@ -83,6 +85,6 @@ mod tests {
 
     #[test]
     fn implemented_names_are_stable() {
-        assert_eq!(implemented(), vec!["markdown", "text"]);
+        assert_eq!(implemented(), vec!["markdown", "sql", "text"]);
     }
 }

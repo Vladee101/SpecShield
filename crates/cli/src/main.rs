@@ -122,6 +122,9 @@ enum Command {
         /// Fail with a non-zero exit if the targets are missed.
         #[arg(long)]
         strict: bool,
+        /// List every detection that is not in ground truth.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -208,7 +211,11 @@ fn main() -> Result<()> {
             input,
             passphrase,
         } => run_restore(&project, input.as_deref(), passphrase.as_deref()),
-        Command::Report { corpus, strict } => report::run(&corpus, strict),
+        Command::Report {
+            corpus,
+            strict,
+            verbose,
+        } => report::run(&corpus, strict, verbose),
     }
 }
 

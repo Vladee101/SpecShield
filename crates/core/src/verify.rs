@@ -128,12 +128,23 @@ impl LeakScanner {
 /// match inside unrelated words constantly.
 const MIN_NAME_LEN: usize = 3;
 
-/// Reject matches that sit inside a longer identifier, so `Order` does not
-/// flag `Reorder` or `OrderedMap`.
+/// Reject matches that sit inside a longer *word*, so `Order` does not flag
+/// `Reorder` or `OrderedMap`.
+///
+/// An underscore counts as a boundary. Without that, a table name embedded in a
+/// `snake_case` compound escapes the gate entirely: a twin containing
+/// `idx_customer_subscription_customer` scanned against a vault holding
+/// `customer_subscription` reported **clean**, because `_` is an identifier
+/// character. Index names, constraint names, and generated helper names are all
+/// built that way, so the hole was not hypothetical.
+///
+/// `Order`/`Reorder` still does not match — there is no underscore to make a
+/// boundary — so this widens the gate without reopening the false-positive
+/// problem it was written to avoid.
 fn is_whole_token(haystack: &str, start: usize, end: usize) -> bool {
     let before = haystack[..start].chars().next_back();
     let after = haystack[end..].chars().next();
-    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
     boundary(before) && boundary(after)
 }
 
@@ -266,6 +277,16 @@ mod tests {
     fn plural_forms_are_blocked() {
         let scanner = LeakScanner::new(["Subscription"]);
         assert!(!scanner.scan("returns all subscriptions").is_clean());
+    }
+
+    #[test]
+    fn a_name_embedded_in_a_snake_case_compound_is_blocked() {
+        // `idx_<table>_<column>` is how every index name is built. Missing this
+        // meant a twin could carry the real table name through an index name
+        // and pass the gate.
+        let scanner = LeakScanner::new(["customer_subscription"]);
+        let twin = "CREATE INDEX idx_customer_subscription_customer ON DB_TABLE_A1 (COLUMN_B2);";
+        assert!(!scanner.scan(twin).is_clean(), "embedded table name escaped the gate");
     }
 
     #[test]

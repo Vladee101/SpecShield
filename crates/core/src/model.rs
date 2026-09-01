@@ -26,6 +26,7 @@ pub enum EntityType {
     Interface,
     Enum,
     Event,
+    Index,
     EnvVar,
     Host,
     PathSegment,
@@ -47,6 +48,7 @@ impl EntityType {
             Self::Interface => "IFACE",
             Self::Enum => "ENUM",
             Self::Event => "EVENT",
+            Self::Index => "INDEX",
             Self::EnvVar => "ENV",
             Self::Host => "HOST",
             Self::PathSegment => "PATH",
@@ -66,13 +68,14 @@ impl EntityType {
             Self::Dto | Self::Interface => "Model",
             Self::Enum => "Enum",
             Self::Event => "Event",
+            Self::Index => "Index",
             Self::EnvVar | Self::Host => "Config",
             Self::PathSegment => "Path",
         }
     }
 
     /// Every variant, for exhaustive iteration in tests and UI.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Organization,
         Self::Service,
         Self::Api,
@@ -83,6 +86,7 @@ impl EntityType {
         Self::Interface,
         Self::Enum,
         Self::Event,
+        Self::Index,
         Self::EnvVar,
         Self::Host,
         Self::PathSegment,

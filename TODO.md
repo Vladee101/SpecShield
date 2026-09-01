@@ -87,7 +87,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
 | M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
-| M3 SQL / YAML / OpenAPI | not started |
+| M3 SQL / YAML / OpenAPI | SQL done; YAML/JSON/OpenAPI next |
 | M4 TypeScript + repo scale | not started |
 | M5 diff + git | not started |
 | M6 hardening + packaging | not started |
@@ -207,10 +207,17 @@ and drive `sanitize_text` / `copy_verified_twin` without a window.
 
 ### P2 — M3, next milestone
 
-**P2-1. SQL parser** (`crates/parsers/src/sql.rs`, new). Use `sqlparser`.
-Tables, columns, constraints, indexes. Scope columns as
-`db.schema.table.column` — `corpus/adversarial` has ten `customer_id` columns
-across ten tables specifically to catch a flat implementation.
+~~**P2-1. SQL parser**~~ — **done**. `crates/parsers/src/sql.rs`, AST-driven via
+`sqlparser`, with byte offsets from `Ident::span`. Tables, columns, enum types,
+index names, and **references** — `REFERENCES t (c)` names both again, and
+aliasing only the declaration leaks the name and breaks the schema.
+
+Columns are scoped to their declaring table, so the ten `customer_id` columns in
+the adversarial fixture are ten identities. Edits are still byte ranges; the AST
+is never re-serialized, because that would lose comments and normalize keyword
+casing and fail the round trip on the first file.
+
+sql-schema went 5% → 100% recall. Gated total: 100% recall, 96.4% precision.
 
 **P2-2. YAML and JSON parsers**, CST-preserving. **Not `serde_yaml`** (archived
 2024) and **not** a `serde_json` round-trip: deserializing to a value model and

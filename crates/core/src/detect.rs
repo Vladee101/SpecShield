@@ -218,6 +218,7 @@ impl Detector {
     ///
     /// `scope` is the identity scope for everything found here — `project` for
     /// Markdown, since prose has no module structure.
+    #[allow(clippy::too_many_lines)]
     pub fn scan_text(&self, text: &str, scope: &str, kind: OccurrenceKind) -> Vec<Candidate> {
         let mut found: Vec<Candidate> = Vec::new();
         let mut claimed: Vec<(usize, usize)> = Vec::new();
@@ -272,6 +273,18 @@ impl Detector {
         }
 
         for m in HOSTNAME.find_iter(text) {
+            // `3.1.0` and `2.4.0` match the dotted-segment shape exactly. A
+            // hostname's last segment is a TLD-like word, never digits — the
+            // openapi fixtures are full of version strings and every one of
+            // them was being aliased as a host.
+            let looks_like_a_host = m
+                .as_str()
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
+            if !looks_like_a_host {
+                continue;
+            }
             push(
                 Self::candidate(m.as_str(), EntityType::Host, scope, m.start(), m.end(), kind, 0.9),
                 &mut claimed,
@@ -566,6 +579,19 @@ mod tests {
         assert_eq!(by_name("SubscriptionCreated"), Some(EntityType::Event));
         assert_eq!(by_name("BillingApi"), Some(EntityType::Api));
         assert_eq!(by_name("CreateSubscriptionDto"), Some(EntityType::Dto));
+    }
+
+    #[test]
+    fn version_strings_are_not_hostnames() {
+        let d = Detector::new();
+        for version in ["openapi: 3.1.0", "version: 2.4.0", "1.0.0"] {
+            let found = d.scan_text(version, "project", OccurrenceKind::Reference);
+            assert!(
+                found.iter().all(|c| c.entity_type != EntityType::Host),
+                "{version} detected as a host: {:?}",
+                names(&found)
+            );
+        }
     }
 
     #[test]

@@ -28,7 +28,7 @@ CORPUS = Path(__file__).resolve().parent.parent
 # label.
 ENTITY_TYPES = {
     "organization", "service", "api", "endpoint", "table", "column", "dto",
-    "interface", "enum", "event", "env_var", "host", "path_segment",
+    "interface", "enum", "event", "index", "env_var", "host", "path_segment",
 }
 
 

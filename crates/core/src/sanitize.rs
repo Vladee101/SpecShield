@@ -230,7 +230,26 @@ pub fn sanitize(
 
     // 2. Detect against the redacted text, so a credential can never be
     //    admitted to the identity graph as though it were a name.
-    let candidates = detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference);
+    //
+    //    Two sources, in that order of authority. The parser reads the format's
+    //    own syntax and knows that `customer_id` in one table is a different
+    //    identity from `customer_id` in another; the prose scan then covers
+    //    comments and free text, which no grammar describes. Structural
+    //    candidates claim their spans first, so a name the AST has already
+    //    classified is never reclassified by a heuristic.
+    let structural = parser.map_or_else(Vec::new, |p| p.structural_candidates(&redacted, scope));
+    let mut candidates = structural;
+    let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
+
+    for candidate in detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference) {
+        let overlaps = claimed
+            .iter()
+            .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end);
+        if !overlaps {
+            candidates.push(candidate);
+        }
+    }
+    candidates.sort_by_key(|c| c.byte_start);
 
     let (confident, suggestions): (Vec<_>, Vec<_>) = candidates
         .into_iter()

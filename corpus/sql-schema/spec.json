@@ -1,5 +1,5 @@
 {
-  "description": "Tables and columns, including the repeated customer_id case: one name, three scopes, three identities. Collapsing them by name breaks both anonymization and restore (Design Review B1).",
+  "description": "Tables, columns, enums, and index names. Every declared column is ground truth: a schema anonymizer that aliases customer_id but leaves started_at produces an inconsistent twin, and 'is this column name proprietary?' is not a judgement the tool can make - that is what the allowlist is for. Index names are included because they embed table and column names.",
   "entities": [
     {
       "real_name": "customer_subscription",
@@ -107,6 +107,67 @@
         6,
         12
       ]
+    },
+    {
+      "real_name": "started_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.started_at",
+      "line_range": [
+        6,
+        12
+      ]
+    },
+    {
+      "real_name": "cancelled_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.customer_subscription.cancelled_at",
+      "line_range": [
+        6,
+        12
+      ]
+    },
+    {
+      "real_name": "issued_at",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.issued_at",
+      "line_range": [
+        18,
+        24
+      ]
+    },
+    {
+      "real_name": "succeeded",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.succeeded",
+      "line_range": [
+        26,
+        33
+      ]
+    },
+    {
+      "real_name": "idx_customer_subscription_customer",
+      "entity_type": "index",
+      "scope_path": "billing.public.idx_customer_subscription_customer"
+    },
+    {
+      "real_name": "subscription_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.invoice.subscription_id",
+      "line_range": [
+        18,
+        24
+      ],
+      "note": "declaration plus the REFERENCES occurrence on the same line; the generator scopes by line, not by occurrence"
+    },
+    {
+      "real_name": "invoice_id",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.invoice_id",
+      "line_range": [
+        26,
+        33
+      ],
+      "note": "same: declaration plus its REFERENCES occurrence"
     }
   ],
   "never_alias": [

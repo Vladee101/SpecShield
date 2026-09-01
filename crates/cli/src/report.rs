@@ -86,6 +86,9 @@ struct Score {
     /// Detections that match no label, hit a `never_alias` term, or land in a
     /// negative fixture.
     false_positives: usize,
+    /// What those detections were. When precision drops, this is the first
+    /// question anyone asks, and guessing at it wastes an afternoon.
+    unexpected: Vec<(String, String, usize)>,
 }
 
 impl Score {
@@ -109,7 +112,7 @@ impl Score {
     }
 }
 
-pub(crate) fn run(corpus: &Path, strict: bool) -> Result<()> {
+pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
     let projects = load_projects(corpus)?;
     if projects.is_empty() {
         bail!("no labelled projects under {}", corpus.display());
@@ -170,6 +173,35 @@ pub(crate) fn run(corpus: &Path, strict: bool) -> Result<()> {
     println!("measure the missing milestone rather than detection quality.");
 
     let total_dict = gated;
+
+    if verbose {
+        println!(
+            "
+## Unexpected detections
+"
+        );
+        println!("Detected but not in ground truth. Either the detector is over-reaching or the");
+        println!("corpus is incomplete — decide which on the merits, never by whichever makes the");
+        println!(
+            "number look better.
+"
+        );
+        for (dir, labels) in &projects {
+            let detail = score(dir, labels, true);
+            if detail.unexpected.is_empty() {
+                continue;
+            }
+            println!(
+                "**{}**
+",
+                labels.project
+            );
+            for (file, name, offset) in &detail.unexpected {
+                println!("- `{name}` in `{file}` at {offset}");
+            }
+            println!();
+        }
+    }
 
     // Secrets are scored separately: they are a different operation with a
     // different failure mode (SDD §4.3).
@@ -257,9 +289,24 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        // Detection runs on the redacted text, as the pipeline does.
+        // Detection runs on the redacted text, through the same two-source
+        // merge as the pipeline: the parser's structural candidates first, then
+        // the prose scan for whatever they did not claim. Scoring with only the
+        // prose scan would measure a pipeline nobody runs.
         let redacted = secrets::redact(&text, &secrets::scan(&text));
-        let candidates = detector.scan_text(&redacted, "project", OccurrenceKind::Reference);
+        let parser = specshield_parsers::for_document(&path, &text);
+        let mut candidates = parser
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.structural_candidates(&redacted, "project"));
+        let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
+        for candidate in detector.scan_text(&redacted, "project", OccurrenceKind::Reference) {
+            if !claimed
+                .iter()
+                .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end)
+            {
+                candidates.push(candidate);
+            }
+        }
 
         for candidate in candidates {
             if candidate.confidence < specshield_core::sanitize::AUTO_APPLY_CONFIDENCE {
@@ -270,6 +317,9 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
                 score.detected += 1;
             } else {
                 score.false_positives += 1;
+                score
+                    .unexpected
+                    .push((file.to_owned(), candidate.real_name.clone(), candidate.byte_start));
             }
         }
     }
