@@ -241,11 +241,21 @@ pub fn sanitize(
     let mut candidates = structural;
     let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
 
+    // Some formats confine prose to specific regions — YAML values, and later
+    // TypeScript comments and string literals. Outside them the text is the
+    // format's own vocabulary, and detecting there produces confident nonsense.
+    let regions = parser.and_then(|p| p.prose_regions(&redacted));
+
     for candidate in detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference) {
         let overlaps = claimed
             .iter()
             .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end);
-        if !overlaps {
+        let in_prose = regions.as_ref().is_none_or(|regions| {
+            regions
+                .iter()
+                .any(|(s, e)| candidate.byte_start >= *s && candidate.byte_end <= *e)
+        });
+        if !overlaps && in_prose {
             candidates.push(candidate);
         }
     }

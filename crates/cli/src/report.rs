@@ -299,11 +299,17 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             .as_ref()
             .map_or_else(Vec::new, |p| p.structural_candidates(&redacted, "project"));
         let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
+        let regions = parser.as_ref().and_then(|p| p.prose_regions(&redacted));
         for candidate in detector.scan_text(&redacted, "project", OccurrenceKind::Reference) {
-            if !claimed
+            let overlaps = claimed
                 .iter()
-                .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end)
-            {
+                .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end);
+            let in_prose = regions.as_ref().is_none_or(|regions| {
+                regions
+                    .iter()
+                    .any(|(s, e)| candidate.byte_start >= *s && candidate.byte_end <= *e)
+            });
+            if !overlaps && in_prose {
                 candidates.push(candidate);
             }
         }

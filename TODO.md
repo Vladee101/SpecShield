@@ -219,10 +219,29 @@ casing and fail the round trip on the first file.
 
 sql-schema went 5% → 100% recall. Gated total: 100% recall, 96.4% precision.
 
-**P2-2. YAML and JSON parsers**, CST-preserving. **Not `serde_yaml`** (archived
-2024) and **not** a `serde_json` round-trip: deserializing to a value model and
-re-serializing destroys comments and key order, which SDD §4.2 requires
-preserving. See `crates/parsers/src/lib.rs` for the reasoning.
+~~**P2-2. YAML and JSON parsers**~~ — **done**. `crates/parsers/src/yaml.rs`,
+built on `saphyr` with spanned nodes. JSON is read through the same parser
+because JSON is a subset of YAML 1.2, which keeps one node model for the OpenAPI
+layer.
+
+Provides a path-addressed node index (`components.schemas.X.properties.y`,
+`servers.0.url`) with byte spans and key/value distinction — that index is what
+P2-3 consumes. Plus `structural_counts` over documents, mappings, sequences,
+keys, and nesting depth, which catches an alias that injects a key.
+
+Generic YAML claims no entities of its own: nothing in the grammar says which
+names are proprietary, so the prose scan does the detecting. **A restriction was
+tried and removed** — see the module docs. Confining the scan to scalar values
+looked principled and measured badly: 16 points of recall for 8 of precision,
+and it left company names in `docker-compose.yml` environment keys.
+
+`prose_regions` stays on the trait for TypeScript, where comments and string
+literals genuinely are prose and code is not.
+
+Documents declaring `openapi:` or `swagger:` are **declined**, because their
+names live in keys that only the OpenAPI layer can classify. Processing them
+here yields a twin with values aliased and schema names intact — the gate
+refuses it, correctly but confusingly.
 
 **P2-3. OpenAPI semantic layer** over the YAML/JSON CST: paths, operationIds,
 schema names, tags.

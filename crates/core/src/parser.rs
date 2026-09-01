@@ -86,6 +86,20 @@ pub trait ArtifactParser: Send + Sync {
         Vec::new()
     }
 
+    /// Byte ranges the prose scan may look in, or `None` for the whole file.
+    ///
+    /// Formats with syntax need this. In YAML, keys are the format's own
+    /// vocabulary — `apiVersion`, `properties`, `type` — and letting a
+    /// heuristic loose on them aliases the document into unreadability. The
+    /// proprietary names are in the values.
+    ///
+    /// `None` means every byte is eligible, which is right for Markdown and
+    /// plain text: they are prose all the way down.
+    fn prose_regions(&self, source: &str) -> Option<Vec<(usize, usize)>> {
+        let _ = source;
+        None
+    }
+
     /// Structural fingerprint of `source`, for the SDD §7.2 verification pass.
     ///
     /// Sanitization replaces identifiers; it must not change a document's

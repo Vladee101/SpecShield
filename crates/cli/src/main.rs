@@ -374,7 +374,7 @@ fn require_parser(file: &Path, content: &str) -> Result<Box<dyn specshield_core:
             "no parser for {} in this build (have: {}).\n\
              Refusing to process it: the prose scan alone would produce a twin that\n\
              looks sanitized but leaves declarations and identifiers untouched.\n\
-             SQL and YAML arrive in M3; TypeScript in M4.",
+             OpenAPI specifications arrive with the openapi parser in M3; TypeScript in M4.",
             file.display(),
             specshield_parsers::implemented().join(", ")
         ),
