@@ -17,6 +17,7 @@
 //! | [`sanitize`] | §7 Semantic Twin Generator |
 //! | [`verify`] | §8 Export Verification Gate |
 //! | [`restore`] | §10 Restore Engine |
+//! | [`unify`] | §5 Cross-artifact unification |
 //! | [`diff`] | §13 Diff Engine |
 
 pub mod alias;
@@ -28,6 +29,7 @@ pub mod parser;
 pub mod restore;
 pub mod sanitize;
 pub mod secrets;
+pub mod unify;
 pub mod verify;
 
 pub use alias::{AliasStyle, ProjectKey};

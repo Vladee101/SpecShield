@@ -263,11 +263,22 @@ added, on the same rule already applied to SQL columns: a spec with `customerId`
 aliased and `planTier` intact is inconsistent, and which field names are
 proprietary is not a judgement the tool can make.
 
-**P2-4. Cross-artifact unification.** The SQL table `customer_subscription`, the
-OpenAPI schema `CustomerSubscription`, and the TS interface must resolve to
-**one** identity with **one** alias. This is the feature that makes the identity
-graph worth having. `crates/cli/tests/corpus.rs` already asserts the corpus
-contains the case.
+~~**P2-4. Cross-artifact unification.**~~ — **done**. `crates/core/src/unify.rs`
+proposes; `specshield unify` lists and confirms; confirming performs a scoped
+re-key.
+
+**SDD §5 was not implementable as written, and has been corrected.** "One
+identity carrying one alias" cannot work: `ux_alias` maps an alias to one real
+name, so a shared alias would return `customer_subscription` to the TypeScript
+file or `CustomerSubscription` to the SQL file — one of them wrong, and the
+round trip broken. Implemented instead: one concept, one alias **suffix**,
+per-artifact prefix. `DB_TABLE_MS7JMB` and `DTO_MS7JMB` are visibly the same
+thing and restore unambiguously.
+
+Nothing unifies without confirmation, because `corpus/adversarial` has three
+unrelated `Status` enums and a name match is not evidence. A proposal needs two
+*different* compatible kinds. Columns are never unified — `customer_id` is in a
+dozen tables.
 
 **P2-5. Widen the corpus gate.** Each corpus project declares `requires` in its
 `spec.json`. As parsers land, those projects become gated automatically —

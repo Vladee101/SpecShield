@@ -114,6 +114,20 @@ enum Command {
         passphrase: Option<String>,
     },
 
+    /// Show cross-artifact unification proposals, or confirm one (SDD §5).
+    ///
+    /// Nothing is unified until confirmed. A name match is not evidence: three
+    /// unrelated `Status` enums share a name and are three concepts.
+    Unify {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// Confirm this concept, linking every identity that matches it.
+        #[arg(long)]
+        confirm: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
     /// Measure detection recall and precision against the labelled corpus
     /// (PRD §5). Consumed by CI.
     Report {
@@ -211,6 +225,11 @@ fn main() -> Result<()> {
             input,
             passphrase,
         } => run_restore(&project, input.as_deref(), passphrase.as_deref()),
+        Command::Unify {
+            project,
+            confirm,
+            passphrase,
+        } => run_unify(&project, confirm.as_deref(), passphrase.as_deref()),
         Command::Report {
             corpus,
             strict,
@@ -258,11 +277,22 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
     };
     let mut settings = settings;
     let mut graph = Graph::new(ProjectKey::take_bytes(&mut settings.project_key), style);
+    let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
     for stored in vault.identities()? {
         let entity_type: EntityType = stored
             .entity_type
             .parse()
             .with_context(|| format!("vault holds unknown entity type {:?}", stored.entity_type))?;
+        if let Some(concept) = concepts.get(&stored.uuid) {
+            graph.confirm_concept(
+                &[specshield_core::model::IdentityKey::new(
+                    &stored.scope_path,
+                    entity_type,
+                    &stored.real_name,
+                )],
+                concept,
+            );
+        }
         graph.restore_node(
             &specshield_core::model::IdentityKey::new(&stored.scope_path, entity_type, &stored.real_name),
             &stored.uuid,
@@ -276,6 +306,24 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
 
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {
     let mut detector = Detector::new();
+
+    // Names learned from any artifact are found in every artifact — SDD §5.
+    //
+    // The SQL scan interns the table `invoice`; the OpenAPI spec then says
+    // "Fetch a single invoice" in a summary and the gate blocks, because the
+    // vault knows that name and the twin still contains it. Seeding the detector
+    // with what the project already knows is what makes a name consistent
+    // across files rather than per-file.
+    //
+    // It aliases common words that happen to be table names — `invoice`,
+    // `account` — wherever they appear. That is the safe direction, and PRD
+    // FR-10's allowlist is the escape hatch for a user who disagrees.
+    for identity in vault.identities()? {
+        if let Ok(entity_type) = identity.entity_type.parse() {
+            detector = detector.with_term(identity.real_name, entity_type);
+        }
+    }
+
     for (name, type_name) in vault.dictionary()? {
         let entity_type: EntityType = type_name
             .parse()
@@ -585,6 +633,142 @@ fn run_restore(project: &Path, input: Option<&Path>, explicit: Option<&str>) -> 
         );
     }
     Ok(())
+}
+
+fn run_unify(project: &Path, confirm: Option<&str>, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let stored = vault.identities()?;
+
+    let keys: Vec<specshield_core::model::IdentityKey> = stored
+        .iter()
+        .filter_map(|s| {
+            s.entity_type
+                .parse()
+                .ok()
+                .map(|t| specshield_core::model::IdentityKey::new(&s.scope_path, t, &s.real_name))
+        })
+        .collect();
+
+    let proposals = specshield_core::unify::propose(&keys);
+
+    if let Some(concept) = confirm {
+        let Some(proposal) = proposals.iter().find(|p| p.concept == concept) else {
+            bail!("no proposal for concept {concept:?} — run `specshield unify` to list them");
+        };
+        let mut linked = 0;
+        for member in &proposal.members {
+            let Some(found) =
+                vault.find_identity(&member.scope_path, member.entity_type.prefix(), &member.real_name)?
+            else {
+                continue;
+            };
+            vault.put_concept(&found.uuid, concept)?;
+            linked += 1;
+        }
+
+        // Re-derive every alias. A stored alias normally wins (SDD §6.5), so
+        // without this the confirmation would apply only to identities interned
+        // *after* it — which is none of them, since `unify` runs on a project
+        // that has already been scanned. The feature would be silently inert.
+        let changed = rekey(&vault)?;
+        vault.log("unify.confirm", None, Some(i64::from(linked)), None, None)?;
+
+        println!("Linked {linked} identities as concept {concept:?}.");
+        println!("Re-derived {changed} alias(es).");
+        if changed > 0 {
+            println!();
+            println!("Those aliases changed, so any twin already sent to a model is orphaned:");
+            println!("its aliases no longer resolve. Re-sanitize before the next request.");
+        }
+        return Ok(());
+    }
+
+    if proposals.is_empty() {
+        println!("No unification proposals.");
+        println!();
+        println!("A proposal needs a compatible pair of *different* kinds — a table and a DTO,");
+        println!("a service and an API. Identities sharing a name and a kind are a collision,");
+        println!("not a concept.");
+        return Ok(());
+    }
+
+    println!(
+        "{} proposal(s). Nothing is unified until confirmed.
+",
+        proposals.len()
+    );
+    for proposal in &proposals {
+        println!(
+            "concept {:?}  (confidence {:.2})",
+            proposal.concept, proposal.confidence
+        );
+        for member in &proposal.members {
+            println!(
+                "  {:<10} {:<28} {}",
+                member.entity_type.prefix(),
+                member.real_name,
+                member.scope_path
+            );
+        }
+        if let Some(caveat) = &proposal.caveat {
+            println!("  caveat: {caveat}");
+        }
+        println!("  confirm with: specshield unify --confirm {}", proposal.concept);
+        println!();
+    }
+    Ok(())
+}
+
+/// Re-derive every alias in the project — a scoped re-key (SDD §9.5).
+///
+/// Derivation is deterministic, so an identity whose concept did not change
+/// keeps exactly the alias it had. Only members of a newly confirmed concept
+/// move.
+///
+/// Returns how many aliases actually changed, so the caller can warn only when
+/// there is something to warn about.
+fn rekey(vault: &vault::Vault) -> Result<u32> {
+    use std::collections::HashSet;
+
+    let settings = vault.settings()?;
+    let style = match settings.alias_style.as_str() {
+        "opaque" => AliasStyle::Opaque,
+        "pseudonymous" => AliasStyle::Pseudonymous,
+        _ => AliasStyle::Typed,
+    };
+    let key = ProjectKey::from_bytes(settings.project_key);
+    let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
+
+    // Stable order, or the disambiguator suffixes would shuffle between runs.
+    let mut identities = vault.identities()?;
+    identities.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+
+    let mut used: HashSet<String> = HashSet::new();
+    let mut changed = 0;
+
+    for mut stored in identities {
+        let Ok(entity_type) = stored.entity_type.parse::<EntityType>() else {
+            continue;
+        };
+        let identity = specshield_core::model::IdentityKey::new(&stored.scope_path, entity_type, &stored.real_name);
+        let concept = concepts.get(&stored.uuid).map(String::as_str);
+
+        let mut disambiguator = None;
+        let alias = loop {
+            let candidate = specshield_core::alias::derive_in_concept(&key, &identity, style, disambiguator, concept);
+            if used.insert(candidate.clone()) {
+                break candidate;
+            }
+            disambiguator = Some(disambiguator.unwrap_or(1) + 1);
+        };
+
+        if alias != stored.alias {
+            changed += 1;
+            stored.alias = alias;
+            vault.put_identity(&stored)?;
+        }
+    }
+    Ok(changed)
 }
 
 /// SDD §11 / PRD FR-6b.

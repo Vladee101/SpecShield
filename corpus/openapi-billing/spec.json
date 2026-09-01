@@ -82,6 +82,18 @@
       "real_name": "subscriptionId",
       "entity_type": "column",
       "scope_path": "#/components/schemas/CustomerSubscription.subscriptionId"
+    },
+    {
+      "real_name": "subscriptions",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1subscriptions",
+      "note": "literal path segment; PRD \u00a79 lists `POST /subscriptions` as an Endpoint"
+    },
+    {
+      "real_name": "invoices",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1invoices~1{invoiceId}",
+      "note": "literal path segment; PRD \u00a79 lists `POST /subscriptions` as an Endpoint"
     }
   ],
   "never_alias": [

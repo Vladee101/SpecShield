@@ -295,9 +295,24 @@ fn classify(node: &NodeRef, enums: &BTreeSet<String>, out: &mut Vec<Candidate>) 
         return;
     }
 
-    // `paths./invoices/{invoiceId}` — a template carrying a field name in the
-    // URL. Only the braced parameter is an entity.
+    // `paths./invoices/{invoiceId}` — the template names a resource and carries
+    // a field name in the URL. Both are entities; the slashes are not.
+    //
+    // PRD §9 lists `POST /subscriptions` as an Endpoint, and the literal
+    // segment is the half that reveals the resource: a project whose table is
+    // `invoice` and whose path is `/invoices` has said the table name out loud.
+    // The verification gate catches exactly that, which is how this was found.
     if node.kind == NodeKind::Key && segments.len() == 2 && segments[0] == "paths" {
+        for (offset, name) in literal_segments(&node.text) {
+            out.push(candidate(
+                name,
+                EntityType::Endpoint,
+                format!("#/paths/{}", node.text),
+                node.byte_start + offset,
+                node.byte_start + offset + name.len(),
+                OccurrenceKind::Declaration,
+            ));
+        }
         for (offset, name) in braced_parameters(&node.text) {
             out.push(candidate(
                 name,
@@ -309,6 +324,20 @@ fn classify(node: &NodeRef, enums: &BTreeSet<String>, out: &mut Vec<Candidate>) 
             ));
         }
     }
+}
+
+/// Literal path segments, as `(byte offset, segment)`. Braced parameters are
+/// excluded — they are field names, handled separately.
+fn literal_segments(template: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut offset = 0;
+    for segment in template.split('/') {
+        if !segment.is_empty() && !segment.starts_with('{') {
+            out.push((offset, segment));
+        }
+        offset += segment.len() + 1;
+    }
+    out
 }
 
 /// `{param}` occurrences in a path template, as `(byte offset of the name, name)`.
@@ -419,7 +448,11 @@ mod tests {
 
     #[test]
     fn operation_ids_are_endpoints() {
-        assert_eq!(of_type(&candidates(SPEC), EntityType::Endpoint), vec!["getInvoice"]);
+        // Alongside the literal path segments, which are endpoints too.
+        assert_eq!(
+            of_type(&candidates(SPEC), EntityType::Endpoint),
+            vec!["getInvoice", "invoices"]
+        );
     }
 
     #[test]
@@ -445,6 +478,26 @@ mod tests {
             occurrences >= 3,
             "property, required, parameter, path template: got {occurrences}"
         );
+    }
+
+    #[test]
+    fn a_literal_path_segment_is_an_endpoint() {
+        // `/invoices` names the resource, and in a project whose table is
+        // `invoice` it says the table name out loud.
+        let found = candidates(SPEC);
+        assert!(
+            found
+                .iter()
+                .any(|c| c.real_name == "invoices" && c.entity_type == EntityType::Endpoint),
+            "the literal segment was not detected"
+        );
+    }
+
+    #[test]
+    fn slashes_and_braces_are_never_part_of_a_name() {
+        assert_eq!(literal_segments("/invoices/{invoiceId}"), vec![(1, "invoices")]);
+        assert_eq!(literal_segments("/a/b/{c}"), vec![(1, "a"), (3, "b")]);
+        assert!(literal_segments("/{only}").is_empty());
     }
 
     #[test]

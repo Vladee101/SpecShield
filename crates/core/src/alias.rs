@@ -109,8 +109,33 @@ pub enum AliasStyle {
 /// `Some(n)` when the caller has hit a collision against the vault's `ux_alias`
 /// index, yielding `SERVICE_H7K2Q3_2`.
 pub fn derive(key: &ProjectKey, identity: &IdentityKey, style: AliasStyle, disambiguator: Option<u32>) -> String {
+    derive_in_concept(key, identity, style, disambiguator, None)
+}
+
+/// Derive an alias whose suffix comes from a confirmed concept rather than the
+/// identity — SDD §5, cross-artifact unification.
+///
+/// The SQL table `customer_subscription` and the OpenAPI schema
+/// `CustomerSubscription` are one concept in two artifacts. Giving them one
+/// alias is impossible: `ux_alias` maps an alias to a single real name, so
+/// restoring it would return the wrong surface form to one of the two files and
+/// break `restore(sanitize(x)) == x`.
+///
+/// Sharing the *suffix* achieves what unification is for without that cost:
+/// `DB_TABLE_H7K2Q3` and `DTO_H7K2Q3` are visibly the same thing to a reader and
+/// to a model, and they restore unambiguously because they are still distinct.
+pub fn derive_in_concept(
+    key: &ProjectKey,
+    identity: &IdentityKey,
+    style: AliasStyle,
+    disambiguator: Option<u32>,
+    concept: Option<&str>,
+) -> String {
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(identity.hmac_input().as_bytes());
+    match concept {
+        Some(concept) => mac.update(format!("concept:{concept}").as_bytes()),
+        None => mac.update(identity.hmac_input().as_bytes()),
+    }
     let digest = mac.finalize().into_bytes();
 
     let encoded = CROCKFORD.encode(&digest);

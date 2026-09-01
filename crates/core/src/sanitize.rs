@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::alias::{AliasStyle, ProjectKey, derive};
+use crate::alias::{AliasStyle, ProjectKey, derive_in_concept};
 use crate::detect::Detector;
 use crate::edit::{Edit, apply};
 use crate::model::{IdentityKey, IdentityNode, Origin, Status};
@@ -37,6 +37,9 @@ pub struct Graph {
     by_identity: HashMap<IdentityKey, Uuid>,
     nodes: HashMap<Uuid, IdentityNode>,
     aliases: HashMap<String, Uuid>,
+    /// Identities the user has confirmed as one concept — SDD §5. Members share
+    /// an alias suffix; nothing is ever merged without confirmation.
+    concepts: HashMap<IdentityKey, String>,
 }
 
 impl Graph {
@@ -47,7 +50,25 @@ impl Graph {
             by_identity: HashMap::new(),
             nodes: HashMap::new(),
             aliases: HashMap::new(),
+            concepts: HashMap::new(),
         }
+    }
+
+    /// Record a confirmed unification — SDD §5.
+    ///
+    /// Members keep their own identity, scope, and real name; they share an
+    /// alias suffix so the twin shows the relationship. Confirming after a twin
+    /// has been shared changes those aliases, which orphans it — the same
+    /// hazard as a re-key (SDD §9.5).
+    pub fn confirm_concept(&mut self, members: &[IdentityKey], concept: &str) {
+        for member in members {
+            self.concepts.insert(member.clone(), concept.to_owned());
+        }
+    }
+
+    /// Concepts confirmed so far, for persistence.
+    pub fn concepts(&self) -> impl Iterator<Item = (&IdentityKey, &String)> {
+        self.concepts.iter()
     }
 
     /// Look up or create the identity for `key`, returning its node.
@@ -59,9 +80,10 @@ impl Graph {
         // Derive, then walk disambiguators until the alias is free. In practice
         // the first attempt always succeeds; the loop exists so a collision is
         // impossible rather than merely unlikely.
+        let concept = self.concepts.get(key).cloned();
         let mut disambiguator = None;
         let alias = loop {
-            let candidate = derive(&self.key, key, self.style, disambiguator);
+            let candidate = derive_in_concept(&self.key, key, self.style, disambiguator, concept.as_deref());
             if !self.aliases.contains_key(&candidate) {
                 break candidate;
             }
@@ -573,6 +595,73 @@ Vantor owns it.";
         assert_eq!(out.verification, Verification::NotAttempted);
         assert!(!out.verification.structurally_verified(), "must not read as verified");
         assert!(out.verification.aliases_applied(), "but aliasing still happens");
+    }
+
+    // -- SDD §5 cross-artifact unification -----------------------------------
+
+    #[test]
+    fn a_confirmed_concept_shares_an_alias_suffix_across_artifacts() {
+        // The point of the feature: a model reading the twin should see that
+        // the SQL table and the OpenAPI schema are the same thing.
+        let mut g = graph();
+        let table = IdentityKey::new("sql::customer_subscription", EntityType::Table, "customer_subscription");
+        let dto = IdentityKey::new(
+            "#/components/schemas/CustomerSubscription",
+            EntityType::Dto,
+            "CustomerSubscription",
+        );
+        g.confirm_concept(&[table.clone(), dto.clone()], "customersubscription");
+
+        let table_alias = g.intern(&table, Origin::Detected).alias.clone();
+        let dto_alias = g.intern(&dto, Origin::Detected).alias.clone();
+
+        assert_ne!(table_alias, dto_alias, "distinct aliases keep restore unambiguous");
+        let suffix = |a: &str| a.rsplit('_').next().unwrap_or_default().to_owned();
+        assert_eq!(suffix(&table_alias), suffix(&dto_alias), "{table_alias} vs {dto_alias}");
+        assert!(table_alias.starts_with("DB_TABLE_"));
+        assert!(dto_alias.starts_with("DTO_"));
+    }
+
+    #[test]
+    fn unified_identities_still_restore_to_their_own_surface_form() {
+        // The reason one shared alias is impossible: SQL needs
+        // `customer_subscription` back and TypeScript needs
+        // `CustomerSubscription`.
+        use crate::restore::{Vocabulary, restore};
+        let mut g = graph();
+        let table = IdentityKey::new("sql::customer_subscription", EntityType::Table, "customer_subscription");
+        let dto = IdentityKey::new("ts::CustomerSubscription", EntityType::Dto, "CustomerSubscription");
+        g.confirm_concept(&[table.clone(), dto.clone()], "customersubscription");
+
+        let table_alias = g.intern(&table, Origin::Detected).alias.clone();
+        let dto_alias = g.intern(&dto, Origin::Detected).alias.clone();
+
+        let vocabulary = Vocabulary::new(g.vocabulary());
+        assert_eq!(restore(&table_alias, &vocabulary).text, "customer_subscription");
+        assert_eq!(restore(&dto_alias, &vocabulary).text, "CustomerSubscription");
+    }
+
+    #[test]
+    fn confirming_a_concept_does_not_merge_identities() {
+        let mut g = graph();
+        let table = IdentityKey::new("sql::invoice", EntityType::Table, "invoice");
+        let dto = IdentityKey::new("ts::Invoice", EntityType::Dto, "Invoice");
+        g.confirm_concept(&[table.clone(), dto.clone()], "invoice");
+        g.intern(&table, Origin::Detected);
+        g.intern(&dto, Origin::Detected);
+        assert_eq!(g.len(), 2, "two identities, one concept");
+    }
+
+    #[test]
+    fn an_unconfirmed_match_changes_nothing() {
+        // Proposals are inert. Nothing unifies until someone says so.
+        let mut g = graph();
+        let table = IdentityKey::new("sql::invoice", EntityType::Table, "invoice");
+        let dto = IdentityKey::new("ts::Invoice", EntityType::Dto, "Invoice");
+        let a = g.intern(&table, Origin::Detected).alias.clone();
+        let b = g.intern(&dto, Origin::Detected).alias.clone();
+        let suffix = |s: &str| s.rsplit('_').next().unwrap_or_default().to_owned();
+        assert_ne!(suffix(&a), suffix(&b));
     }
 
     #[test]

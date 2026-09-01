@@ -498,6 +498,38 @@ impl Vault {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    /// Record a confirmed unification — SDD §5.
+    ///
+    /// Stored as a blind-indexed concept id per identity, so the vault knows
+    /// which identities share a concept without holding the concept name in
+    /// plaintext.
+    pub fn put_concept(&self, identity_uuid: &str, concept: &str) -> Result<(), VaultError> {
+        self.conn.execute(
+            "INSERT INTO concepts (identity_uuid, concept_idx, concept_enc) VALUES (?, ?, ?)
+             ON CONFLICT(identity_uuid) DO UPDATE SET
+                concept_idx = excluded.concept_idx, concept_enc = excluded.concept_enc",
+            params![
+                identity_uuid,
+                self.keys.blind_index(concept),
+                self.keys.seal(concept, &aad("concepts", "concept", identity_uuid))?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `(identity uuid, concept)` for every confirmed unification.
+    pub fn concepts(&self) -> Result<Vec<(String, String)>, VaultError> {
+        let mut stmt = self.conn.prepare("SELECT identity_uuid, concept_enc FROM concepts")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (uuid, enc) = row?;
+            let concept = self.keys.unseal(&enc, &aad("concepts", "concept", &uuid))?;
+            out.push((uuid, concept));
+        }
+        Ok(out)
+    }
+
     /// Append an audit entry — PRD FR-9.
     ///
     /// Records that something happened and whether it verified. Never what was

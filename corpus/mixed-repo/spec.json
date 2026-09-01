@@ -88,6 +88,15 @@
       "files": [
         "README.md"
       ]
+    },
+    {
+      "real_name": "subscriptions",
+      "entity_type": "endpoint",
+      "scope_path": "#/paths/~1subscriptions",
+      "note": "literal path segment; PRD \u00a79 lists `POST /subscriptions` as an Endpoint",
+      "files": [
+        "api/openapi.yaml"
+      ]
     }
   ],
   "never_alias": [

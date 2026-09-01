@@ -368,11 +368,57 @@ DB_TABLE_014
 ## Cross-artifact unification
 
 The SQL table `customer_subscription`, the OpenAPI schema `CustomerSubscription`, and the
-TypeScript DTO `CustomerSubscription` must resolve to **one** identity carrying **one**
-alias. Unification runs after extraction, matching on normalized name plus a compatible
-type pair (Table↔DTO, Schema↔DTO, Service↔API), and is confirmable by the user.
+TypeScript DTO `CustomerSubscription` are **one concept**. Unification matches on normalized
+name plus a compatible pair of *different* kinds (Table↔DTO, Schema↔DTO, Service↔API), and
+is confirmed by the user — never applied automatically.
 
 This is the feature that makes the graph worth having rather than a dictionary.
+
+### One concept, one alias *suffix* — not one alias
+
+An earlier draft of this section said the three "must resolve to one identity carrying one
+alias". That is not implementable, and the reason is the core invariant.
+
+`identities.alias` is UNIQUE, so an alias maps to exactly one real name. If
+`customer_subscription` and `CustomerSubscription` shared an alias, restoring that token
+would have one answer — but the SQL file needs `customer_subscription` back and the
+TypeScript file needs `CustomerSubscription`. One of the two would come back wrong, and
+`restore(sanitize(x)) == x` would fail.
+
+What is implemented instead:
+
+| Artifact | Real name | Alias |
+|---|---|---|
+| SQL | `customer_subscription` | `DB_TABLE_H7K2Q3` |
+| OpenAPI | `CustomerSubscription` | `DTO_H7K2Q3` |
+| TypeScript | `CustomerSubscription` | `DTO_H7K2Q3` |
+
+Members of a confirmed concept derive their alias suffix from the concept rather than from
+their own identity key. The shared suffix carries the relationship — a model reading the
+twin sees the same connection it would draw between `customer_subscription` and
+`CustomerSubscription` in the real project — while the distinct prefixes keep restoration
+unambiguous. The alias grammar (§6.3) is unchanged.
+
+### Why confirmation is required
+
+`corpus/adversarial` holds three unrelated `Status` enums in three modules. A matcher that
+merged on name alone would collapse them, reintroducing the scoped-identity bug of Design
+Review B1 through the back door.
+
+A name match is therefore never sufficient. A proposal requires **two different but
+compatible kinds**, because the differing kind is the evidence that these are one thing seen
+from two sides. Three enums sharing a name and a kind is a collision, and the engine says so
+rather than guessing — the same stance as §12's refusal to name new identities.
+
+Columns are never unified across artifacts: `customer_id` appears in a dozen tables, and
+matching members by name would merge every one of them.
+
+### Confirming is a scoped re-key
+
+Confirmation re-derives the affected aliases (§9.5). Derivation is deterministic, so
+identities outside the concept keep exactly the aliases they had; members of the new concept
+move. Any twin already sent to a model is orphaned by that change, so confirm before
+exporting rather than after.
 
 ---
 

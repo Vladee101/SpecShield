@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::VaultError;
 
 /// Current schema version. Bump *and* add a migration; never edit V1 in place.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const V1: &str = r"
 CREATE TABLE meta (
@@ -116,6 +116,20 @@ CREATE TABLE audit_log (
 );
 ";
 
+/// Confirmed cross-artifact unifications — SDD §5.
+///
+/// Added in v2 rather than folded into V1: a vault written by the previous
+/// build must upgrade, not be rejected, and editing V1 in place would leave
+/// those vaults with no migration path.
+const V2: &str = r"
+CREATE TABLE concepts (
+    identity_uuid TEXT PRIMARY KEY REFERENCES identities(uuid) ON DELETE CASCADE,
+    concept_idx   TEXT NOT NULL,
+    concept_enc   BLOB NOT NULL
+);
+CREATE INDEX ix_concept ON concepts(concept_idx);
+";
+
 /// Create or upgrade the schema.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -129,6 +143,9 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
 
     if version < 1 {
         conn.execute_batch(V1)?;
+    }
+    if version < 2 {
+        conn.execute_batch(V2)?;
     }
     // Future migrations append here, each guarded by `if version < N`.
 
@@ -173,6 +190,7 @@ mod tests {
         for expected in [
             "allowlist",
             "audit_log",
+            "concepts",
             "dictionary",
             "edges",
             "files",
