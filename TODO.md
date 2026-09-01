@@ -86,7 +86,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 |---|---|
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
-| M2 Tauri shell | **started** — launches, Workflow A wired; see P1 |
+| M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
 | M3 SQL / YAML / OpenAPI | not started |
 | M4 TypeScript + repo scale | not started |
 | M5 diff + git | not started |
@@ -175,19 +175,14 @@ than hand-written Win32 calls or a relaxed lint.
 PRD §10 and SDD §17.5 have been rewritten to describe what exists, including the
 platform gap.
 
-**P1-2. Exercise the running app.** The app launches and Workflow A has been
-walked as far as review: vault created, dictionary seeded, four terms excluded,
-26 entities detected — the same count the CLI reports on that document, so the
-IPC path is behaving.
+~~**P1-2. Exercise the running app.**~~ — **done**. Workflow A walked end to end
+in the running app: vault created, dictionary seeded, four terms excluded, 26
+entities detected (matching the CLI on the same document), sanitized, copied,
+restored. The IPC path, the gate, the clipboard write, and restore all work
+against a real window.
 
-```bash
-cd app && npm run tauri dev
-```
-
-Still unexercised: sanitize, copy, and restore in the UI, plus every error path.
-The clipboard module is tested against the real Win32 API, but the route from
-the button through IPC to that module is not — the same kind of gap that hid
-P0-1.
+Error paths are still unexercised — a blocked export, a wrong passphrase, an
+unsupported format. Worth a deliberate pass, but no longer the top risk.
 
 **P1-3. No file picker.** `app/src/App.tsx` uses paste-in `<textarea>`s and a
 typed filename. The document is now held once at the top level, so Review and
