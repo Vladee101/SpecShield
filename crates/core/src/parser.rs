@@ -86,6 +86,22 @@ pub trait ArtifactParser: Send + Sync {
         Vec::new()
     }
 
+    /// Entities the format's syntax identifies, given what the project already
+    /// knows.
+    ///
+    /// A single file is not enough for every language. TypeScript's
+    /// `dto.customerId` is a property reference, but the file that *uses* it
+    /// rarely declares it — the interface lives in another module. Without
+    /// project context the reference is invisible, and the twin ends up with the
+    /// declaration aliased and every use of it intact.
+    ///
+    /// Defaults to the context-free form, which is right for SQL, OpenAPI, and
+    /// Markdown: their names are all resolvable within one file.
+    fn structural_candidates_in(&self, source: &str, scope: &str, context: &ProjectContext) -> Vec<Candidate> {
+        let _ = context;
+        self.structural_candidates(source, scope)
+    }
+
     /// Byte ranges the prose scan may look in, or `None` for the whole file.
     ///
     /// Formats with syntax need this. In YAML, keys are the format's own
@@ -118,6 +134,19 @@ pub trait ArtifactParser: Send + Sync {
         let _ = source;
         None
     }
+}
+
+/// What the project already knows, for parsers that cannot resolve everything
+/// from one file.
+///
+/// Populated from the vault, so knowledge accumulates as artifacts are scanned:
+/// the DTO file teaches the project that `customerId` is a member, and the
+/// service file that merely uses it can then see that too.
+#[derive(Debug, Default, Clone)]
+pub struct ProjectContext {
+    /// Member names — properties, fields, columns — known anywhere in the
+    /// project.
+    pub known_members: std::collections::BTreeSet<String>,
 }
 
 /// A parser's structural fingerprint of a document — SDD §7.2.

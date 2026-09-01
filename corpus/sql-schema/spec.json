@@ -168,6 +168,15 @@
         33
       ],
       "note": "same: declaration plus its REFERENCES occurrence"
+    },
+    {
+      "real_name": "amount_cents",
+      "entity_type": "column",
+      "scope_path": "billing.public.payment_attempt.amount_cents",
+      "line_range": [
+        26,
+        33
+      ]
     }
   ],
   "never_alias": [

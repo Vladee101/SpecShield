@@ -3816,6 +3816,8 @@ dependencies = [
  "specshield-core",
  "sqlparser",
  "thiserror 2.0.20",
+ "tree-sitter",
+ "tree-sitter-typescript",
  "uuid",
 ]
 

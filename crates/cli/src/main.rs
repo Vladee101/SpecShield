@@ -304,6 +304,18 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
     Ok(graph)
 }
 
+/// What the project knows, for parsers that cannot resolve everything from one
+/// file — see `ProjectContext`.
+fn context_from(vault: &vault::Vault) -> Result<specshield_core::parser::ProjectContext> {
+    let mut context = specshield_core::parser::ProjectContext::default();
+    for identity in vault.identities()? {
+        if identity.entity_type == EntityType::Column.prefix() {
+            context.known_members.insert(identity.real_name);
+        }
+    }
+    Ok(context)
+}
+
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {
     let mut detector = Detector::new();
 
@@ -479,7 +491,8 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
     let detector = detector_from(&vault)?;
     let scope = file.to_string_lossy().replace('\\', "/");
 
-    let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()))?;
+    let context = context_from(&vault)?;
+    let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()), &context)?;
 
     // SDD §8 — nothing is emitted before the gate passes.
     let scanner = verify::LeakScanner::new(graph.real_names());

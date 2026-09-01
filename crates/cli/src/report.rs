@@ -13,7 +13,7 @@
 //!   use, and the gap between the two is the argument for the dictionary flow.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -89,6 +89,8 @@ struct Score {
     /// What those detections were. When precision drops, this is the first
     /// question anyone asks, and guessing at it wastes an afternoon.
     unexpected: Vec<(String, String, usize)>,
+    /// Labelled occurrences nothing detected — the leaks, in other words.
+    missed: Vec<(String, String, usize)>,
 }
 
 impl Score {
@@ -109,6 +111,51 @@ impl Score {
         } else {
             self.detected as f64 / total as f64
         }
+    }
+}
+
+/// The two lists that say *why* the numbers are what they are. Printed only on
+/// request: they are long, and a CI run reads the summary.
+fn print_detail(projects: &[(PathBuf, Labels)]) {
+    println!("\n## Missed\n");
+    println!("Labelled and not detected. Each one is a name that would reach the model.\n");
+    for (dir, labels) in projects {
+        let detail = score(dir, labels, true);
+        if detail.missed.is_empty() {
+            continue;
+        }
+        println!("**{}** ({} occurrences)\n", labels.project, detail.missed.len());
+        for (file, name, offset) in detail.missed.iter().take(12) {
+            println!("- `{name}` in `{file}` at {offset}");
+        }
+        println!();
+    }
+
+    println!(
+        "
+## Unexpected detections
+"
+    );
+    println!("Detected but not in ground truth. Either the detector is over-reaching or the");
+    println!("corpus is incomplete — decide which on the merits, never by whichever makes the");
+    println!(
+        "number look better.
+"
+    );
+    for (dir, labels) in projects {
+        let detail = score(dir, labels, true);
+        if detail.unexpected.is_empty() {
+            continue;
+        }
+        println!(
+            "**{}**
+",
+            labels.project
+        );
+        for (file, name, offset) in &detail.unexpected {
+            println!("- `{name}` in `{file}` at {offset}");
+        }
+        println!();
     }
 }
 
@@ -175,32 +222,7 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
     let total_dict = gated;
 
     if verbose {
-        println!(
-            "
-## Unexpected detections
-"
-        );
-        println!("Detected but not in ground truth. Either the detector is over-reaching or the");
-        println!("corpus is incomplete — decide which on the merits, never by whichever makes the");
-        println!(
-            "number look better.
-"
-        );
-        for (dir, labels) in &projects {
-            let detail = score(dir, labels, true);
-            if detail.unexpected.is_empty() {
-                continue;
-            }
-            println!(
-                "**{}**
-",
-                labels.project
-            );
-            for (file, name, offset) in &detail.unexpected {
-                println!("- `{name}` in `{file}` at {offset}");
-            }
-            println!();
-        }
+        print_detail(&projects);
     }
 
     // Secrets are scored separately: they are a different operation with a
@@ -231,7 +253,7 @@ const fn pass(ok: bool) -> &'static str {
     if ok { "PASS" } else { "FAIL" }
 }
 
-fn load_projects(corpus: &Path) -> Result<Vec<(std::path::PathBuf, Labels)>> {
+fn load_projects(corpus: &Path) -> Result<Vec<(PathBuf, Labels)>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(corpus).with_context(|| format!("reading {}", corpus.display()))? {
         let dir = entry?.path();
@@ -276,6 +298,18 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
     }
     score.expected = expected_spans.len();
 
+    // The project's known members, as the vault would supply them after a scan.
+    // Without this the TypeScript parser sees each file in isolation and misses
+    // every property *reference*, which is most of them.
+    let context = specshield_core::parser::ProjectContext {
+        known_members: labels
+            .entities
+            .iter()
+            .filter(|e| e.entity_type == "column")
+            .map(|e| e.real_name.clone())
+            .collect(),
+    };
+
     let negative: HashSet<&str> = labels.negative_files.iter().map(String::as_str).collect();
     let files: HashSet<&str> = labels
         .entities
@@ -297,7 +331,7 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
         let parser = specshield_parsers::for_document(&path, &text);
         let mut candidates = parser
             .as_ref()
-            .map_or_else(Vec::new, |p| p.structural_candidates(&redacted, "project"));
+            .map_or_else(Vec::new, |p| p.structural_candidates_in(&redacted, "project", &context));
         let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
         let regions = parser.as_ref().and_then(|p| p.prose_regions(&redacted));
         for candidate in detector.scan_text(&redacted, "project", OccurrenceKind::Reference) {
@@ -314,6 +348,7 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             }
         }
 
+        let mut hit: HashSet<(String, usize, usize)> = HashSet::new();
         for candidate in candidates {
             if candidate.confidence < specshield_core::sanitize::AUTO_APPLY_CONFIDENCE {
                 continue; // suggestions are not detections
@@ -321,6 +356,7 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             let key = (file.to_owned(), candidate.byte_start, candidate.byte_end);
             if expected_spans.contains(&key) {
                 score.detected += 1;
+                hit.insert(key);
             } else {
                 score.false_positives += 1;
                 score
@@ -328,12 +364,24 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
                     .push((file.to_owned(), candidate.real_name.clone(), candidate.byte_start));
             }
         }
+
+        // Everything labelled in this file that nothing detected. Each is a name
+        // that would reach the model.
+        for entity in &labels.entities {
+            for occ in &entity.occurrences {
+                if occ.file == file && !hit.contains(&(file.to_owned(), occ.byte_start, occ.byte_end)) {
+                    score
+                        .missed
+                        .push((file.to_owned(), entity.real_name.clone(), occ.byte_start));
+                }
+            }
+        }
     }
 
     score
 }
 
-fn score_secrets(projects: &[(std::path::PathBuf, Labels)]) -> (usize, usize, usize) {
+fn score_secrets(projects: &[(PathBuf, Labels)]) -> (usize, usize, usize) {
     let mut found = 0;
     let mut expected = 0;
     let mut false_positives = 0;

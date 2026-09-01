@@ -27,6 +27,7 @@ mod state;
 use serde::Serialize;
 use specshield_core::detect::Detector;
 use specshield_core::model::{EntityType, OccurrenceKind, Origin, Status};
+use specshield_core::parser::ProjectContext;
 use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::{AUTO_APPLY_CONFIDENCE, Graph};
 use specshield_core::{alias, restore, sanitize, secrets, verify};
@@ -279,8 +280,17 @@ fn sanitize_text(state: State<'_, AppState>, filename: String, content: String) 
         let mut graph = graph_from(vault)?;
         let detector = detector_from(vault)?;
 
-        let result = sanitize::sanitize(&content, &filename, &detector, &mut graph, Some(parser.as_ref()))
-            .map_err(|e| fail(format!("sanitize failed: {e}")))?;
+        let members = context_from(vault)?;
+
+        let result = sanitize::sanitize(
+            &content,
+            &filename,
+            &detector,
+            &mut graph,
+            Some(parser.as_ref()),
+            &members,
+        )
+        .map_err(|e| fail(format!("sanitize failed: {e}")))?;
 
         persist(vault, &graph)?;
 
@@ -515,8 +525,31 @@ fn graph_from(vault: &vault::Vault) -> Result<Graph> {
     Ok(graph)
 }
 
+/// The members the project already knows, so a file that only *uses* a property
+/// still recognises it — SDD §5.
+fn context_from(vault: &vault::Vault) -> Result<ProjectContext> {
+    let mut context = ProjectContext::default();
+    for identity in vault.identities()? {
+        if identity.entity_type == EntityType::Column.prefix() {
+            context.known_members.insert(identity.real_name);
+        }
+    }
+    Ok(context)
+}
+
 fn detector_from(vault: &vault::Vault) -> Result<Detector> {
     let mut detector = Detector::new();
+
+    // Names learned from any artifact are found in every artifact — SDD §5.
+    // Without this the SQL scan interns the table `invoice`, the spec next to it
+    // says "invoice" in prose, and the gate blocks on a name the project already
+    // knows.
+    for identity in vault.identities()? {
+        if let Ok(entity_type) = identity.entity_type.parse() {
+            detector = detector.with_term(identity.real_name, entity_type);
+        }
+    }
+
     for (name, type_name) in vault.dictionary()? {
         let entity_type: EntityType = type_name
             .parse()

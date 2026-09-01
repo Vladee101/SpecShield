@@ -97,6 +97,14 @@
       "files": [
         "api/openapi.yaml"
       ]
+    },
+    {
+      "real_name": "customer-subscription",
+      "entity_type": "path_segment",
+      "scope_path": "src/domain/customer-subscription",
+      "files": [
+        "src/services/subscription.service.ts"
+      ]
     }
   ],
   "never_alias": [

@@ -10,7 +10,7 @@
 //! | SQL | `sqlparser`, AST-driven with byte spans | M3 |
 //! | YAML, JSON | `saphyr`, spanned nodes; JSON read as YAML 1.2 | M3 |
 //! | OpenAPI | semantic layer over the YAML/JSON node index | M3 |
-//! | TypeScript / JavaScript | Tree-sitter + heuristic scoping | M4 |
+//! | TypeScript / JavaScript | Tree-sitter; properties scoped globally | M4 |
 //!
 //! Three deliberate choices, all from the design review or the M0 spikes:
 //!
@@ -29,6 +29,7 @@ pub mod markdown;
 pub mod openapi;
 pub mod sql;
 pub mod text;
+pub mod typescript;
 pub mod yaml;
 
 use std::path::Path;
@@ -39,6 +40,7 @@ pub use crate::markdown::MarkdownParser;
 pub use crate::openapi::OpenApiParser;
 pub use crate::sql::SqlParser;
 pub use crate::text::TextParser;
+pub use crate::typescript::TypeScriptParser;
 pub use crate::yaml::{JsonParser, YamlParser};
 
 /// Every parser this build supports, in priority order.
@@ -54,6 +56,7 @@ pub fn registry() -> Vec<Box<dyn ArtifactParser>> {
         Box::new(OpenApiParser),
         Box::new(YamlParser),
         Box::new(JsonParser),
+        Box::new(TypeScriptParser),
         Box::new(TextParser),
     ]
 }
@@ -88,7 +91,7 @@ mod tests {
     fn unsupported_formats_return_none() {
         // SQL, YAML, and TypeScript arrive in M3 and M4. Claiming them now
         // would silently produce an unaliased twin.
-        for path in ["service.ts", "image.png"] {
+        for path in ["image.png", "archive.zip"] {
             assert!(
                 for_document(Path::new(path), "").is_none(),
                 "{path} should not be claimed yet"
@@ -100,7 +103,7 @@ mod tests {
     fn implemented_names_are_stable() {
         assert_eq!(
             implemented(),
-            vec!["markdown", "sql", "openapi", "yaml", "json", "text"]
+            vec!["markdown", "sql", "openapi", "yaml", "json", "typescript", "text"]
         );
     }
 }

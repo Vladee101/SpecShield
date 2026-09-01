@@ -418,9 +418,13 @@ impl Detector {
     }
 }
 
-/// Classify a PascalCase compound by its suffix. Returns `None` when no suffix
+/// Classify a `PascalCase` compound by its suffix. Returns `None` when no suffix
 /// matches — an unclassifiable compound is a suggestion, not a detection.
-fn classify_pascal(word: &str) -> Option<EntityType> {
+///
+/// Shared with the language parsers: a TypeScript `interface SubscriptionCreated`
+/// is an Event for the same reason a prose mention of it is, and having two
+/// tables of suffixes would let them disagree.
+pub fn classify_pascal(word: &str) -> Option<EntityType> {
     // Longest suffix wins, so `SubscriptionCreated` is an Event rather than
     // being caught by a shorter suffix elsewhere in the table.
     TYPED_SUFFIXES

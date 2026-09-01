@@ -14,7 +14,7 @@
 //! reference counts match the original.** Where that cannot be met, the file is
 //! emitted unaliased and reported, per SDD §16 — never in a broken state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::alias::{AliasStyle, ProjectKey, derive_in_concept};
 use crate::detect::Detector;
 use crate::edit::{Edit, apply};
 use crate::model::{IdentityKey, IdentityNode, Origin, Status};
-use crate::parser::{ArtifactParser, Candidate};
+use crate::parser::{ArtifactParser, Candidate, ProjectContext};
 use crate::secrets;
 
 /// The identity graph as it stands during a sanitize run.
@@ -245,6 +245,7 @@ pub fn sanitize(
     detector: &Detector,
     graph: &mut Graph,
     parser: Option<&dyn ArtifactParser>,
+    context: &ProjectContext,
 ) -> Result<Sanitized, SanitizeError> {
     // 1. Secrets, before anything else looks at the text.
     let findings = secrets::scan(source);
@@ -259,7 +260,7 @@ pub fn sanitize(
     //    comments and free text, which no grammar describes. Structural
     //    candidates claim their spans first, so a name the AST has already
     //    classified is never reclassified by a heuristic.
-    let structural = parser.map_or_else(Vec::new, |p| p.structural_candidates(&redacted, scope));
+    let structural = parser.map_or_else(Vec::new, |p| p.structural_candidates_in(&redacted, scope, context));
     let mut candidates = structural;
     let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
 
@@ -268,6 +269,30 @@ pub fn sanitize(
     // format's own vocabulary, and detecting there produces confident nonsense.
     let regions = parser.and_then(|p| p.prose_regions(&redacted));
 
+    // What the parser resolved this name to *in this document*. A doc comment
+    // saying `CustomerSubscription` means the type imported three lines above
+    // it; minting a document-scoped identity for the prose mention hands the
+    // model two aliases for one name, and the connection the real source made is
+    // the whole point of the twin.
+    //
+    // Structural evidence in the same document, or nothing. Two files that each
+    // mention `Status` in prose and neither of which declares it are two
+    // identities — Design Review B1 — and prose cannot say which was meant.
+    let mut resolved: HashMap<String, Option<IdentityKey>> = HashMap::new();
+    for candidate in &candidates {
+        let key = IdentityKey::new(&candidate.scope_path, candidate.entity_type, &candidate.real_name);
+        resolved
+            .entry(candidate.real_name.clone())
+            .and_modify(|slot| {
+                if slot.as_ref() != Some(&key) {
+                    // Ambiguous within the document; prose keeps its own scope.
+                    *slot = None;
+                }
+            })
+            .or_insert(Some(key));
+    }
+
+    let mut from_prose: HashSet<usize> = HashSet::new();
     for candidate in detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference) {
         let overlaps = claimed
             .iter()
@@ -278,6 +303,7 @@ pub fn sanitize(
                 .any(|(s, e)| candidate.byte_start >= *s && candidate.byte_end <= *e)
         });
         if !overlaps && in_prose {
+            from_prose.insert(candidate.byte_start);
             candidates.push(candidate);
         }
     }
@@ -292,7 +318,13 @@ pub fn sanitize(
     let mut applied = Vec::with_capacity(confident.len());
 
     for candidate in &confident {
-        let key = IdentityKey::new(&candidate.scope_path, candidate.entity_type, &candidate.real_name);
+        // A name the parser resolved keeps that identity, even where prose is
+        // how this file happens to mention it.
+        let key = from_prose
+            .contains(&candidate.byte_start)
+            .then(|| resolved.get(&candidate.real_name).cloned().flatten())
+            .flatten()
+            .unwrap_or_else(|| IdentityKey::new(&candidate.scope_path, candidate.entity_type, &candidate.real_name));
         let node = graph.intern(&key, Origin::Detected);
         let (uuid, alias) = (node.uuid, node.alias.clone());
 
@@ -394,7 +426,7 @@ mod tests {
         // The core invariant, PRD §5.
         let source = "Vantor bills Meridian Freight through SubscriptionService.";
         let mut g = graph();
-        let out = sanitize(source, "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
 
         let restored = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
         assert_eq!(restored.text, source);
@@ -404,7 +436,7 @@ mod tests {
     fn the_twin_contains_no_real_names() {
         let source = "Vantor runs SubscriptionService for Meridian Freight.";
         let mut g = graph();
-        let out = sanitize(source, "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
 
         let scanner = LeakScanner::new(g.real_names());
         assert!(scanner.scan(&out.twin).is_clean(), "twin leaked: {}", out.twin);
@@ -413,8 +445,24 @@ mod tests {
     #[test]
     fn aliases_are_stable_across_documents() {
         let mut g = graph();
-        let a = sanitize("Vantor here", "project", &detector(), &mut g, None).unwrap();
-        let b = sanitize("and Vantor there", "project", &detector(), &mut g, None).unwrap();
+        let a = sanitize(
+            "Vantor here",
+            "project",
+            &detector(),
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
+        let b = sanitize(
+            "and Vantor there",
+            "project",
+            &detector(),
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert_eq!(a.applied[0].alias, b.applied[0].alias);
         assert_eq!(g.len(), 1, "one identity, not two");
@@ -424,8 +472,8 @@ mod tests {
     fn distinct_scopes_get_distinct_aliases() {
         let mut g = graph();
         let d = Detector::new().with_term("Status", EntityType::Enum);
-        let a = sanitize("Status", "mod/a", &d, &mut g, None).unwrap();
-        let b = sanitize("Status", "mod/b", &d, &mut g, None).unwrap();
+        let a = sanitize("Status", "mod/a", &d, &mut g, None, &ProjectContext::default()).unwrap();
+        let b = sanitize("Status", "mod/b", &d, &mut g, None, &ProjectContext::default()).unwrap();
 
         assert_ne!(a.applied[0].alias, b.applied[0].alias, "Design Review B1");
         assert_eq!(g.len(), 2);
@@ -435,7 +483,7 @@ mod tests {
     fn secrets_are_redacted_before_detection_and_never_interned() {
         let source = "api_key = \"sk_live_abcdefghijklmnopqrstuvwx\"\nVantor owns it.";
         let mut g = graph();
-        let out = sanitize(source, "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
 
         assert!(!out.twin.contains("sk_live_abcdefghijklmnopqrstuvwx"));
         assert!(out.twin.contains("<<REDACTED:"));
@@ -451,7 +499,7 @@ mod tests {
     fn a_redacted_secret_does_not_come_back_on_restore() {
         let source = "token = \"sk_live_abcdefghijklmnopqrstuvwx\"";
         let mut g = graph();
-        let out = sanitize(source, "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         let restored = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
         assert!(!restored.text.contains("sk_live_abcdefghijklmnopqrstuvwx"));
     }
@@ -465,6 +513,7 @@ mod tests {
             &Detector::new(),
             &mut g,
             None,
+            &ProjectContext::default(),
         )
         .unwrap();
 
@@ -477,7 +526,7 @@ mod tests {
     fn formatting_is_preserved_exactly() {
         let source = "# Heading\n\n- Vantor\n- Other\n\n```ts\nconst x = 1;\n```\n";
         let mut g = graph();
-        let out = sanitize(source, "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         let restored = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
         assert_eq!(restored.text, source, "byte-for-byte, whitespace included");
     }
@@ -485,7 +534,7 @@ mod tests {
     #[test]
     fn empty_input_round_trips() {
         let mut g = graph();
-        let out = sanitize("", "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize("", "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         assert_eq!(out.twin, "");
     }
 
@@ -537,7 +586,15 @@ mod tests {
         let parser = FakeParser {
             after_headings: Some(1),
         };
-        let out = sanitize("Vantor", "project", &detector(), &mut g, Some(&parser)).unwrap();
+        let out = sanitize(
+            "Vantor",
+            "project",
+            &detector(),
+            &mut g,
+            Some(&parser),
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert_eq!(out.verification, Verification::Passed);
         assert!(out.verification.structurally_verified());
@@ -552,7 +609,15 @@ mod tests {
         let parser = FakeParser {
             after_headings: Some(4),
         };
-        let out = sanitize("Vantor", "project", &detector(), &mut g, Some(&parser)).unwrap();
+        let out = sanitize(
+            "Vantor",
+            "project",
+            &detector(),
+            &mut g,
+            Some(&parser),
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert!(matches!(out.verification, Verification::StructureChanged { .. }));
         assert!(!out.verification.aliases_applied());
@@ -564,7 +629,15 @@ mod tests {
     fn a_twin_that_no_longer_parses_abandons_aliasing() {
         let mut g = graph();
         let parser = FakeParser { after_headings: None };
-        let out = sanitize("Vantor", "project", &detector(), &mut g, Some(&parser)).unwrap();
+        let out = sanitize(
+            "Vantor",
+            "project",
+            &detector(),
+            &mut g,
+            Some(&parser),
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert!(matches!(out.verification, Verification::TwinDidNotParse { .. }));
         assert_eq!(out.twin, "Vantor");
@@ -580,7 +653,15 @@ mod tests {
         };
         let source = "token = \"sk_live_abcdefghijklmnopqrstuvwx\"
 Vantor owns it.";
-        let out = sanitize(source, "project", &detector(), &mut g, Some(&parser)).unwrap();
+        let out = sanitize(
+            source,
+            "project",
+            &detector(),
+            &mut g,
+            Some(&parser),
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert!(!out.verification.aliases_applied());
         assert!(!out.twin.contains("sk_live_abcdefghijklmnopqrstuvwx"), "{}", out.twin);
@@ -590,7 +671,15 @@ Vantor owns it.";
     #[test]
     fn no_parser_is_reported_as_not_attempted_never_as_a_pass() {
         let mut g = graph();
-        let out = sanitize("Vantor", "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(
+            "Vantor",
+            "project",
+            &detector(),
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
 
         assert_eq!(out.verification, Verification::NotAttempted);
         assert!(!out.verification.structurally_verified(), "must not read as verified");
@@ -667,7 +756,15 @@ Vantor owns it.";
     #[test]
     fn stop_listed_terms_survive_into_the_twin() {
         let mut g = graph();
-        let out = sanitize("Built with React and Postgres.", "project", &detector(), &mut g, None).unwrap();
+        let out = sanitize(
+            "Built with React and Postgres.",
+            "project",
+            &detector(),
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
         assert!(out.twin.contains("React"));
         assert!(out.twin.contains("Postgres"));
     }
