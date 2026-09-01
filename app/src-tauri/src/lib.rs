@@ -31,6 +31,7 @@ use specshield_core::sanitize::{AUTO_APPLY_CONFIDENCE, Graph};
 use specshield_core::{alias, restore, sanitize, secrets, verify};
 use specshield_vault as vault;
 use tauri::State;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::state::AppState;
 
@@ -362,13 +363,17 @@ fn restore_text(state: State<'_, AppState>, content: String) -> Result<RestoreRe
 
 /// Copy a verified twin to the clipboard — SDD §17.5.
 ///
-/// Takes the twin from the last successful sanitize rather than accepting text
-/// from the frontend, so there is no path by which the UI can put arbitrary —
-/// possibly original — content on the clipboard.
+/// Reads the twin from session state rather than accepting text from the
+/// frontend, so there is no path by which the UI can put arbitrary — possibly
+/// original — content on the clipboard.
+///
+/// The clipboard write happens **before** the audit entry. An `export` row
+/// means content left the application; writing it for a copy that failed would
+/// make the log lie about the one thing a security team reads it for.
 #[tauri::command]
-fn copy_verified_twin(state: State<'_, AppState>, with_envelope: bool) -> Result<usize> {
+fn copy_verified_twin(app: tauri::AppHandle, state: State<'_, AppState>, with_envelope: bool) -> Result<usize> {
     let twin = state
-        .take_verified_twin()
+        .verified_twin()
         .ok_or_else(|| fail("nothing verified to copy — sanitize first"))?;
 
     let payload = if with_envelope {
@@ -382,7 +387,11 @@ fn copy_verified_twin(state: State<'_, AppState>, with_envelope: bool) -> Result
     // configurable timeout. Tauri's clipboard plugin does not expose clipboard
     // formats, so this needs a small platform shim — tracked, not forgotten,
     // because Cloud Clipboard syncs history to the user's Microsoft account
-    // (Design Review A5).
+    // (Design Review A5). Until then, PRD §10's clipboard claim is unmet.
+    app.clipboard()
+        .write_text(payload.clone())
+        .map_err(|e| fail(format!("clipboard write failed: {e}")))?;
+
     state.with(|vault, _| {
         vault.log("export", Some(1), None, Some("clean"), Some("clipboard"))?;
         Ok(payload.len())
@@ -521,6 +530,7 @@ fn prompt_envelope() -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             create_project,

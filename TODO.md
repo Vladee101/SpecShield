@@ -103,26 +103,17 @@ not gated — see `crates/cli/src/report.rs`.
 
 ### P0 — wrong right now
 
-**P0-1. `copy_verified_twin` does not copy anything.**
-`app/src-tauri/src/lib.rs`, the `copy_verified_twin` command.
+~~**P0-1. `copy_verified_twin` does not copy anything.**~~ — **fixed**, commit
+`b63075c`+. `tauri-plugin-clipboard-manager` registered, the write happens
+before the audit entry so an `export` row can never describe a copy that
+failed, and a failed write returns an error rather than a length. The capability
+grants `clipboard-manager:allow-write-text` only — reading the user's clipboard
+is not this app's business. `app/src-tauri/src/state.rs` gained six tests around
+the copyable-twin state machine, including that a blocked sanitize clears the
+previous twin.
 
-It builds the payload, writes an `export` row to the audit log, and returns
-`payload.len()`. It never touches the clipboard. The UI then reports
-"N characters copied". So: the user believes they have the twin, the audit log
-records an export that did not happen, and the one action the whole workflow
-exists to perform is a no-op.
-
-Fix:
-- Add `tauri-plugin-clipboard-manager`, register it, and grant
-  `clipboard-manager:allow-write-text` in `app/src-tauri/capabilities/default.json`.
-- Write `payload` to the clipboard, and only log `export` after the write
-  succeeds. A failed write must return an error, not a length.
-- Keep the existing TODO comment about the Windows format flags (P1-1) — that is
-  a separate, still-open problem.
-
-Done when: clicking Copy in the running app puts the twin in the clipboard, a
-failed write surfaces as an error in the UI, and the audit log has no `export`
-row for a failed copy.
+Still unverified by hand: nobody has clicked the button in a running app
+(P1-2). The Windows format flags remain open (P1-1).
 
 **P0-2. `sanitize` does not perform the SDD §7.2 verification pass it documents.**
 `crates/core/src/sanitize.rs` — the module doc claims "the twin parses, and its
@@ -195,10 +186,10 @@ of network and shell.
 already the wrong answer for real use. Add a TTY prompt (`rpassword` or
 equivalent) as the default when neither is set.
 
-**P1-5. No tests for the Tauri layer.** `app/src-tauri` has zero tests. The
-commands are thin, but the state machine in `app/src-tauri/src/state.rs` is not
-— particularly `set_verified_twin` clearing on a blocked sanitize. Test that
-directly: a blocked sanitize after a successful one must leave nothing copyable.
+**P1-5. Thin test coverage in the Tauri layer.** `app/src-tauri/src/state.rs`
+now has six tests covering the copyable-twin state machine. The *commands* in
+`lib.rs` still have none — they need a harness that can stand up an `AppState`
+and drive `sanitize_text` / `copy_verified_twin` without a window.
 
 ---
 

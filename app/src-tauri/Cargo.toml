@@ -23,6 +23,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 getrandom = "0.4.3"
+tauri-plugin-clipboard-manager = "2.3.3"
 
 [lints]
 workspace = true
