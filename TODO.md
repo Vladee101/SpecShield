@@ -147,16 +147,32 @@ milestone: M2 clipboard flags, M4 index, M5 diff and git.
 
 ### P1 — finish M2
 
-**P1-1. Windows clipboard hardening.** `app/src-tauri/src/lib.rs`.
-Cloud Clipboard syncs clipboard history to the user's Microsoft account, so a
-copied twin can leave the machine by a route the gate never sees. PRD §10 and
-SDD §17.5 claim this is handled; it is not.
+**P1-1. Windows clipboard hardening.** `app/src-tauri/src/lib.rs`,
+`copy_verified_twin`.
 
-Needs a small platform shim: set the `ExcludeClipboardContentFromMonitorProcessing`
-and `CanIncludeInClipboardHistory` clipboard formats on Windows (Tauri's plugin
-does not expose formats), plus clear-after-timeout. Until it exists, **the
-clipboard claim in the PRD is unmet** — either implement it or downgrade the
-claim.
+SpecShield sends nothing anywhere — the capability set has no network
+permission. **Windows does.** With Clipboard History and "Sync across your
+devices" enabled, the OS uploads clipboard text to the user's Microsoft account.
+That happens *after* the verification gate has run, so it is a route off the
+machine the gate cannot see. Only the twin is ever copied, never original text,
+but PRD §4.3 is explicit that a verified twin is not non-confidential.
+
+Opting out means registering three clipboard formats and setting each alongside
+the text:
+
+| Format | Governs |
+|---|---|
+| `ExcludeClipboardContentFromMonitorProcessing` | clipboard monitors |
+| `CanIncludeInClipboardHistory` (DWORD 0) | local Win+V history |
+| `CanUploadToCloudClipboard` (DWORD 0) | cross-device sync to the MS account |
+
+**The third is the one that governs the Microsoft-account upload.** Setting only
+the first two leaves the actual concern unaddressed while looking done.
+
+Tauri's clipboard plugin exposes no way to set clipboard formats, so this needs
+a small platform shim rather than a flag. Also add clear-after-timeout. Until it
+exists, **PRD §10 and SDD §17.5 assert a clipboard property the code does not
+have** — implement it or downgrade the claim.
 
 **P1-2. The app has never been launched.** Everything typechecks and builds;
 no one has run it. The IPC wiring, error paths, and every screen transition are

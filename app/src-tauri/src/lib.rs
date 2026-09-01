@@ -387,12 +387,31 @@ fn copy_verified_twin(app: tauri::AppHandle, state: State<'_, AppState>, with_en
         twin
     };
 
-    // TODO(M2): mark the payload with `ExcludeClipboardContentFromMonitorProcessing`
-    // and `CanIncludeInClipboardHistory=false` on Windows, and clear it after a
-    // configurable timeout. Tauri's clipboard plugin does not expose clipboard
-    // formats, so this needs a small platform shim — tracked, not forgotten,
-    // because Cloud Clipboard syncs history to the user's Microsoft account
-    // (Design Review A5). Until then, PRD §10's clipboard claim is unmet.
+    // TODO(M2): opt this payload out of Windows clipboard history and cloud
+    // sync, and clear it after a configurable timeout (Design Review A5).
+    //
+    // SpecShield sends nothing anywhere — the capability set has no network
+    // permission. Windows does: with Clipboard History and "Sync across your
+    // devices" enabled, the OS uploads clipboard text to the user's Microsoft
+    // account. That happens *after* the verification gate has finished, so it
+    // is a route off the machine the gate cannot see. Only the twin is ever
+    // copied, never original text, but PRD §4.3 is explicit that a verified
+    // twin is not non-confidential — it still carries business logic in prose.
+    //
+    // Opting out means registering three clipboard formats and setting each on
+    // the clipboard alongside the text:
+    //
+    //   ExcludeClipboardContentFromMonitorProcessing  — clipboard monitors
+    //   CanIncludeInClipboardHistory        (DWORD 0) — local Win+V history
+    //   CanUploadToCloudClipboard           (DWORD 0) — cross-device sync
+    //
+    // The third is the one that governs the Microsoft-account upload; setting
+    // only the first two leaves the actual concern unaddressed, which is the
+    // trap this comment exists to prevent.
+    //
+    // Tauri's clipboard plugin exposes no way to set clipboard formats, so this
+    // needs a small platform shim rather than a flag. Until it exists, PRD §10's
+    // clipboard-hardening claim is unmet.
     app.clipboard()
         .write_text(payload.clone())
         .map_err(|e| fail(format!("clipboard write failed: {e}")))?;
