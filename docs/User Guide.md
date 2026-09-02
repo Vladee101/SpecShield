@@ -43,9 +43,11 @@ Both use the same engine and the same vault.
 
 ```bash
 cd /path/to/your/project
-export SPECSHIELD_PASSPHRASE='choose something long'
 specshield init . --alias-style typed
 ```
+
+It asks for a passphrase, twice, with echo off. In a script set
+`SPECSHIELD_PASSPHRASE` instead and it will not stop to ask.
 
 This creates `.specshield/vault.bin`. **Add `.specshield/` to your
 `.gitignore`** — it holds the mapping from every alias back to a real name.
@@ -64,10 +66,21 @@ Changing the style later means a re-key, which changes every alias (§8).
 
 **It cannot be recovered.** Nothing about it is stored anywhere. Lose it and the
 vault is unreadable, permanently — every twin you have ever produced becomes
-unrestorable. Do §7 (backup and escrow) today, not later.
+unrestorable. Do §7 (backup and escrow) today, not later. This is why `init`
+asks twice: a typo would be unrecoverable in exactly the same way.
 
-**Prefer the environment variable over `--passphrase`.** Command-line arguments
-are visible to other users on the machine in the process list.
+**Three ways to supply it**, in order of decreasing safety:
+
+| | Visible to | Use when |
+|---|---|---|
+| The prompt | nobody | working by hand |
+| `SPECSHIELD_PASSPHRASE` | anything that can read the process environment | scripts, CI |
+| `--passphrase` | **every user on the machine**, via the process list | nothing else works — it warns each time |
+
+If neither variable nor flag is set, every command prompts. The prompt reads the
+terminal directly, so `specshield restore < response.md` still asks rather than
+swallowing your file. Where there is no terminal at all — a CI job — it fails
+with a message instead of hanging.
 
 ### Teach it your names
 
@@ -386,8 +399,8 @@ This is not telemetry. There is none.
 | `recover` | Inspect a vault that will not open |
 | `report` | Detection metrics against the golden corpus |
 
-Every command takes `--project <path>` (default `.`) and `--passphrase`, though
-`SPECSHIELD_PASSPHRASE` is preferred.
+Every command takes `--project <path>` (default `.`). Omit `--passphrase` and
+`SPECSHIELD_PASSPHRASE` to be prompted.
 
 ---
 

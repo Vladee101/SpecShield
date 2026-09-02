@@ -86,7 +86,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 |---|---|
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
-| M2 Tauri shell | Workflow A works end to end; P1-4/5 remain |
+| M2 Tauri shell | Workflow A works end to end; P1-5 remains |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
@@ -200,11 +200,23 @@ line: one pins the capability list to exactly three entries, the other asserts
 `pick_file` never grows a path parameter.
 
 
-**P1-4. No interactive passphrase entry in the CLI.**
-`crates/cli/src/main.rs`, `passphrase()` requires `SPECSHIELD_PASSPHRASE` or
-`--passphrase`. Arguments are visible in the process list, so `--passphrase` is
-already the wrong answer for real use. Add a TTY prompt (`rpassword` or
-equivalent) as the default when neither is set.
+**P1-4. Interactive passphrase entry. — DONE.** The CLI prompts with echo off
+when neither `--passphrase` nor `SPECSHIELD_PASSPHRASE` is set, and `init` asks
+twice — a typo in a passphrase nothing stores is unrecoverable in the same way
+losing it is. `--passphrase` now warns that it is visible in the process list.
+
+Two things worth remembering about the implementation:
+
+- The prompt reads the *terminal device*, not stdin, so
+  `specshield restore < response.md` asks rather than swallowing the file. The
+  availability check had to match: an early version gated on
+  `stdin().is_terminal()`, which would have refused to prompt in the commonest
+  interactive case there is.
+- The source *choice* is a pure function with tests, because the prompt itself
+  needs a terminal and cannot be driven from one. The property that matters is
+  that explicit sources always win: prompting when a value was supplied hangs a
+  pipeline forever.
+
 
 **P1-5. Thin test coverage in the Tauri layer.** `app/src-tauri/src/state.rs`
 has six tests covering the copyable-twin state machine, and

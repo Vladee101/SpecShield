@@ -22,7 +22,9 @@ use specshield_core::{restore, sanitize, secrets, verify};
 use specshield_project as project;
 use specshield_project::{context_from, detector_from, graph_from, persist};
 use specshield_vault as vault;
-use zeroize::Zeroize;
+use std::io::IsTerminal;
+
+use zeroize::{Zeroize, Zeroizing};
 
 /// Default vault filename inside a project.
 const VAULT_FILE: &str = ".specshield/vault.bin";
@@ -554,16 +556,116 @@ fn vault_path(project: &Path) -> PathBuf {
     project.join(VAULT_FILE)
 }
 
-/// Resolve the passphrase, preferring the environment over the command line —
-/// process arguments are visible to other users on the machine.
-fn passphrase(explicit: Option<&str>) -> Result<String> {
-    if let Some(p) = explicit {
-        return Ok(p.to_owned());
+/// Where a passphrase should come from — P1-4.
+///
+/// Separated from the reading so the *choice* can be tested. The choice is what
+/// could regress: prompting when a value was supplied would hang a pipeline
+/// forever, and refusing to prompt when a terminal exists would make the CLI
+/// unusable interactively.
+#[derive(Debug, PartialEq, Eq)]
+enum Source {
+    /// Visible in the process list to every user on the machine.
+    Flag(String),
+    /// Visible to anything that can read the process environment.
+    Env(String),
+    /// Ask, with echo off.
+    Prompt,
+    /// Nothing given and nowhere to ask.
+    Unavailable,
+}
+
+/// The explicit sources win, always. A script that set one has stated its
+/// intent, and a prompt it cannot answer is worse than any warning.
+fn choose_source(explicit: Option<&str>, from_env: Option<String>, terminal_available: bool) -> Source {
+    if let Some(given) = explicit {
+        return Source::Flag(given.to_owned());
     }
-    std::env::var("SPECSHIELD_PASSPHRASE").context(
-        "no passphrase: set SPECSHIELD_PASSPHRASE or pass --passphrase \
-         (interactive prompting arrives with the desktop shell in M2)",
-    )
+    if let Some(value) = from_env {
+        return Source::Env(value);
+    }
+    if terminal_available {
+        Source::Prompt
+    } else {
+        Source::Unavailable
+    }
+}
+
+/// Is there a terminal to prompt on?
+///
+/// Not the same question as "is stdin a terminal". `specshield restore <
+/// response.md` has stdin redirected and a perfectly good terminal attached, and
+/// the prompt reads the terminal device rather than stdin precisely so that
+/// works. Checking stdin alone would refuse to prompt in the commonest
+/// interactive case there is.
+fn terminal_available() -> bool {
+    std::io::stdin().is_terminal() || std::io::stderr().is_terminal()
+}
+
+const NO_TERMINAL: &str = "no passphrase, and no terminal to ask on.
+     Set SPECSHIELD_PASSPHRASE, or run this where a terminal is attached.";
+
+fn ask(prompt: &str) -> Result<Zeroizing<String>> {
+    // Reads the terminal device, not stdin.
+    let entered = rpassword::prompt_password(prompt).context(NO_TERMINAL)?;
+    Ok(Zeroizing::new(entered))
+}
+
+/// Resolve the passphrase for an existing vault.
+fn passphrase(explicit: Option<&str>) -> Result<Zeroizing<String>> {
+    match choose_source(
+        explicit,
+        std::env::var("SPECSHIELD_PASSPHRASE").ok(),
+        terminal_available(),
+    ) {
+        Source::Flag(given) => {
+            eprintln!(
+                "warning: --passphrase is visible in the process list to other users on this                  machine. Prefer SPECSHIELD_PASSPHRASE, or omit both and be prompted."
+            );
+            Ok(Zeroizing::new(given))
+        }
+        Source::Env(value) => Ok(Zeroizing::new(value)),
+        Source::Prompt => {
+            let entered = ask("Passphrase: ")?;
+            if entered.is_empty() {
+                bail!("an empty passphrase protects nothing");
+            }
+            Ok(entered)
+        }
+        Source::Unavailable => bail!(NO_TERMINAL),
+    }
+}
+
+/// A passphrase for a vault that does not exist yet — asked twice.
+///
+/// A typo here is unrecoverable in the strongest sense: nothing about the
+/// passphrase is stored, so a vault created under a mistyped one can never be
+/// opened and every twin it produces is unrestorable. Confirming costs one line
+/// and removes the whole failure mode.
+///
+/// The explicit sources skip confirmation. A script passing the same value twice
+/// has confirmed nothing, and asking would only break it.
+fn new_passphrase(explicit: Option<&str>) -> Result<Zeroizing<String>> {
+    let source = choose_source(
+        explicit,
+        std::env::var("SPECSHIELD_PASSPHRASE").ok(),
+        terminal_available(),
+    );
+    if !matches!(source, Source::Prompt) {
+        return passphrase(explicit);
+    }
+
+    eprintln!("This passphrase cannot be recovered. Nothing about it is stored anywhere:");
+    eprintln!("lose it and every twin this project produces becomes unrestorable.");
+    eprintln!();
+
+    let first = ask("Passphrase: ")?;
+    if first.is_empty() {
+        bail!("an empty passphrase protects nothing");
+    }
+    if *first != *ask("Again: ")? {
+        bail!("those did not match — nothing was created");
+    }
+    Ok(first)
 }
 
 fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
@@ -608,7 +710,7 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
         eprintln!();
     }
 
-    let pw = passphrase(explicit)?;
+    let pw = new_passphrase(explicit)?;
     let mut project_key = [0u8; 32];
     getrandom::fill(&mut project_key).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
 
@@ -1668,4 +1770,53 @@ fn prompt_envelope() -> String {
          at the end of your response.",
         specshield_core::alias::ENVELOPE_PATTERN
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The prompt itself needs a terminal and cannot be driven from a test. What
+    // *can* be tested is the choice, and the choice is where a regression would
+    // hurt: prompting when a value was supplied hangs a pipeline forever, and
+    // refusing to prompt when a terminal exists makes the CLI unusable by hand.
+
+    #[test]
+    fn an_explicit_flag_wins_over_everything() {
+        assert_eq!(
+            choose_source(Some("from-flag"), Some("from-env".to_owned()), true),
+            Source::Flag("from-flag".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_environment_wins_over_a_prompt() {
+        // The case that matters: a CI job with a terminal attached must not
+        // stop to ask.
+        assert_eq!(
+            choose_source(None, Some("from-env".to_owned()), true),
+            Source::Env("from-env".to_owned())
+        );
+    }
+
+    #[test]
+    fn nothing_supplied_and_a_terminal_means_ask() {
+        assert_eq!(choose_source(None, None, true), Source::Prompt);
+    }
+
+    #[test]
+    fn nothing_supplied_and_no_terminal_is_an_error_not_a_hang() {
+        assert_eq!(choose_source(None, None, false), Source::Unavailable);
+    }
+
+    #[test]
+    fn an_empty_environment_variable_is_still_a_passphrase() {
+        // `SPECSHIELD_PASSPHRASE=` set to empty is a mistake, but it is the
+        // caller's mistake to make: silently prompting instead would hang the
+        // script they were trying to run. The vault rejects it on the way in.
+        assert_eq!(
+            choose_source(None, Some(String::new()), true),
+            Source::Env(String::new())
+        );
+    }
 }

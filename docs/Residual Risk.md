@@ -103,11 +103,13 @@ derived from it directly with Argon2id.
 
 Consequences:
 
-- **`--passphrase` on a command line is visible in the process list** to other
-  users on the machine. Prefer the environment variable.
-- There is no interactive prompt yet, so in scripted use the passphrase is in an
-  environment variable, with whatever exposure that carries in the surrounding
-  system (CI logs, process inspection, crash dumps).
+- The command line prompts with echo off when nothing else is supplied, and
+  `init` asks twice. But **`--passphrase` is still visible in the process list**
+  to other users on the machine — it warns each time it is used, and it is
+  supported because some automation has no alternative.
+- In scripted use the passphrase is in an environment variable, with whatever
+  exposure that carries in the surrounding system (CI logs, process inspection,
+  crash dumps).
 - Nothing about the passphrase is stored anywhere, so a forgotten passphrase is
   an unrecoverable vault. This is by design and is why escrow exists — but with
   no credential store there is also no convenience path that would make people

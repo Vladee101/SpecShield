@@ -79,9 +79,10 @@ outright — a stale patch can apply cleanly and silently revert a colleague's w
 
 ## Gaps in this build, stated plainly
 
-- **No OS credential store.** SDD §9.4 describes one; it does not exist. The
-  passphrase comes from an environment variable or a flag — and `--passphrase` is
-  visible in the process list.
+- **No OS credential store.** SDD §9.4 describes one; it does not exist. The CLI
+  prompts with echo off, but for scripts the passphrase lives in an environment
+  variable — and `--passphrase`, still supported for automation that has no
+  alternative, is visible in the process list.
 - **Escrow holds the passphrase itself**, not a revocable key, because keys derive
   directly from the passphrase.
 - **Installers are unsigned.**
