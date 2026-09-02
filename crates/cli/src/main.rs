@@ -236,6 +236,89 @@ enum Command {
         passphrase: Option<String>,
     },
 
+    /// Show the local audit log — PRD FR-9.
+    ///
+    /// Records that an operation happened, never what was in it. Distinct from
+    /// telemetry, which this product does not have.
+    Audit {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Emit CSV for compliance review.
+        #[arg(long)]
+        csv: bool,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Copy the vault somewhere safe — PRD FR-11.
+    Backup {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        dest: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Put a backup back. Never writes over an existing vault.
+    RestoreVault {
+        backup: PathBuf,
+        #[arg(long)]
+        into: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Export a passphrase-protected key escrow — PRD FR-11.
+    ///
+    /// The escrow passphrase is a second, separate one. Whoever holds this file
+    /// and that passphrase can open the vault.
+    Escrow {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        out: PathBuf,
+        #[arg(long)]
+        escrow_passphrase: String,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Recover a vault passphrase from an escrow file — PRD FR-11.
+    ///
+    /// Prints the passphrase on stdout so it can be piped straight into
+    /// `SPECSHIELD_PASSPHRASE`; everything explanatory goes to stderr.
+    EscrowOpen {
+        file: PathBuf,
+        #[arg(long)]
+        escrow_passphrase: String,
+        /// Check it against this project's vault before printing anything.
+        #[arg(long)]
+        verify_against: Option<PathBuf>,
+    },
+
+    /// Regenerate every alias under a new project key — PRD FR-11.
+    ///
+    /// Orphans every twin already shared. Prints what it would do unless
+    /// `--confirm` is given.
+    Rekey {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Inspect a vault that will not open — SDD §16 read-only recovery.
+    ///
+    /// Needs no passphrase and reveals no real name. Reports what the vault
+    /// holds and what is wrong with it.
+    Recover {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+    },
+
     /// Measure detection recall and precision against the labelled corpus
     /// (PRD §5). Consumed by CI.
     Report {
@@ -298,6 +381,12 @@ impl From<EntityTypeArg> for EntityType {
     }
 }
 
+/// One flat dispatch table.
+///
+/// Over the line limit and staying that way: the value of this function is that
+/// every command and its arguments can be read in one place, and splitting it by
+/// category to satisfy a line count would cost exactly that.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Init {
@@ -386,6 +475,39 @@ fn main() -> Result<()> {
             passphrase.as_deref(),
         ),
         Command::Undo { project, passphrase } => run_undo(&project, passphrase.as_deref()),
+        Command::Audit {
+            project,
+            limit,
+            csv,
+            passphrase,
+        } => run_audit(&project, limit, csv, passphrase.as_deref()),
+        Command::Backup {
+            project,
+            dest,
+            passphrase,
+        } => run_backup(&project, &dest, passphrase.as_deref()),
+        Command::RestoreVault {
+            backup,
+            into,
+            passphrase,
+        } => run_restore_vault(&backup, &into, passphrase.as_deref()),
+        Command::Escrow {
+            project,
+            out,
+            escrow_passphrase,
+            passphrase,
+        } => run_escrow(&project, &out, &escrow_passphrase, passphrase.as_deref()),
+        Command::EscrowOpen {
+            file,
+            escrow_passphrase,
+            verify_against,
+        } => run_escrow_open(&file, &escrow_passphrase, verify_against.as_deref()),
+        Command::Rekey {
+            project,
+            confirm,
+            passphrase,
+        } => run_rekey(&project, confirm, passphrase.as_deref()),
+        Command::Recover { project } => run_recover(&project),
         Command::Report {
             corpus,
             strict,
@@ -419,7 +541,21 @@ fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
     if !path.exists() {
         bail!("no vault at {} — run `specshield init` first", path.display());
     }
-    Ok(vault::Vault::open(&path, &passphrase(explicit)?)?)
+
+    // SDD §16 routes vault corruption to read-only recovery. A raw
+    // "file is not a database" is technically accurate and completely useless
+    // to someone whose mapping has just stopped opening.
+    vault::Vault::open(&path, &passphrase(explicit)?).map_err(|e| match e {
+        vault::VaultError::Decryption => anyhow::anyhow!(
+            "wrong passphrase, or the vault has been tampered with. There is no passphrase \
+             recovery by design — restore from a backup or an escrow export. \
+             `specshield recover` reports what the vault holds without one."
+        ),
+        other => anyhow::Error::new(other).context(format!(
+            "{} would not open. `specshield recover` inspects it read-only and says what is wrong.",
+            path.display()
+        )),
+    })
 }
 
 /// Rebuild the in-memory graph from stored identities, so aliases stay stable
@@ -1717,6 +1853,195 @@ fn run_undo(project: &Path, explicit: Option<&str>) -> Result<()> {
     let _ = std::fs::remove_file(project.join(LAST_APPLY));
 
     println!("Reversed. You are on {}.", repository.current_branch()?);
+    Ok(())
+}
+
+/// PRD FR-9 — the log a security team reads.
+fn run_audit(project: &Path, limit: usize, csv: bool, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let entries = vault.audit_log(limit)?;
+
+    if csv {
+        print!("{}", vault::audit_csv(&entries));
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No entries yet.");
+        return Ok(());
+    }
+
+    println!("when                 operation         files entities  result     destination");
+    for entry in &entries {
+        println!(
+            "{:<20} {:<16} {:>5} {:>7}  {:<10} {}",
+            entry.ts,
+            entry.operation,
+            entry.file_count.map_or_else(|| "-".to_owned(), |n| n.to_string()),
+            entry.entity_count.map_or_else(|| "-".to_owned(), |n| n.to_string()),
+            entry.verification.as_deref().unwrap_or("-"),
+            entry.destination.as_deref().unwrap_or("-"),
+        );
+    }
+    println!();
+    println!("{} entr(ies). No real names, no content — FR-9.", entries.len());
+    Ok(())
+}
+
+/// PRD FR-11 — a consistent copy of the vault.
+fn run_backup(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    vault.backup_to(dest)?;
+
+    println!("Backed up to {}", dest.display());
+    println!("  The copy is encrypted exactly as the vault is, and opens with the same passphrase.");
+    println!("  It is not a second factor: someone who has this file and the passphrase has the mapping.");
+    Ok(())
+}
+
+/// PRD FR-11 — put a backup back, without ever overwriting.
+fn run_restore_vault(backup: &Path, into: &Path, explicit: Option<&str>) -> Result<()> {
+    let passphrase = passphrase(explicit)?;
+    vault::backup::restore_from(backup, into, &passphrase)?;
+
+    println!("Restored {} to {}", backup.display(), into.display());
+    println!("  Verified it opens before anything was written.");
+    Ok(())
+}
+
+/// PRD FR-11 — passphrase-protected key escrow.
+fn run_escrow(project: &Path, out: &Path, escrow_passphrase: &str, explicit: Option<&str>) -> Result<()> {
+    if out.exists() {
+        bail!(
+            "{} already exists — refusing to overwrite an escrow file",
+            out.display()
+        );
+    }
+    // Opening proves the passphrase is the right one before it is escrowed. An
+    // escrow file holding a wrong passphrase is worse than none: it is a
+    // recovery plan that fails only when it is needed.
+    let passphrase = passphrase(explicit)?;
+    let vault = vault::Vault::open(&vault_path(project), &passphrase)?;
+
+    let sealed = vault::backup::export_escrow(&passphrase, escrow_passphrase)?;
+    std::fs::write(out, &sealed)?;
+    vault.log("vault.escrow", None, None, None, None)?;
+
+    println!("Escrow written to {}", out.display());
+    println!();
+    println!("{}", vault::backup::ESCROW_WARNING);
+    Ok(())
+}
+
+/// PRD FR-11 — the other half of escrow.
+///
+/// An escrow file nobody can open is not a recovery plan, it is a reassurance.
+/// This is the verb that makes it real.
+fn run_escrow_open(file: &Path, escrow_passphrase: &str, verify_against: Option<&Path>) -> Result<()> {
+    let sealed = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
+    let recovered = vault::backup::open_escrow(&sealed, escrow_passphrase)?;
+
+    if let Some(project) = verify_against {
+        // Better to fail here than to hand someone a passphrase that turns out
+        // to belong to a different vault.
+        vault::Vault::open(&vault_path(project), &recovered)
+            .context("the escrowed passphrase does not open that project's vault")?;
+        eprintln!("Verified against {}.", vault_path(project).display());
+    }
+
+    eprintln!(
+        "Recovered from {}. Treat what follows as the passphrase itself.",
+        file.display()
+    );
+    println!("{recovered}");
+    Ok(())
+}
+
+/// PRD FR-11 — re-key: every alias in the project changes.
+///
+/// The operation with the worst failure mode in the product. Aliases are
+/// HMAC-derived from the project key, so a new key means every twin already
+/// sent to a model is orphaned — its aliases no longer resolve to anything.
+/// That is the point when a twin has been over-shared, and a disaster otherwise,
+/// so it is confirmed explicitly rather than assumed.
+fn run_rekey(project: &Path, confirm: bool, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let before = vault.identities()?.len();
+
+    if !confirm {
+        println!("Re-keying would change every one of the {before} alias(es) in this project.");
+        println!();
+        println!("Every twin already shared becomes unrestorable: its aliases will no longer");
+        println!("resolve to anything. Do this when a twin has been over-shared, or when the");
+        println!("alias style changes — not otherwise.");
+        println!();
+        println!("Back up first:  specshield backup <path>");
+        println!("Then:           specshield rekey --confirm");
+        return Ok(());
+    }
+
+    let mut fresh = [0u8; 32];
+    getrandom::fill(&mut fresh).map_err(|e| anyhow::anyhow!("entropy source unavailable: {e}"))?;
+    vault.rotate_project_key(&fresh)?;
+    fresh.zeroize();
+
+    let changed = rekey(&vault)?;
+
+    println!("Re-keyed. {changed} of {before} alias(es) changed.");
+    println!();
+    println!("Every twin produced before now is orphaned. Re-sanitize and re-send anything");
+    println!("still in flight with a model.");
+    Ok(())
+}
+
+/// SDD §16 — read-only recovery mode.
+///
+/// Reached when the vault will not open normally, which is the moment a user
+/// most needs to be told something other than "no".
+fn run_recover(project: &Path) -> Result<()> {
+    let path = vault_path(project);
+    let recovery = vault::Recovery::open(&path)?;
+
+    println!("# Recovery — {}", path.display());
+    println!();
+    println!("{}", recovery.diagnosis());
+    println!();
+
+    if !recovery.is_readable() {
+        println!("Nothing could be read from the file.");
+        return Ok(());
+    }
+
+    println!("schema version: {}", recovery.schema_version().unwrap_or(0));
+    println!("identities:     {}", recovery.identity_count());
+    println!("indexed files:  {}", recovery.file_count());
+
+    let types = recovery.entity_types();
+    if !types.is_empty() {
+        println!();
+        println!("By type:");
+        for (kind, count) in &types {
+            println!("  {kind:<10} {count}");
+        }
+    }
+
+    let entries = recovery.audit_log(10);
+    if !entries.is_empty() {
+        println!();
+        println!("Last {} audit entr(ies):", entries.len());
+        for entry in &entries {
+            println!(
+                "  {} {:<16} {}",
+                entry.ts,
+                entry.operation,
+                entry.verification.as_deref().unwrap_or("-")
+            );
+        }
+    }
+
+    println!();
+    println!("Read-only. Nothing here was modified, and no real name is readable without");
+    println!("the passphrase — recovery mode reports what a vault holds, it is not a way in.");
     Ok(())
 }
 

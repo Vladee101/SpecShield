@@ -22,7 +22,11 @@
 //!
 //! See [`crypto`] for the encryption and blind-index scheme.
 
+pub mod backup;
 mod crypto;
+pub mod recovery;
+
+pub use recovery::Recovery;
 mod schema;
 
 use std::path::Path;
@@ -137,6 +141,48 @@ pub struct AuditEntry {
     pub entity_count: Option<i64>,
     pub verification: Option<String>,
     pub destination: Option<String>,
+}
+
+/// Render audit entries as CSV — PRD FR-9, "exportable as CSV for compliance
+/// review".
+///
+/// Written out by hand rather than pulled in as a dependency: six columns of
+/// integers and short strings do not justify one, and the escaping rule is a
+/// single line. Fields are quoted only when they need to be, and an embedded
+/// quote is doubled, per RFC 4180.
+///
+/// A destination is the only field a caller could ever get user-controlled text
+/// into — a branch name, a file path — so it is the one that has to be escaped
+/// properly. A stray quote or newline there would otherwise shift every
+/// subsequent column of a compliance export by one.
+#[must_use]
+pub fn audit_csv(entries: &[AuditEntry]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("timestamp,operation,file_count,entity_count,verification,destination\n");
+    for entry in entries {
+        // Writing into the buffer rather than formatting a String per row: an
+        // export of a long-lived project is thousands of rows.
+        let _ = writeln!(
+            out,
+            "{},{},{},{},{},{}",
+            entry.ts,
+            csv_field(&entry.operation),
+            entry.file_count.map_or_else(String::new, |n| n.to_string()),
+            entry.entity_count.map_or_else(String::new, |n| n.to_string()),
+            csv_field(entry.verification.as_deref().unwrap_or_default()),
+            csv_field(entry.destination.as_deref().unwrap_or_default()),
+        );
+    }
+    out
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_owned()
+    }
 }
 
 /// An open vault.
@@ -641,6 +687,36 @@ impl Vault {
         Ok(())
     }
 
+    /// Copy this vault to `dest` — PRD FR-11.
+    ///
+    /// Runs against the live connection, so it captures writes still sitting in
+    /// the write-ahead log. A file copy would not.
+    pub fn backup_to(&self, dest: &Path) -> Result<(), VaultError> {
+        backup::backup_to(&self.conn, dest)?;
+        self.log("vault.backup", None, None, None, None)
+    }
+
+    /// Re-key the project — PRD FR-11.
+    ///
+    /// Aliases are HMAC-derived from the project key, so replacing it changes
+    /// every alias the project will ever issue. Callers must re-derive the
+    /// stored ones afterwards; this only moves the key.
+    ///
+    /// Every twin already shared becomes unrestorable by this vault, which is
+    /// exactly the point when a twin has been over-shared — and exactly the
+    /// disaster when it has not. The caller warns.
+    pub fn rotate_project_key(&self, new_key: &[u8; 32]) -> Result<(), VaultError> {
+        self.conn.execute(
+            "UPDATE project SET project_key_enc = ? WHERE id = ?",
+            params![
+                self.keys
+                    .seal(&hex(new_key), &aad("project", "project_key", &self.project_id))?,
+                self.project_id,
+            ],
+        )?;
+        self.log("vault.rekey", None, None, None, None)
+    }
+
     pub fn audit_log(&self, limit: usize) -> Result<Vec<AuditEntry>, VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT ts, operation, file_count, entity_count, verification, destination
@@ -865,6 +941,87 @@ mod tests {
         v.put_identity(&a).unwrap();
         v.put_identity(&b).unwrap();
         assert_eq!(v.identities().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn audit_csv_has_a_header_and_one_row_per_entry() {
+        let rows = vec![
+            AuditEntry {
+                ts: 100,
+                operation: "export".to_owned(),
+                file_count: Some(3),
+                entity_count: Some(12),
+                verification: Some("clean".to_owned()),
+                destination: Some("clipboard".to_owned()),
+            },
+            AuditEntry {
+                ts: 101,
+                operation: "sanitize".to_owned(),
+                file_count: None,
+                entity_count: None,
+                verification: None,
+                destination: None,
+            },
+        ];
+
+        let csv = audit_csv(&rows);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            "timestamp,operation,file_count,entity_count,verification,destination"
+        );
+        assert_eq!(lines[1], "100,export,3,12,clean,clipboard");
+        assert_eq!(
+            lines[2], "101,sanitize,,,,",
+            "an absent count is an empty field, not a zero"
+        );
+    }
+
+    #[test]
+    fn a_destination_containing_a_comma_cannot_shift_the_columns() {
+        // A branch name or path is the one field a user controls. Unescaped, a
+        // comma in it moves every later column of a compliance export by one.
+        let rows = vec![AuditEntry {
+            ts: 1,
+            operation: "apply".to_owned(),
+            file_count: Some(1),
+            entity_count: None,
+            verification: Some("applied".to_owned()),
+            destination: Some("feature/a,b".to_owned()),
+        }];
+
+        let csv = audit_csv(&rows);
+        assert!(csv.contains("\"feature/a,b\""), "{csv}");
+        assert_eq!(csv.lines().nth(1).unwrap().matches(',').count(), 6);
+    }
+
+    #[test]
+    fn a_quote_in_a_field_is_doubled_per_rfc_4180() {
+        let rows = vec![AuditEntry {
+            ts: 1,
+            operation: "apply".to_owned(),
+            file_count: None,
+            entity_count: None,
+            verification: None,
+            destination: Some(String::from("say \"hi\"")),
+        }];
+        assert!(audit_csv(&rows).contains("\"say \"\"hi\"\"\""), "{}", audit_csv(&rows));
+    }
+
+    #[test]
+    fn the_audit_log_never_carries_a_real_name() {
+        // FR-9. The log is the artifact a security team reads, and it is the one
+        // place a leak would be least expected and most damaging.
+        let t = TempVault::new("audit-names");
+        let v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        v.put_identity(&identity()).unwrap();
+        v.log("export", Some(1), Some(1), Some("clean"), Some("clipboard"))
+            .unwrap();
+
+        let csv = audit_csv(&v.audit_log(50).unwrap());
+        assert!(!csv.contains("CustomerService"), "{csv}");
+        assert!(!csv.contains("mod/a"), "{csv}");
     }
 
     #[test]

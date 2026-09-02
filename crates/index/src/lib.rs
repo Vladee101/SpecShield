@@ -23,6 +23,11 @@ const SNIFF: usize = 8192;
 /// checked-in artifact, and hashing it buys nothing the walk needs.
 const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
+/// A project-level ignore file — PRD FR-12. Same syntax as `.gitignore`, and
+/// applied on top of it: a file committed to the repository can still be one a
+/// team never wants in a twin.
+const SPECSHIELD_IGNORE: &str = ".specshieldignore";
+
 #[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error("walking {root}: {source}")]
@@ -221,6 +226,10 @@ fn walk(root: &Path) -> Result<Vec<(PathBuf, u64, Option<u64>)>, IndexError> {
     for result in ignore::WalkBuilder::new(root)
         .hidden(false)
         .git_ignore(true)
+        // PRD FR-12. A project's own ignore file, with the same syntax as
+        // `.gitignore` — for the vendored tree that *is* committed, or the
+        // generated directory a team wants out of every twin.
+        .add_custom_ignore_filename(SPECSHIELD_IGNORE)
         // A project is a project whether or not `git init` has been run in it.
         // Without this the walk silently ignores `.gitignore` outside a repo,
         // and `node_modules` lands in the index.
@@ -343,6 +352,42 @@ mod tests {
             "an ignored directory is not the user's code: {paths:?}"
         );
         assert!(!paths.iter().any(|p| p.as_str() == "debug.log"), "{paths:?}");
+    }
+
+    #[test]
+    fn a_specshieldignore_excludes_files_git_still_tracks() {
+        // FR-12. The case that matters: a directory that is committed — so
+        // `.gitignore` says nothing about it — but that a team does not want
+        // leaving the machine.
+        let project = TempProject::new("specshieldignore");
+        project.write(
+            ".specshieldignore",
+            b"vendor/
+*.generated.ts
+",
+        );
+        project.write(
+            "src/main.ts",
+            b"export const a = 1;
+",
+        );
+        project.write(
+            "vendor/lib/index.ts",
+            b"export const v = 2;
+",
+        );
+        project.write(
+            "src/api.generated.ts",
+            b"export const g = 3;
+",
+        );
+
+        let index = Index::build(project.path()).expect("build");
+        let paths: Vec<&String> = index.files.keys().collect();
+
+        assert!(paths.iter().any(|p| p.as_str() == "src/main.ts"), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.contains("vendor")), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.ends_with(".generated.ts")), "{paths:?}");
     }
 
     #[test]

@@ -90,7 +90,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
-| M6 hardening + packaging | not started |
+| M6 hardening + packaging | engine done; packaging, signing, and docs remain |
 
 Corpus, current: all six projects gated, 98.6% recall / 95.8% precision;
 secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
@@ -306,6 +306,23 @@ app. It was rendered against a stubbed IPC layer in a browser — which confirms
 the markup, the CSS, and the refusal logic — and the guards behind it are tested
 in Rust (`app/src-tauri/src/lib.rs`). The gap is the real IPC round trip and
 anything that depends on a live vault, and it is the same gap P1-5 describes.
+
+---
+
+**P2-8. M6 packaging, signing, and the security docs.** The engine half of M6
+is done: SDD §16 is an executable matrix, read-only recovery exists, FR-9 has
+CSV export, FR-11 has backup/restore/escrow/re-key, FR-12 honours
+`.specshieldignore`, and CI now gates on the M4 perf budgets and on zero egress.
+
+What remains needs decisions or credentials that are not mine to make:
+
+- **Installers and signing** (MSI/NSIS, DMG, AppImage). Tauri can build them;
+  signing needs the user's certificates and an Apple developer identity. The
+  auto-updater must be explicitly disabled — an updater is a network dependency
+  in a product whose main claim is that it needs no network.
+- **Docs**: threat model, residual-risk statement, security-team one-pager, user
+  guide. The material exists across the PRD, the SDD, and this file; what is
+  missing is the version a security reviewer can read in ten minutes.
 
 ---
 
