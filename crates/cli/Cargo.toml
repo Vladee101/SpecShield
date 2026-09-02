@@ -15,6 +15,7 @@ path = "src/main.rs"
 specshield-core.workspace = true
 specshield-vault.workspace = true
 specshield-index.workspace = true
+specshield-project.workspace = true
 specshield-parsers.workspace = true
 specshield-git.workspace = true
 uuid.workspace = true

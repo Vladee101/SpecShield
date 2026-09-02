@@ -3788,6 +3788,7 @@ dependencies = [
  "specshield-git",
  "specshield-index",
  "specshield-parsers",
+ "specshield-project",
  "specshield-vault",
  "tauri",
  "tauri-build",
@@ -3810,6 +3811,7 @@ dependencies = [
  "specshield-git",
  "specshield-index",
  "specshield-parsers",
+ "specshield-project",
  "specshield-vault",
  "uuid",
  "zeroize",
@@ -3864,6 +3866,17 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-typescript",
  "uuid",
+]
+
+[[package]]
+name = "specshield-project"
+version = "0.1.0"
+dependencies = [
+ "specshield-core",
+ "specshield-index",
+ "specshield-parsers",
+ "specshield-vault",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

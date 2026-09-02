@@ -2,13 +2,13 @@
 
 **Version 1.0 · the application, not the command line**
 
-The desktop app is the way most people will use SpecShield. It is built around
-**Workflow A**: one document at a time, paste in, copy out. There is a fifth
-screen for reviewing and applying an AI response to a real file.
+The desktop app does everything the command line does, bar one CI tool (§12).
 
-If you work across a whole repository, read the [User Guide](User%20Guide.md)
-instead — that path is the command line's, and §9 here says exactly which parts
-of it the app cannot do.
+Five numbered steps handle one document at a time: paste in, copy out, paste the
+answer back. Three tabs beside them handle the repository, the audit log, and the
+vault itself.
+
+The [User Guide](User%20Guide.md) covers the same ground from the command line.
 
 Read the box first. It is the one thing that gets people in trouble.
 
@@ -22,9 +22,9 @@ Read the box first. It is the one thing that gets people in trouble.
 
 ---
 
-## 1. The five steps
+## 1. The layout
 
-The bar across the top is the workflow, in order:
+The bar across the top is the workflow, in order, and then the tools:
 
 | | Step | What happens |
 |---|---|---|
@@ -33,9 +33,13 @@ The bar across the top is the workflow, in order:
 | 3 | **Sanitize & verify** | Produce the twin, pass the gate, copy it |
 | 4 | **Restore** | Paste the model's answer back |
 | 5 | **Diff & apply** | Review the change and apply it as a git patch |
+| — | **Whole project** | Index, export a twin tree, unify concepts, check anything |
+| — | **Audit log** | What this project recorded, and CSV export |
+| — | **Vault** | Backup, escrow, re-key, recovery |
 
 Steps 1–4 are the everyday loop. Step 5 is for when the answer should land in a
-real file in a real repository.
+real file in a real repository. The three tools are unnumbered because they are
+not part of the sequence.
 
 You can move between steps freely; the document you loaded in step 2 stays
 loaded through step 3, which is deliberate. An earlier version kept a separate
@@ -53,8 +57,7 @@ created inside it at `.specshield\vault.bin`.
 
 - **It cannot be recovered.** Nothing about it is stored anywhere. Lose it and
   every twin you have produced becomes unrestorable, permanently.
-- The app has no backup or escrow screen yet. Use the command line to make one
-  today — see §9.
+- Make a backup and an escrow today, on the **Vault** tab (§11).
 
 **Alias style** is fixed at creation:
 
@@ -297,52 +300,117 @@ the branch if SpecShield created it.
 
 ---
 
-## 9. What the app cannot do yet
+## 9. Whole-project work
 
-The desktop application is not at parity with the command line. Everything below
-works today — through `specshield` on the command line, in the same project
-folder, against the same vault.
+Everything in §3–§6 handles one document. The **Whole project** tab handles the
+repository, and runs the same pipeline the command line does.
 
-### Missing from the app entirely
+### Index and rescan
 
-| Capability | Requirement | Command line |
-|---|---|---|
-| **Vault backup and restore** | FR-11 | `specshield backup`, `restore-vault` |
-| **Key escrow export and use** | FR-11 | `specshield escrow`, `escrow-open` |
-| **Re-key** — regenerate every alias | FR-11 | `specshield rekey --confirm` |
-| **Read-only recovery** for a vault that will not open | SDD §16 | `specshield recover` |
-| **Audit log view and CSV export** | FR-9 | `specshield audit --csv` |
-| **Whole-project twin export** | — | `specshield index`, `specshield export` |
-| **Index and staleness tracking** | SDD §13.1 | `specshield index`, `rescan` |
-| **Cross-artifact unification** | SDD §5 | `specshield unify` |
-| **Standalone gate over a file** | SDD §8 | `specshield verify` |
+**Index project** walks the tree, hashes every file, and records the checksums.
+`.gitignore` and `.specshieldignore` are both respected — the second is for
+things git tracks but you never want in a twin, like a committed vendor tree.
 
-The first four matter most. **Backup, escrow, and re-key are the operations that
-make a lost or over-shared vault survivable**, and none of them is reachable
-without the command line. Do the backup and escrow now:
+**Rescan** says what moved, and — the point of the exercise — which recorded
+twins are now **stale**. A stale twin was made from content that no longer
+exists, and a patch built from one can apply *cleanly* while silently reverting
+whatever was edited in between.
 
-```bash
-cd C:\work\billing
-set SPECSHIELD_PASSPHRASE=your-passphrase
-specshield backup ..\billing.vault.backup
-specshield escrow ..\billing.escrow --escrow-passphrase "held by security"
+### Export a twin project
+
+Sanitizes every file into a new directory. Filenames and directories are aliased
+too, consistently with the imports inside the files, so the twin still resolves
+as a project:
+
+```
+src/domain/customer-subscription.ts   →   src/domain/PATH_4Y1B5S.ts
+import "../domain/customer-subscription"  →  import "../domain/PATH_4Y1B5S"
 ```
 
-The audit log is the artifact a security team asks for. It exists and is being
-written on every operation — it simply has no screen yet.
+**Nothing is written unless every file passes the gate.** A directory that is
+clean apart from one leak is not clean, so a blocked export leaves no partial
+tree behind.
 
-### Structural limits
+**Restore a twin project** is the inverse: every file back at its real path. It
+works only because the vault recorded the mapping when the twin was exported.
 
-- **No file picker.** The app works on text you paste. The only place it touches
-  a file on disk is step 5, where the filename is resolved relative to the
-  project folder.
-- **One document at a time.** There is no project-wide view.
+### Cross-artifact concepts
 
-### What the app has that the command line does not
+The SQL table, the OpenAPI schema, and the TypeScript DTO can be one thing seen
+from three sides. Confirming a concept gives them a shared alias *suffix* with
+different prefixes — `DB_TABLE_MS7JMB`, `DTO_MS7JMB` — so a model sees the
+connection while restore stays unambiguous.
 
-- **The allowlist.** "Never alias" has no command-line equivalent.
-- **Hardened clipboard copy**, with the Windows history and cloud-sync flags. The
-  command line writes to a file or to standard output.
+**Nothing is unified without confirmation.** A name match is not evidence: three
+unrelated `Status` enums share a name and are three different things.
+
+Confirming re-derives the affected aliases, which orphans any twin already sent.
+
+### Check anything
+
+Runs the export gate over text that did not come from Sanitize — a file edited by
+hand, or a fragment about to be pasted somewhere.
+
+If it says **nothing was checked**, that is not the same as clean: the project has
+no identities yet, so the gate had nothing to look for. A dictionary term is not
+enough — a name is interned the first time it is aliased.
+
+---
+
+## 10. Audit log
+
+Everything the application recorded: when, which operation, how many files and
+entities, the verification result, and where the output went. **No names, no
+content**, never transmitted, and not telemetry — there is none.
+
+**Export CSV** writes it beside the vault for compliance review.
+
+It holds nothing sensitive, which is why it is still readable in recovery mode
+when the vault itself will not open.
+
+---
+
+## 11. Vault
+
+The operations that make a lost or over-shared vault survivable. Do the first two
+today.
+
+**Backup** makes a consistent encrypted copy, opened by the same passphrase. It
+is not a second factor: whoever has it and the passphrase has the whole mapping.
+**Restore** never writes over an existing vault, and proves the backup opens
+before the destination exists.
+
+**Key escrow** seals this vault's passphrase under a second, separate one. Give
+it to whoever holds recovery responsibility. They can then get back in without
+knowing your passphrase — and also all the way in: there is no partial access,
+and an escrow file cannot be revoked once issued.
+
+**Re-key** changes every alias in the project. Every twin already shared stops
+resolving, which is the point when one has escaped and a disaster otherwise. It
+is behind a consent checkbox, and it clears the session's twin because that twin
+no longer restores.
+
+**Recovery** is for a vault that will not open. It needs no passphrase, reveals
+no real name, and cannot modify the file it inspects. It tells you whether the
+problem is a wrong passphrase, a corrupt file, or a vault from a newer build, and
+reports what the vault still holds.
+
+---
+
+## 12. Differences from the command line
+
+The application now covers everything the command line does, except one thing:
+
+- **`specshield report`** measures detection recall and precision against the
+  committed golden corpus. It is a CI tool, not a user feature, and there is
+  nothing for it to do inside a project.
+
+Two things exist only in the application, because they only make sense here:
+
+- **"Never alias"** on a scan suggestion, and hardened clipboard copy.
+
+One structural limit remains: **there is no file picker.** The app works on text
+you paste, and paths you type are resolved against the project folder.
 
 ---
 

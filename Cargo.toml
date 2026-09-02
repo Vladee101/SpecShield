@@ -5,6 +5,7 @@ members = [
     "crates/parsers",
     "crates/vault",
     "crates/index",
+    "crates/project",
     "crates/git",
     "crates/cli",
     "spikes/ts-rename",
@@ -24,6 +25,7 @@ specshield-core = { path = "crates/core" }
 specshield-parsers = { path = "crates/parsers" }
 specshield-vault = { path = "crates/vault" }
 specshield-index = { path = "crates/index" }
+specshield-project = { path = "crates/project" }
 specshield-git = { path = "crates/git" }
 
 anyhow = "1"

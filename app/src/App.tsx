@@ -16,7 +16,13 @@ import {
   api,
   type AppliedPatch,
   type AuditRow,
+  type ExportSummary,
+  type IndexSummary,
   type RecoveryReport,
+  type RescanSummary,
+  type RestoredProject,
+  type UnifyProposal,
+  type VerifyResult,
   type DiffReview,
   type EntityType,
   type PatchStatus,
@@ -33,7 +39,7 @@ type Step = "project" | "review" | "verify" | "restore" | "apply";
 /// Everything that is not a workflow step. Kept visually separate: an audit log
 /// is not step six of sanitizing a document, and numbering it alongside the
 /// others would say it was.
-type Tool = "audit" | "vault";
+type Tool = "project-ops" | "audit" | "vault";
 
 type Screen = Step | Tool;
 
@@ -46,8 +52,9 @@ const STEP_LABELS: Record<Step, string> = {
   apply: "Diff & apply",
 };
 
-const TOOLS: Tool[] = ["audit", "vault"];
+const TOOLS: Tool[] = ["project-ops", "audit", "vault"];
 const TOOL_LABELS: Record<Tool, string> = {
+  "project-ops": "Whole project",
   audit: "Audit log",
   vault: "Vault",
 };
@@ -175,6 +182,17 @@ export function App() {
       )}
       {step === "restore" && project && <RestorePanel onError={setError} />}
       {step === "apply" && project && <DiffPanel doc={doc} twin={twin} onError={setError} />}
+      {step === "project-ops" && project && (
+        <ProjectOpsPanel
+          onError={setError}
+          onChanged={() => {
+            // Export and unification both re-derive aliases, so the session's
+            // twin may no longer restore and the header count is stale.
+            setTwin(null);
+            void refresh();
+          }}
+        />
+      )}
       {step === "audit" && project && <AuditPanel onError={setError} />}
       {step === "vault" && project && (
         <VaultPanel
@@ -1503,6 +1521,416 @@ function RecoverySection({ onError }: { onError: (e: string | null) => void }) {
             </>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whole-project operations — Workflow B's first half, and the pieces that were
+ * command-line only.
+ *
+ * Index and rescan, twin export, cross-artifact unification, and a standalone
+ * gate. All of it runs the same `specshield-project` pipeline the CLI runs;
+ * this screen only decides how to say what happened.
+ */
+function ProjectOpsPanel({ onError, onChanged }: { onError: (e: string | null) => void; onChanged: () => void }) {
+  return (
+    <>
+      <IndexSection onError={onError} />
+      <ExportSection onError={onError} onChanged={onChanged} />
+      <UnifySection onError={onError} onChanged={onChanged} />
+      <VerifySection onError={onError} />
+    </>
+  );
+}
+
+function IndexSection({ onError }: { onError: (e: string | null) => void }) {
+  const [indexed, setIndexed] = useState<IndexSummary | null>(null);
+  const [rescan, setRescan] = useState<RescanSummary | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Index</h3>
+      <p className="muted small">
+        Walks the project, hashes every file, and records the checksums. Respects{" "}
+        <span className="mono">.gitignore</span> and{" "}
+        <span className="mono">.specshieldignore</span>. The checksums are what
+        later tell you a twin was made from content that no longer exists.
+      </p>
+
+      <div className="row">
+        <button
+          className="primary"
+          disabled={busy}
+          onClick={async () => {
+            onError(null);
+            setBusy(true);
+            setRescan(null);
+            try {
+              setIndexed(await api.indexProject());
+            } catch (e) {
+              onError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Index project
+        </button>
+        <button
+          disabled={busy}
+          onClick={async () => {
+            onError(null);
+            setBusy(true);
+            try {
+              setRescan(await api.rescanProject());
+            } catch (e) {
+              onError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Rescan
+        </button>
+      </div>
+
+      {indexed && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <strong>{indexed.files} file(s) in {indexed.seconds.toFixed(2)}s.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            {indexed.text} text, {indexed.parseable} with a parser in this build,{" "}
+            {indexed.files - indexed.parseable} binary or unparseable.
+          </div>
+        </div>
+      )}
+
+      {rescan && (
+        <div className={`banner ${rescan.stale.length > 0 ? "warn" : "ok"}`} style={{ marginTop: 10 }}>
+          <strong>
+            {rescan.added.length} added, {rescan.modified.length} modified,{" "}
+            {rescan.removed.length} removed, {rescan.unchanged} unchanged.
+          </strong>
+          {rescan.stale.length === 0 ? (
+            <div className="small" style={{ marginTop: 4 }}>
+              No stale twins: every recorded checksum still matches the file on disk.
+            </div>
+          ) : (
+            <div className="small" style={{ marginTop: 4 }}>
+              {rescan.stale.length} file(s) have changed since their twin was made. A patch
+              built from those twins would revert the intervening edits — re-sanitize first.
+              <div className="mono" style={{ marginTop: 6 }}>
+                {rescan.stale.slice(0, 20).join(", ")}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExportSection({ onError, onChanged }: { onError: (e: string | null) => void; onChanged: () => void }) {
+  const [dest, setDest] = useState("../project-twin");
+  const [result, setResult] = useState<ExportSummary | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [twinIn, setTwinIn] = useState("../project-twin");
+  const [restoreTo, setRestoreTo] = useState("../project-restored");
+  const [restored, setRestored] = useState<RestoredProject | null>(null);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Export a twin project</h3>
+      <p className="muted small">
+        Sanitizes every file into a new directory, filenames and directories included and
+        consistent with the imports inside the files — so the twin still resolves as a
+        project. Nothing is written unless <em>every</em> file passes the gate: a directory
+        that is clean apart from one leak is not clean.
+      </p>
+
+      <div className="row">
+        <input className="grow mono" value={dest} onChange={(e) => setDest(e.target.value)} />
+        <button
+          className="primary"
+          disabled={busy}
+          onClick={async () => {
+            onError(null);
+            setBusy(true);
+            try {
+              setResult(await api.exportProject(dest));
+              onChanged();
+            } catch (e) {
+              setResult(null);
+              onError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Working…" : "Export"}
+        </button>
+      </div>
+
+      {result && result.blocked.length > 0 && (
+        <div className="banner block" style={{ marginTop: 10 }}>
+          <strong>Export blocked — nothing was written.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            {result.blocked.length} file(s) did not verify.
+          </div>
+          <div className="scroll" style={{ marginTop: 8 }}>
+            <table>
+              <tbody>
+                {result.blocked.map(([path, leaks]) => (
+                  <tr key={path}>
+                    <td className="mono small">{path}</td>
+                    <td className="small error">{leaks.slice(0, 3).join("; ")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <h4>Restore a twin project</h4>
+      <p className="muted small">
+        The inverse: every file back at its real path. Only reversible because the vault
+        recorded the mapping when the twin was exported.
+      </p>
+      <div className="row">
+        <input
+          className="grow mono"
+          value={twinIn}
+          onChange={(e) => setTwinIn(e.target.value)}
+          placeholder="the twin directory"
+        />
+        <input
+          className="grow mono"
+          value={restoreTo}
+          onChange={(e) => setRestoreTo(e.target.value)}
+          placeholder="where to put it back"
+        />
+        <button
+          disabled={busy}
+          onClick={async () => {
+            onError(null);
+            setBusy(true);
+            try {
+              setRestored(await api.restoreProject(twinIn, restoreTo));
+            } catch (e) {
+              setRestored(null);
+              onError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          Restore project
+        </button>
+      </div>
+
+      {restored && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <strong>
+            {restored.written} file(s) into {restored.destination}.
+          </strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            {restored.aliases_resolved} alias occurrence(s) resolved.{" "}
+            {restored.unmapped.length === 0
+              ? "Every twin path mapped back to a real path."
+              : `${restored.unmapped.length} file(s) had no path mapping and were left where they stand.`}
+          </div>
+        </div>
+      )}
+
+      {result && result.blocked.length === 0 && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <strong>{result.written} file(s) written to {result.destination}.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            {result.aliased} alias applications, {result.identities} identities in the vault,{" "}
+            {result.renamed} path(s) renamed. Every file passed the gate, paths included.
+            <br />
+            {result.unchecked} file(s) had no structure to verify against.
+            {result.abandoned.length === 0
+              ? " Every parsed file verified structurally."
+              : ` ${result.abandoned.length} file(s) exported UNALIASED — aliasing was abandoned.`}
+          </div>
+          {result.abandoned.length > 0 && (
+            <div className="mono small" style={{ marginTop: 6 }}>
+              {result.abandoned.map(([path, why]) => `${path}: ${why}`).join("\n")}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UnifySection({ onError, onChanged }: { onError: (e: string | null) => void; onChanged: () => void }) {
+  const [proposals, setProposals] = useState<UnifyProposal[] | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    onError(null);
+    try {
+      setProposals(await api.unifyProposals());
+    } catch (e) {
+      setProposals(null);
+      onError(String(e));
+    }
+  }, [onError]);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Cross-artifact concepts</h3>
+      <p className="muted small">
+        The SQL table, the OpenAPI schema, and the TypeScript DTO can be one thing seen
+        from three sides. Confirming a concept gives them a shared alias suffix with
+        different prefixes, so a model sees the connection while restore stays
+        unambiguous.
+      </p>
+      <p className="muted small">
+        <strong>Nothing is unified without confirmation.</strong> A name match is not
+        evidence — three unrelated <span className="mono">Status</span> enums share a name
+        and are three different things.
+      </p>
+
+      <div className="row">
+        <button onClick={() => void load()}>Find proposals</button>
+      </div>
+
+      {proposals && proposals.length === 0 && (
+        <p className="muted small" style={{ marginTop: 10 }}>
+          No proposals. One needs a compatible pair of <em>different</em> kinds — a table
+          and a DTO, a service and an API. Identities sharing a name and a kind are a
+          collision, not a concept.
+        </p>
+      )}
+
+      {proposals?.map((p) => (
+        <div key={p.concept} className="hunk" style={{ marginTop: 10 }}>
+          <div className="hunk-head small">
+            <span className="mono">{p.concept}</span>{" "}
+            <span className="muted">confidence {p.confidence.toFixed(2)}</span>
+          </div>
+          <table>
+            <tbody>
+              {p.members.map((m, i) => (
+                <tr key={i}>
+                  <td className="mono">{m.entity_type}</td>
+                  <td className="mono">{m.real_name}</td>
+                  <td className="muted small">{m.scope_path}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {p.caveat && <div className="note fuzzy">{p.caveat}</div>}
+          <div className="row" style={{ padding: "8px 10px" }}>
+            <button
+              onClick={async () => {
+                onError(null);
+                try {
+                  const [linked, changed] = await api.unifyConfirm(p.concept);
+                  setOutcome(
+                    `Linked ${linked} identities as "${p.concept}". ${changed} alias(es) re-derived.`,
+                  );
+                  onChanged();
+                  await load();
+                } catch (e) {
+                  onError(String(e));
+                }
+              }}
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {outcome && (
+        <div className="banner warn" style={{ marginTop: 10 }}>
+          <strong>{outcome}</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            Those aliases changed, so any twin already sent to a model is orphaned — its
+            aliases no longer resolve. Re-sanitize before the next request.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VerifySection({ onError }: { onError: (e: string | null) => void }) {
+  const [content, setContent] = useState("");
+  const [result, setResult] = useState<VerifyResult | null>(null);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Check anything</h3>
+      <p className="muted small">
+        Runs the export gate over text that did not come from Sanitize — something edited
+        by hand, or a fragment about to be pasted somewhere.
+      </p>
+
+      <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="Paste anything…" />
+      <div className="row" style={{ marginTop: 10 }}>
+        <button
+          disabled={!content}
+          onClick={async () => {
+            onError(null);
+            try {
+              setResult(await api.verifyText(content));
+            } catch (e) {
+              setResult(null);
+              onError(String(e));
+            }
+          }}
+        >
+          Check
+        </button>
+      </div>
+
+      {result && result.patterns_checked === 0 && (
+        <div className="banner warn" style={{ marginTop: 10 }}>
+          <strong>Nothing was checked.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            This project has no identities yet, so the gate had nothing to look for. A
+            dictionary term is not enough — a name is interned the first time it is
+            aliased. Sanitize or export something first.
+          </div>
+        </div>
+      )}
+
+      {result && result.patterns_checked > 0 && (
+        <div className={`banner ${result.clean ? "ok" : "block"}`} style={{ marginTop: 10 }}>
+          <strong>
+            {result.clean
+              ? `Clean — ${result.patterns_checked} patterns checked.`
+              : "Not clean."}
+          </strong>
+          {result.leaks.length > 0 && (
+            <table style={{ marginTop: 8 }}>
+              <thead><tr><th>Leaked</th><th>Line</th><th>Column</th></tr></thead>
+              <tbody>
+                {result.leaks.map((l, i) => (
+                  <tr key={i}>
+                    <td className="mono error">{l.matched}</td>
+                    <td className="muted">{l.line}</td>
+                    <td className="muted">{l.column}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {result.secrets.length > 0 && (
+            <div className="small" style={{ marginTop: 6 }}>
+              {result.secrets.length} secret(s) found:{" "}
+              {result.secrets.map((s) => `${s.secret_type} (line ${s.line})`).join(", ")}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

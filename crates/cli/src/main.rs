@@ -10,17 +10,17 @@
 
 mod report;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use specshield_core::alias::{AliasStyle, ProjectKey};
-use specshield_core::detect::Detector;
-use specshield_core::model::{EntityType, Origin, Status};
+use specshield_core::alias::AliasStyle;
+use specshield_core::model::EntityType;
 use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::Graph;
 use specshield_core::{restore, sanitize, secrets, verify};
+use specshield_project as project;
+use specshield_project::{context_from, detector_from, graph_from, persist};
 use specshield_vault as vault;
 use zeroize::Zeroize;
 
@@ -63,6 +63,22 @@ enum Command {
         name: String,
         #[arg(long, value_enum, default_value_t = EntityTypeArg::Organization)]
         entity_type: EntityTypeArg,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Mark a term as never-alias — PRD FR-10.
+    ///
+    /// The other half of the dictionary: `term` says "this is proprietary,
+    /// always alias it", and this says "this is a false positive, leave it
+    /// alone". Precision is a first-class target — a twin full of aliased
+    /// common words is unreadable, and measurably degrades the model's output.
+    Allow {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        term: String,
+        #[arg(long)]
+        reason: Option<String>,
         #[arg(long)]
         passphrase: Option<String>,
     },
@@ -408,6 +424,12 @@ fn main() -> Result<()> {
             entity_type,
             passphrase,
         } => add_term(&project, &name, entity_type.into(), passphrase.as_deref()),
+        Command::Allow {
+            project,
+            term,
+            reason,
+            passphrase,
+        } => run_allow(&project, &term, reason.as_deref(), passphrase.as_deref()),
         Command::Scan {
             project,
             file,
@@ -566,165 +588,6 @@ fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
     })
 }
 
-/// Rebuild the in-memory graph from stored identities, so aliases stay stable
-/// across invocations (SDD §6.5).
-fn graph_from(vault: &vault::Vault) -> Result<Graph> {
-    let settings = vault.settings()?;
-    let style = alias_style(&settings.alias_style);
-    let mut settings = settings;
-    let mut graph = Graph::new(ProjectKey::take_bytes(&mut settings.project_key), style);
-    let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
-    for stored in vault.identities()? {
-        let entity_type: EntityType = stored
-            .entity_type
-            .parse()
-            .with_context(|| format!("vault holds unknown entity type {:?}", stored.entity_type))?;
-        if let Some(concept) = concepts.get(&stored.uuid) {
-            graph.confirm_concept(
-                &[specshield_core::model::IdentityKey::new(
-                    &stored.scope_path,
-                    entity_type,
-                    &stored.real_name,
-                )],
-                concept,
-            );
-        }
-        graph.restore_node(
-            &specshield_core::model::IdentityKey::new(&stored.scope_path, entity_type, &stored.real_name),
-            &stored.uuid,
-            &stored.alias,
-            Origin::Detected,
-            Status::Active,
-        );
-    }
-    Ok(graph)
-}
-
-/// What the project knows, for parsers that cannot resolve everything from one
-/// file — see `ProjectContext`.
-fn context_from(vault: &vault::Vault) -> Result<specshield_core::parser::ProjectContext> {
-    let identities = vault.identities()?;
-    let members = identities
-        .iter()
-        .filter(|i| i.entity_type == EntityType::Column.prefix())
-        .map(|i| i.real_name.clone());
-    let names = identities.iter().map(|i| i.real_name.clone());
-    Ok(specshield_core::parser::ProjectContext::new(members, names))
-}
-
-/// The same context, but from the graph as it stands mid-run rather than from
-/// the vault. The path pass needs what the *content* passes just learned, and
-/// that is not in the vault until `persist`.
-fn context_from_graph(graph: &Graph) -> specshield_core::parser::ProjectContext {
-    let members = graph
-        .nodes()
-        .filter(|n| n.key.entity_type == EntityType::Column)
-        .map(|n| n.key.real_name.clone());
-    let names = graph.nodes().map(|n| n.key.real_name.clone());
-    specshield_core::parser::ProjectContext::new(members, names)
-}
-
-/// Intern every path segment that is an entity, and return the twin path for
-/// each real path — PRD FR-3b.
-///
-/// Run after the content passes, so `thing18.ts` can be recognised as naming
-/// the `Thing18` those passes found. The identities are the same ones the
-/// TypeScript parser uses for import specifiers (`specshield_core::paths`), so
-/// a renamed file and every import of it agree by construction.
-fn twin_paths(
-    index: &specshield_index::Index,
-    detector: &Detector,
-    graph: &mut Graph,
-) -> Result<HashMap<String, String>> {
-    use specshield_core::paths::Component;
-
-    let context = context_from_graph(graph);
-    let mut out = HashMap::new();
-
-    for path in index.files.keys() {
-        let mut failed = None;
-        let twin = specshield_core::paths::twin_path(path, &context, |component| match component {
-            Component::Segment { key, suffix } => {
-                format!("{}{suffix}", graph.intern(key, Origin::Detected).alias)
-            }
-            // Sanitizing the component as if it were a document is not a trick:
-            // it is the same call the file's *contents* go through, which is
-            // exactly why the tree and the import strings come out agreeing.
-            Component::Text { text, suffix } => match sanitize::sanitize(
-                text,
-                specshield_core::paths::PATH_SCOPE,
-                detector,
-                graph,
-                None,
-                &context,
-            ) {
-                Ok(result) => format!("{}{suffix}", result.twin),
-                Err(e) => {
-                    failed = Some(e);
-                    format!("{text}{suffix}")
-                }
-            },
-        });
-
-        if let Some(e) = failed {
-            return Err(e).with_context(|| format!("aliasing the path {path}"));
-        }
-        out.insert(path.clone(), twin);
-    }
-
-    Ok(out)
-}
-
-fn detector_from(vault: &vault::Vault) -> Result<Detector> {
-    let mut detector = Detector::new();
-
-    // Names learned from any artifact are found in every artifact — SDD §5.
-    //
-    // The SQL scan interns the table `invoice`; the OpenAPI spec then says
-    // "Fetch a single invoice" in a summary and the gate blocks, because the
-    // vault knows that name and the twin still contains it. Seeding the detector
-    // with what the project already knows is what makes a name consistent
-    // across files rather than per-file.
-    //
-    // It aliases common words that happen to be table names — `invoice`,
-    // `account` — wherever they appear. That is the safe direction, and PRD
-    // FR-10's allowlist is the escape hatch for a user who disagrees.
-    for identity in vault.identities()? {
-        if let Ok(entity_type) = identity.entity_type.parse() {
-            detector = detector.with_term(identity.real_name, entity_type);
-        }
-    }
-
-    for (name, type_name) in vault.dictionary()? {
-        let entity_type: EntityType = type_name
-            .parse()
-            .with_context(|| format!("dictionary holds unknown entity type {type_name:?}"))?;
-        detector = detector.with_term(name, entity_type);
-    }
-    for term in vault.allowlist()? {
-        detector = detector.with_allowed(term);
-    }
-    Ok(detector)
-}
-
-/// Write the graph back. Identities are upserted in one transaction — SDD §9.2.
-fn persist(vault: &mut vault::Vault, graph: &Graph) -> Result<()> {
-    let identities: Vec<vault::StoredIdentity> = graph
-        .nodes()
-        .map(|n| vault::StoredIdentity {
-            uuid: n.uuid.to_string(),
-            scope_path: n.key.scope_path.clone(),
-            entity_type: n.key.entity_type.prefix().to_owned(),
-            real_name: n.key.real_name.clone(),
-            alias: n.alias.clone(),
-            origin: "detected".to_owned(),
-            status: "active".to_owned(),
-        })
-        .collect();
-    vault.put_identities(&identities)?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
@@ -798,6 +661,22 @@ fn require_parser(file: &Path, content: &str) -> Result<Box<dyn specshield_core:
             specshield_parsers::implemented().join(", ")
         ),
     }
+}
+
+/// PRD FR-10 — the allowlist.
+///
+/// The other half of the dictionary. `term` says "this is proprietary, always
+/// alias it"; this says "this is a false positive, leave it alone". Precision is
+/// a first-class target: a twin full of aliased common words is unreadable, and
+/// measurably degrades the output generated from it.
+fn run_allow(project: &Path, term: &str, reason: Option<&str>, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    vault.add_allowed(term, reason)?;
+    vault.log("allow.add", None, Some(1), None, None)?;
+
+    println!("{term:?} will never be aliased in this project.");
+    println!("{} term(s) on the allowlist.", vault.allowlist()?.len());
+    Ok(())
 }
 
 fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
@@ -988,52 +867,18 @@ fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()>
 /// is written where it stands rather than guessed at — the alias grammar is
 /// recognisable, but a filename that merely looks like one is not evidence.
 fn restore_project(vault: &vault::Vault, twin_root: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        bail!("{} already exists — refusing to write into it", dest.display());
-    }
+    let result = project::restore_project(vault, twin_root, dest)?;
 
-    let graph = graph_from(vault)?;
-    let vocabulary = Vocabulary::new(graph.vocabulary());
-
-    let real_of: HashMap<String, String> = vault.files()?.into_iter().map(|f| (f.twin_path, f.path)).collect();
-
-    let index = specshield_index::Index::build(twin_root)?;
-    let mut written = 0usize;
-    let mut unmapped = Vec::new();
-    let mut restored = 0usize;
-
-    for entry in index.files.values() {
-        let source = twin_root.join(&entry.path);
-        let target_relative = real_of.get(&entry.path).cloned().unwrap_or_else(|| {
-            unmapped.push(entry.path.clone());
-            entry.path.clone()
-        });
-
-        if !entry.is_text {
-            write_into(dest, &target_relative, |target| {
-                std::fs::copy(&source, target).map(|_| ())
-            })?;
-            written += 1;
-            continue;
-        }
-
-        let text = std::fs::read_to_string(&source)?;
-        let outcome = restore::restore(&text, &vocabulary);
-        restored += outcome.restored.len();
-        write_into(dest, &target_relative, |target| std::fs::write(target, &outcome.text))?;
-        written += 1;
-    }
-
-    println!("Restored {written} file(s) into {}", dest.display());
-    println!("  {restored} alias occurrence(s) resolved");
-    if unmapped.is_empty() {
+    println!("Restored {} file(s) into {}", result.written, dest.display());
+    println!("  {} alias occurrence(s) resolved", result.aliases_resolved);
+    if result.unmapped.is_empty() {
         println!("  every twin path mapped back to a real path");
     } else {
         println!(
             "  {} file(s) the vault has no path mapping for, left where they stand:",
-            unmapped.len()
+            result.unmapped.len()
         );
-        for path in unmapped.iter().take(20) {
+        for path in result.unmapped.iter().take(20) {
             println!("      {path}");
         }
     }
@@ -1093,34 +938,15 @@ fn run_index(project: &Path, explicit: Option<&str>) -> Result<()> {
     let mut vault = open(project, explicit)?;
 
     let started = std::time::Instant::now();
-    let index = specshield_index::Index::build(project)?;
+    let index = project::index_project(project, &mut vault)?;
     let walked = started.elapsed();
 
-    let files: Vec<vault::StoredFile> = index
+    let text = index.text_files().count();
+    let parseable = index
         .files
         .values()
-        .map(|entry| vault::StoredFile {
-            path: entry.path.clone(),
-            // Path aliasing has not run yet. The twin path is the real path
-            // until something renames it, and saying so is better than storing
-            // an empty column that later reads as "no twin".
-            twin_path: entry.path.clone(),
-            checksum: entry.checksum.clone(),
-            parser: parser_for(project, entry),
-        })
-        .collect();
-
-    vault.put_files(&files)?;
-    vault.log(
-        "index",
-        Some(i64::try_from(files.len()).unwrap_or(i64::MAX)),
-        None,
-        None,
-        None,
-    )?;
-
-    let text = index.text_files().count();
-    let parseable = files.iter().filter(|f| !f.parser.is_empty()).count();
+        .filter(|e| !project::parser_for(project, e).is_empty())
+        .count();
 
     println!("Indexed {} file(s) in {:.2}s", index.len(), walked.as_secs_f64());
     println!("  {text} text, {parseable} with a parser in this build");
@@ -1131,47 +957,13 @@ fn run_index(project: &Path, explicit: Option<&str>) -> Result<()> {
 /// Re-walk and say what moved — SDD §13.1.
 fn run_rescan(project: &Path, explicit: Option<&str>) -> Result<()> {
     let mut vault = open(project, explicit)?;
-
-    let recorded = vault.files()?;
-    if recorded.is_empty() {
+    if vault.files()?.is_empty() {
         bail!("no index for this project yet — run `specshield index` first");
     }
 
-    let previous = specshield_index::Index {
-        root: project.to_path_buf(),
-        files: recorded
-            .iter()
-            .map(|f| {
-                (
-                    f.path.clone(),
-                    specshield_index::Entry {
-                        path: f.path.clone(),
-                        checksum: f.checksum.clone(),
-                        size: 0,
-                        modified: None,
-                        is_text: true,
-                    },
-                )
-            })
-            .collect(),
-    };
-
     let started = std::time::Instant::now();
-    let (index, changes) = previous.rescan(project)?;
+    let (index, changes, stale) = project::rescan_project(project, &mut vault)?;
     let elapsed = started.elapsed();
-
-    let updated: Vec<vault::StoredFile> = index
-        .files
-        .values()
-        .map(|entry| vault::StoredFile {
-            path: entry.path.clone(),
-            twin_path: entry.path.clone(),
-            checksum: entry.checksum.clone(),
-            parser: parser_for(project, entry),
-        })
-        .collect();
-    vault.put_files(&updated)?;
-    vault.forget_files(&changes.removed)?;
 
     println!("Rescanned {} file(s) in {:.2}s", index.len(), elapsed.as_secs_f64());
     println!(
@@ -1196,13 +988,15 @@ fn run_rescan(project: &Path, explicit: Option<&str>) -> Result<()> {
     }
 
     // The point of the exercise: which twins can no longer be trusted.
-    let pairs: Vec<(String, String)> = recorded.into_iter().map(|f| (f.path, f.checksum)).collect();
-    let stale = index.stale(&pairs);
     if stale.is_empty() {
-        println!("\nNo stale twins: every recorded checksum still matches the file on disk.");
+        println!(
+            "
+No stale twins: every recorded checksum still matches the file on disk."
+        );
     } else {
         println!(
-            "\n{} file(s) have changed since their twin was made. Applying a patch",
+            "
+{} file(s) have changed since their twin was made. Applying a patch",
             stale.len()
         );
         println!("built from those twins would revert the intervening edits — re-sanitize first:");
@@ -1213,43 +1007,23 @@ fn run_rescan(project: &Path, explicit: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Sanitize the whole project into a directory — the M4 twin export.
-///
-/// Every file is written, not only the parseable ones: a twin project that is
-/// missing its `package.json` is not the project. Files no parser handles are
-/// copied through unchanged, and the gate still runs over them — a name in an
-/// unparsed file is a leak exactly like a name in a parsed one.
-/// Place one file in the twin tree, creating the directories it needs.
-fn write_into(dest: &Path, relative: &str, put: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<()> {
-    let target = dest.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    put(&target).with_context(|| format!("writing {}", target.display()))
-}
-
-fn report_export(
-    dest: &Path,
-    written: usize,
-    aliased: usize,
-    identities: usize,
-    unchecked: usize,
-    abandoned: &[(String, String)],
-    renamed: usize,
-) {
-    println!("Exported {} file(s) to {}", written, dest.display());
-    println!("  {aliased} alias applications, {identities} identities in the vault");
+fn report_export(dest: &Path, result: &project::Exported) {
+    println!("Exported {} file(s) to {}", result.written, dest.display());
+    println!(
+        "  {} alias applications, {} identities in the vault",
+        result.aliased, result.identities
+    );
     println!("  every file passed the gate (SDD §8), paths included");
-    println!("  {renamed} path(s) renamed in the twin tree");
-    println!("  {unchecked} file(s) had no structure to verify against");
-    if abandoned.is_empty() {
+    println!("  {} path(s) renamed in the twin tree", result.renamed);
+    println!("  {} file(s) had no structure to verify against", result.unchecked);
+    if result.abandoned.is_empty() {
         println!("  every parsed file verified structurally (SDD §7.2)");
     } else {
         println!(
             "  {} file(s) exported UNALIASED — aliasing was abandoned:",
-            abandoned.len()
+            result.abandoned.len()
         );
-        for (path, why) in abandoned.iter().take(20) {
+        for (path, why) in result.abandoned.iter().take(20) {
             println!("      {path}: {why}");
         }
     }
@@ -1265,245 +1039,17 @@ fn report_blocked(blocked: &[(String, Vec<String>)]) {
     }
 }
 
-/// The first of the export's two passes: sanitize everything and keep only what
-/// it taught the graph.
-///
-/// A single pass has no order that works. `customerId` is declared in the DTO
-/// and merely *used* in the service; whichever file the walk reaches first, the
-/// other one was sanitized by a build that had not learned the name yet — and
-/// the gate, which runs over the finished graph, then blocks on it.
-///
-/// This is the rule that already holds between CLI invocations — a name found
-/// in one artifact is found in every artifact — applied inside one command.
-fn learn_project(
-    project: &Path,
-    index: &specshield_index::Index,
-    vault: &mut vault::Vault,
-    graph: &mut Graph,
-) -> Result<()> {
-    let detector = detector_from(vault)?;
-    let context = context_from(vault)?;
-
-    for entry in index.files.values().filter(|e| e.is_text) {
-        let source_path = project.join(&entry.path);
-        let Ok(source) = std::fs::read_to_string(&source_path) else {
-            continue;
-        };
-        let parser = specshield_parsers::for_document(&source_path, &source);
-        sanitize::sanitize(&source, &entry.path, &detector, graph, parser.as_deref(), &context)?;
-    }
-
-    // Filenames last: `thing18.ts` is only recognisable as naming `Thing18`
-    // once the content pass above has found that type.
-    twin_paths(index, &detector, graph)?;
-
-    persist(vault, graph)
-}
-
-/// What an exported file carries: a sanitized twin, or the original bytes.
-enum Payload {
-    Text(String),
-    /// A binary. Nothing to sanitize and nothing to verify — it carries no
-    /// identifiers a parser or the gate can read — but it is copied so the
-    /// exported tree is still the project.
-    Copy(PathBuf),
-}
-
-/// Everything the sanitize pass produced, held until the gate has run.
-#[derive(Default)]
-struct Twins {
-    staged: Vec<(String, Payload)>,
-    records: Vec<vault::StoredFile>,
-    blocked: Vec<(String, Vec<String>)>,
-    abandoned: Vec<(String, String)>,
-    aliased: usize,
-    unchecked: usize,
-}
-
-/// Sanitize every file in the project, producing twins but writing nothing.
-fn sanitize_tree(
-    project: &Path,
-    index: &specshield_index::Index,
-    detector: &Detector,
-    context: &specshield_core::parser::ProjectContext,
-    graph: &mut Graph,
-    twin_of: &impl Fn(&String) -> String,
-) -> Result<Twins> {
-    let mut twins = Twins::default();
-
-    for entry in index.files.values() {
-        let source_path = project.join(&entry.path);
-
-        if !entry.is_text {
-            twins.records.push(vault::StoredFile {
-                path: entry.path.clone(),
-                twin_path: twin_of(&entry.path),
-                checksum: entry.checksum.clone(),
-                parser: String::new(),
-            });
-            twins.staged.push((entry.path.clone(), Payload::Copy(source_path)));
-            continue;
-        }
-
-        let source =
-            std::fs::read_to_string(&source_path).with_context(|| format!("reading {}", source_path.display()))?;
-        let parser = specshield_parsers::for_document(&source_path, &source);
-
-        let result = sanitize::sanitize(&source, &entry.path, detector, graph, parser.as_deref(), context)?;
-
-        if secrets::blocks_export(&secrets::scan(&result.twin)) {
-            twins
-                .blocked
-                .push((entry.path.clone(), vec!["unredacted secret".to_owned()]));
-            continue;
-        }
-
-        // SDD §7.2. An abandoned file is not a failure — the original is
-        // preserved, which is the correct outcome — but it is a file the model
-        // will see unaliased, and an export that did not say so would be
-        // reporting a clean run it did not have.
-        match &result.verification {
-            sanitize::Verification::Passed => {}
-            sanitize::Verification::TwinDidNotParse { parser } => {
-                twins
-                    .abandoned
-                    .push((entry.path.clone(), format!("twin no longer parses as {parser}")));
-            }
-            sanitize::Verification::StructureChanged { parser, .. } => {
-                twins
-                    .abandoned
-                    .push((entry.path.clone(), format!("{parser} structure changed")));
-            }
-            sanitize::Verification::Unsupported { .. } | sanitize::Verification::NotAttempted => {
-                twins.unchecked += 1;
-            }
-        }
-
-        twins.aliased += result.applied.len();
-        twins.records.push(vault::StoredFile {
-            path: entry.path.clone(),
-            twin_path: twin_of(&entry.path),
-            checksum: entry.checksum.clone(),
-            parser: parser.as_ref().map_or(String::new(), |p| p.name().to_owned()),
-        });
-        twins.staged.push((entry.path.clone(), Payload::Text(result.twin)));
-    }
-
-    Ok(twins)
-}
-
 fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
-    if dest.exists() {
-        bail!("{} already exists — refusing to write into it", dest.display());
-    }
-
     let mut vault = open(project, explicit)?;
-    let index = specshield_index::Index::build(project)?;
+    let result = project::export(project, dest, &mut vault)?;
 
-    let mut graph = graph_from(&vault)?;
-
-    learn_project(project, &index, &mut vault, &mut graph)?;
-
-    let detector = detector_from(&vault)?;
-    let context = context_from(&vault)?;
-    // Every real path to the path it is written under in the twin. Interning
-    // happened in the learning pass; this is the same derivation, so it returns
-    // the aliases already in the graph.
-    let twins = twin_paths(&index, &detector, &mut graph)?;
-    let twin_of = |path: &String| twins.get(path).cloned().unwrap_or_else(|| path.clone());
-
-    let mut twins = sanitize_tree(project, &index, &detector, &context, &mut graph, &twin_of)?;
-
-    // The graph is persisted either way: those aliases were derived, and
-    // throwing them away would hand different aliases to the next run.
-    persist(&mut vault, &graph)?;
-
-    // One gate over the finished graph, not one per file.
-    //
-    // Stronger and faster for the same reason: the vault knows more after the
-    // last file than it did after the first, so a name interned in file 900 is
-    // now checked against file 3's twin — which a per-file scan would have
-    // passed. Building the automaton once also takes the export from minutes to
-    // seconds on a thousand files; it is O(names) to build and the graph grows
-    // with every file.
-    let scanner = verify::LeakScanner::new(graph.real_names());
-    for (path, content) in &twins.staged {
-        let Payload::Text(twin) = content else { continue };
-        if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
-            twins.blocked.push((
-                path.clone(),
-                leaks
-                    .iter()
-                    .map(|l| format!("{}:{} {:?}", l.line, l.column, l.matched))
-                    .collect(),
-            ));
-        }
-    }
-
-    // The tree is part of the export. A directory named after a client leaks
-    // with no identifier in it at all, so the twin path goes through the same
-    // gate the content does.
-    for record in &twins.records {
-        if let verify::Verdict::Blocked(leaks) = scanner.scan(&record.twin_path) {
-            twins.blocked.push((
-                record.path.clone(),
-                leaks
-                    .iter()
-                    .map(|l| format!("twin path {:?} still contains {:?}", record.twin_path, l.matched))
-                    .collect(),
-            ));
-        }
-    }
-
-    if !twins.blocked.is_empty() {
-        vault.log("export", None, None, Some("blocked"), None)?;
-        report_blocked(&twins.blocked);
+    if result.is_blocked() {
+        report_blocked(&result.blocked);
         bail!("nothing was written: a partially clean twin project is not clean");
     }
 
-    // Only now does anything reach the disk. Writing as we went and deleting
-    // the directory on a block would leave "nothing was written" depending on a
-    // cleanup succeeding.
-    let mut written = 0usize;
-    for (path, content) in &twins.staged {
-        write_into(dest, &twin_of(path), |target| match content {
-            Payload::Text(twin) => std::fs::write(target, twin),
-            Payload::Copy(source) => std::fs::copy(source, target).map(|_| ()),
-        })?;
-        written += 1;
-    }
-
-    vault.put_files(&twins.records)?;
-    vault.log(
-        "export",
-        Some(i64::try_from(written).unwrap_or(i64::MAX)),
-        Some(i64::try_from(graph.len()).unwrap_or(i64::MAX)),
-        Some("clean"),
-        Some(&dest.to_string_lossy()),
-    )?;
-
-    let renamed = twins.records.iter().filter(|r| r.path != r.twin_path).count();
-    report_export(
-        dest,
-        written,
-        twins.aliased,
-        graph.len(),
-        twins.unchecked,
-        &twins.abandoned,
-        renamed,
-    );
+    report_export(dest, &result);
     Ok(())
-}
-
-/// Which parser claims this file, or empty. Reads the file only when a parser
-/// might need the content to decide — OpenAPI is a YAML file until you look.
-fn parser_for(project: &Path, entry: &specshield_index::Entry) -> String {
-    if !entry.is_text {
-        return String::new();
-    }
-    let path = project.join(&entry.path);
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    specshield_parsers::for_document(&path, &content).map_or(String::new(), |p| p.name().to_owned())
 }
 
 /// Where an applied patch is kept so `undo` can reverse it.
@@ -1996,10 +1542,8 @@ fn run_rekey(project: &Path, confirm: bool, explicit: Option<&str>) -> Result<()
 
     let mut fresh = [0u8; 32];
     getrandom::fill(&mut fresh).map_err(|e| anyhow::anyhow!("entropy source unavailable: {e}"))?;
-    vault.rotate_project_key(&fresh)?;
+    let changed = project::rotate_key(&vault, &fresh)?;
     fresh.zeroize();
-
-    let changed = rekey(&vault)?;
 
     println!("Re-keyed. {changed} of {before} alias(es) changed.");
     println!();
@@ -2061,41 +1605,13 @@ fn run_recover(project: &Path) -> Result<()> {
 
 fn run_unify(project: &Path, confirm: Option<&str>, explicit: Option<&str>) -> Result<()> {
     let vault = open(project, explicit)?;
-    let stored = vault.identities()?;
-
-    let keys: Vec<specshield_core::model::IdentityKey> = stored
-        .iter()
-        .filter_map(|s| {
-            s.entity_type
-                .parse()
-                .ok()
-                .map(|t| specshield_core::model::IdentityKey::new(&s.scope_path, t, &s.real_name))
-        })
-        .collect();
-
-    let proposals = specshield_core::unify::propose(&keys);
+    let proposals = project::unify_proposals(&vault)?;
 
     if let Some(concept) = confirm {
-        let Some(proposal) = proposals.iter().find(|p| p.concept == concept) else {
+        if !proposals.iter().any(|p| p.concept == concept) {
             bail!("no proposal for concept {concept:?} — run `specshield unify` to list them");
-        };
-        let mut linked = 0;
-        for member in &proposal.members {
-            let Some(found) =
-                vault.find_identity(&member.scope_path, member.entity_type.prefix(), &member.real_name)?
-            else {
-                continue;
-            };
-            vault.put_concept(&found.uuid, concept)?;
-            linked += 1;
         }
-
-        // Re-derive every alias. A stored alias normally wins (SDD §6.5), so
-        // without this the confirmation would apply only to identities interned
-        // *after* it — which is none of them, since `unify` runs on a project
-        // that has already been scanned. The feature would be silently inert.
-        let changed = rekey(&vault)?;
-        vault.log("unify.confirm", None, Some(i64::from(linked)), None, None)?;
+        let (linked, changed) = project::unify_confirm(&vault, concept)?;
 
         println!("Linked {linked} identities as concept {concept:?}.");
         println!("Re-derived {changed} alias(es).");
@@ -2141,61 +1657,6 @@ fn run_unify(project: &Path, confirm: Option<&str>, explicit: Option<&str>) -> R
         println!();
     }
     Ok(())
-}
-
-/// Re-derive every alias in the project — a scoped re-key (SDD §9.5).
-///
-/// Derivation is deterministic, so an identity whose concept did not change
-/// keeps exactly the alias it had. Only members of a newly confirmed concept
-/// move.
-///
-/// Returns how many aliases actually changed, so the caller can warn only when
-/// there is something to warn about.
-fn rekey(vault: &vault::Vault) -> Result<usize> {
-    let settings = vault.settings()?;
-    let style = alias_style(&settings.alias_style);
-    let key = ProjectKey::from_bytes(settings.project_key);
-    let concepts: HashMap<String, String> = vault.concepts()?.into_iter().collect();
-
-    let stored = vault.identities()?;
-    let mut identities: Vec<specshield_core::rekey::Rekeyed> = stored
-        .iter()
-        .filter_map(|s| {
-            let entity_type = s.entity_type.parse().ok()?;
-            Some(specshield_core::rekey::Rekeyed {
-                uuid: s.uuid.clone(),
-                key: specshield_core::model::IdentityKey::new(&s.scope_path, entity_type, &s.real_name),
-                alias: s.alias.clone(),
-                concept: concepts.get(&s.uuid).cloned(),
-            })
-        })
-        .collect();
-
-    let changed = specshield_core::rekey::rederive(&key, style, &mut identities);
-
-    let by_uuid: HashMap<&str, &specshield_core::rekey::Rekeyed> =
-        identities.iter().map(|i| (i.uuid.as_str(), i)).collect();
-    for mut row in stored {
-        let Some(rekeyed) = by_uuid.get(row.uuid.as_str()) else {
-            continue;
-        };
-        if rekeyed.alias != row.alias {
-            row.alias = rekeyed.alias.clone();
-            vault.put_identity(&row)?;
-        }
-    }
-
-    Ok(changed)
-}
-
-/// One place that maps the stored style name to the enum. Three call sites had
-/// their own copy, and a fourth would have been a coin toss.
-fn alias_style(stored: &str) -> AliasStyle {
-    match stored {
-        "opaque" => AliasStyle::Opaque,
-        "pseudonymous" => AliasStyle::Pseudonymous,
-        _ => AliasStyle::Typed,
-    }
 }
 
 /// SDD §11 / PRD FR-6b.

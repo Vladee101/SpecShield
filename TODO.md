@@ -309,27 +309,20 @@ anything that depends on a live vault, and it is the same gap P1-5 describes.
 
 ---
 
-**P2-10. The desktop app is not at parity with the CLI.** Documented in Desktop
-User Guide §9 rather than left to be discovered. Missing from the app entirely:
+**P2-10. Desktop/CLI parity. — DONE.** The app now covers everything the command
+line does except `specshield report`, which measures detection metrics against
+the golden corpus and is a CI tool with nothing to do inside a project.
 
-- **FR-11 — backup, restore, escrow, re-key.** These are the operations that
-  make a lost or over-shared vault survivable, and none is reachable without the
-  command line. This is the most serious of the gaps: the app's users are the
-  ones least likely to open a terminal.
-- **FR-9 — the audit log.** `audit_log` is registered as a command and has a
-  typed wrapper in `api.ts`. It has no screen, so the artifact a security team
-  asks for is unreachable in the product they were shown.
-- **SDD §16 recovery mode**, **SDD §5 unification**, project **index/rescan/
-  export**, and a standalone **verify**.
+The pipeline both surfaces run lives in `crates/project`, so there is one
+implementation rather than two: `graph_from`, `detector_from`, `learn`,
+`twin_paths`, `sanitize_tree`, `export`, `restore_project`, `index_project`,
+`rescan_project`, `unify_*`, and `rekey`. Alias re-derivation is in
+`crates/core/src/rekey.rs` for the same reason. Two copies of either would be two
+chances to drift, and drift means a twin one surface produces cannot be restored
+by the other.
 
-Also structural: no file picker (P1-3), so the app works on pasted text and can
-only address a file on disk in the diff-and-apply step.
-
-Going the other way, the app has two things the CLI does not: the "never alias"
-allowlist, and hardened clipboard copy.
-
-The cheapest meaningful fix is the audit screen — the command already exists.
-FR-11 needs four new commands on the Rust side plus a screen.
+Remaining difference: the app still has no file picker (P1-3), so it works on
+pasted text and resolves typed paths against the project folder.
 
 ---
 

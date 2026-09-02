@@ -6,10 +6,8 @@ SpecShield lets you use a commercial LLM on proprietary material by replacing
 your identifiers with stable aliases, and rewriting the model's answer back into
 real names.
 
-This guide covers the **command line**. For the desktop application, read the
-[Desktop User Guide](Desktop%20User%20Guide.md) — and note its §9, which lists
-what the application cannot do yet. Backup, escrow, re-key, recovery, the audit
-log, and whole-project export are all command-line-only today.
+This guide covers the **command line**. The desktop application does the same
+things through a window — see the [Desktop User Guide](Desktop%20User%20Guide.md).
 
 Read the box below before anything else. It is the one thing that will get
 someone in trouble.
@@ -370,6 +368,7 @@ This is not telemetry. There is none.
 |---|---|
 | `init` | Create a project vault |
 | `term` | Add a name to the dictionary |
+| `allow` | Mark a term never-alias (FR-10) |
 | `scan` | Report what would be detected; write nothing |
 | `sanitize` | Produce and verify a twin for one file |
 | `verify` | Run the export gate over a file; exit 1 on a leak, 2 if nothing could be checked |

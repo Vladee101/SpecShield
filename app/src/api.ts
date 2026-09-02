@@ -154,6 +154,65 @@ export interface AppliedPatch {
   files: number;
 }
 
+export interface IndexSummary {
+  files: number;
+  text: number;
+  parseable: number;
+  seconds: number;
+}
+
+export interface RescanSummary {
+  files: number;
+  added: string[];
+  modified: string[];
+  removed: string[];
+  unchanged: number;
+  /** Files whose recorded twin was made from content that no longer exists. */
+  stale: string[];
+  seconds: number;
+}
+
+export interface ExportSummary {
+  written: number;
+  aliased: number;
+  identities: number;
+  renamed: number;
+  unchecked: number;
+  abandoned: [string, string][];
+  /** Non-empty means nothing was written at all. */
+  blocked: [string, string[]][];
+  destination: string;
+}
+
+export interface RestoredProject {
+  written: number;
+  aliases_resolved: number;
+  /** Twin paths the vault has no mapping for, written where they stand. */
+  unmapped: string[];
+  destination: string;
+}
+
+export interface UnifyMember {
+  entity_type: string;
+  real_name: string;
+  scope_path: string;
+}
+
+export interface UnifyProposal {
+  concept: string;
+  confidence: number;
+  members: UnifyMember[];
+  caveat: string | null;
+}
+
+export interface VerifyResult {
+  clean: boolean;
+  /** Zero means nothing was checked, which is not the same as clean. */
+  patterns_checked: number;
+  leaks: Leak[];
+  secrets: SecretFinding[];
+}
+
 export interface RecoveryReport {
   diagnosis: string;
   readable: boolean;
@@ -241,6 +300,24 @@ export const api = {
 
   /** SDD §16. Takes a path: the case this exists for is a vault that would not open. */
   recoverVault: (path: string) => invoke<RecoveryReport>("recover_vault", { path }),
+
+  // --- Project operations, the same pipeline the CLI runs -----------------
+
+  indexProject: () => invoke<IndexSummary>("index_project"),
+
+  rescanProject: () => invoke<RescanSummary>("rescan_project"),
+
+  exportProject: (dest: string) => invoke<ExportSummary>("export_project", { dest }),
+
+  restoreProject: (twin: string, dest: string) =>
+    invoke<RestoredProject>("restore_project", { twin, dest }),
+
+  unifyProposals: () => invoke<UnifyProposal[]>("unify_proposals"),
+
+  /** Returns [identities linked, aliases changed]. */
+  unifyConfirm: (concept: string) => invoke<[number, number]>("unify_confirm", { concept }),
+
+  verifyText: (content: string) => invoke<VerifyResult>("verify_text", { content }),
 
   supportedFormats: () => invoke<string[]>("supported_formats"),
 };

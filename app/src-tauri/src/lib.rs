@@ -32,6 +32,7 @@ use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::{AUTO_APPLY_CONFIDENCE, Graph};
 use specshield_core::{alias, diff, restore, sanitize, secrets, verify};
 use specshield_git as git;
+use specshield_project as project;
 use specshield_vault as vault;
 use tauri::{Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -64,6 +65,12 @@ impl Serialize for AppError {
 
 impl From<vault::VaultError> for AppError {
     fn from(e: vault::VaultError) -> Self {
+        Self::Message(e.to_string())
+    }
+}
+
+impl From<project::ProjectError> for AppError {
+    fn from(e: project::ProjectError) -> Self {
         Self::Message(e.to_string())
     }
 }
@@ -1071,6 +1078,248 @@ fn alias_style(stored: &str) -> alias::AliasStyle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Project operations — the same pipeline the command line runs
+//
+// Every one of these delegates to `specshield-project`. Two copies of the
+// export pipeline would be two chances to drift, and drift here means a twin
+// produced by one surface cannot be restored by the other.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct IndexSummary {
+    files: usize,
+    text: usize,
+    parseable: usize,
+    seconds: f64,
+}
+
+#[derive(Serialize)]
+struct RescanSummary {
+    files: usize,
+    added: Vec<String>,
+    modified: Vec<String>,
+    removed: Vec<String>,
+    unchanged: usize,
+    /// Files whose recorded twin was made from content that no longer exists —
+    /// SDD §13.1.
+    stale: Vec<String>,
+    seconds: f64,
+}
+
+#[derive(Serialize)]
+struct ExportSummary {
+    written: usize,
+    aliased: usize,
+    identities: usize,
+    renamed: usize,
+    unchecked: usize,
+    abandoned: Vec<(String, String)>,
+    /// Non-empty means nothing was written at all.
+    blocked: Vec<(String, Vec<String>)>,
+    destination: String,
+}
+
+#[derive(Serialize)]
+struct UnifyProposal {
+    concept: String,
+    confidence: f32,
+    members: Vec<UnifyMember>,
+    caveat: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UnifyMember {
+    entity_type: String,
+    real_name: String,
+    scope_path: String,
+}
+
+#[derive(Serialize)]
+struct VerifyResult {
+    /// `false` when a real name survived, or a high-confidence secret is present.
+    clean: bool,
+    /// How many patterns the gate had to look for. Zero means nothing was
+    /// checked, which is not the same as clean.
+    patterns_checked: usize,
+    leaks: Vec<Leak>,
+    secrets: Vec<SecretFinding>,
+}
+
+/// Walk the project and record what is in it — SDD §4.1.
+#[tauri::command]
+fn index_project(state: State<'_, AppState>) -> Result<IndexSummary> {
+    state.with(|vault, root| {
+        let started = std::time::Instant::now();
+        let index = project::index_project(root, vault)?;
+        let seconds = started.elapsed().as_secs_f64();
+
+        let parseable = index
+            .files
+            .values()
+            .filter(|e| !project::parser_for(root, e).is_empty())
+            .count();
+
+        Ok(IndexSummary {
+            files: index.len(),
+            text: index.text_files().count(),
+            parseable,
+            seconds,
+        })
+    })
+}
+
+/// Re-walk and say what moved — SDD §13.1.
+#[tauri::command]
+fn rescan_project(session: State<'_, AppState>) -> Result<RescanSummary> {
+    session.with(|vault, root| {
+        if vault.files()?.is_empty() {
+            return Err(fail("no index for this project yet — index it first"));
+        }
+
+        let started = std::time::Instant::now();
+        let (index, changes, stale) = project::rescan_project(root, vault)?;
+
+        Ok(RescanSummary {
+            files: index.len(),
+            added: changes.added,
+            modified: changes.modified,
+            removed: changes.removed,
+            unchanged: changes.unchanged,
+            stale,
+            seconds: started.elapsed().as_secs_f64(),
+        })
+    })
+}
+
+/// Sanitize the whole project into a twin directory.
+///
+/// Nothing is written unless every file passes the gate: a directory that is
+/// clean apart from one leak is not clean.
+#[tauri::command]
+fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSummary> {
+    state.with(|vault, root| {
+        let destination = resolve(root, &dest);
+        let result = project::export(root, &destination, vault)?;
+
+        Ok(ExportSummary {
+            written: result.written,
+            aliased: result.aliased,
+            identities: result.identities,
+            renamed: result.renamed,
+            unchecked: result.unchecked,
+            abandoned: result.abandoned,
+            blocked: result.blocked,
+            destination: destination.display().to_string(),
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct RestoredProject {
+    written: usize,
+    aliases_resolved: usize,
+    unmapped: Vec<String>,
+    destination: String,
+}
+
+/// Put a whole twin project back at its real paths — the inverse of
+/// `export_project`.
+///
+/// The half of path aliasing that makes it usable: a twin tree whose
+/// directories and filenames are aliases is only reversible because the vault
+/// recorded the mapping.
+#[tauri::command]
+fn restore_project(state: State<'_, AppState>, twin: String, dest: String) -> Result<RestoredProject> {
+    state.with(|vault, root| {
+        let twin_root = resolve(root, &twin);
+        let destination = resolve(root, &dest);
+        let result = project::restore_project(vault, &twin_root, &destination)?;
+
+        Ok(RestoredProject {
+            written: result.written,
+            aliases_resolved: result.aliases_resolved,
+            unmapped: result.unmapped,
+            destination: destination.display().to_string(),
+        })
+    })
+}
+
+/// Cross-artifact unification proposals — SDD §5.
+#[tauri::command]
+fn unify_proposals(state: State<'_, AppState>) -> Result<Vec<UnifyProposal>> {
+    state.with(|vault, _| {
+        Ok(project::unify_proposals(vault)?
+            .into_iter()
+            .map(|p| UnifyProposal {
+                concept: p.concept,
+                confidence: p.confidence,
+                members: p
+                    .members
+                    .iter()
+                    .map(|m| UnifyMember {
+                        entity_type: m.entity_type.prefix().to_owned(),
+                        real_name: m.real_name.clone(),
+                        scope_path: m.scope_path.clone(),
+                    })
+                    .collect(),
+                caveat: p.caveat,
+            })
+            .collect())
+    })
+}
+
+/// Confirm one proposal — SDD §5. Returns `(linked, aliases changed)`.
+///
+/// Nothing is ever unified without this: three unrelated `Status` enums share a
+/// name and are three different things.
+#[tauri::command]
+fn unify_confirm(state: State<'_, AppState>, concept: String) -> Result<(usize, usize)> {
+    let outcome = state.with(|vault, _| Ok(project::unify_confirm(vault, &concept)?));
+
+    // Confirmation re-derives aliases, so the session's twin may no longer
+    // restore. Same reasoning as re-key.
+    if let Ok((_, changed)) = &outcome
+        && *changed > 0
+    {
+        state.set_verified_twin(None);
+    }
+    outcome
+}
+
+/// Run the export gate over arbitrary text — SDD §8.
+///
+/// Standalone, for checking something that did not come from `sanitize` — a
+/// file edited by hand, or a fragment about to be pasted somewhere.
+#[tauri::command]
+fn verify_text(state: State<'_, AppState>, content: String) -> Result<VerifyResult> {
+    state.with(|vault, _| {
+        let graph = project::graph_from(vault)?;
+        let scanner = verify::LeakScanner::new(graph.real_names());
+        let verdict = scanner.scan(&content);
+        let findings = secrets::scan(&content);
+
+        let leaks = match &verdict {
+            verify::Verdict::Clean => Vec::new(),
+            verify::Verdict::Blocked(hits) => hits
+                .iter()
+                .map(|l| Leak {
+                    matched: l.matched.clone(),
+                    line: l.line,
+                    column: l.column,
+                })
+                .collect(),
+        };
+
+        Ok(VerifyResult {
+            clean: verdict.is_clean() && !secrets::blocks_export(&findings),
+            patterns_checked: scanner.pattern_count(),
+            leaks,
+            secrets: findings.iter().map(to_secret_wire).collect(),
+        })
+    })
+}
+
 /// Formats this build can process. The UI uses it to explain a refusal rather
 /// than showing a dead end.
 #[tauri::command]
@@ -1236,6 +1485,13 @@ pub fn run() {
             rekey_preview,
             rekey_project,
             recover_vault,
+            index_project,
+            rescan_project,
+            export_project,
+            restore_project,
+            unify_proposals,
+            unify_confirm,
+            verify_text,
             supported_formats,
         ])
         .run(tauri::generate_context!())

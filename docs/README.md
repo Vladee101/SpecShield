@@ -8,7 +8,7 @@ Five documents, three audiences.
 | [Threat Model](Threat%20Model.md) | Security review | You want to know what is defended, where it is enforced, and how to check |
 | [Residual Risk](Residual%20Risk.md) | The person approving use | Before you approve. It is the least flattering document here, deliberately |
 | [Desktop User Guide](Desktop%20User%20Guide.md) | Analysts and engineers | You are about to use the application |
-| [User Guide](User%20Guide.md) | Engineers working across a repository | You want the command line, or a capability the app does not have yet |
+| [User Guide](User%20Guide.md) | Engineers who prefer a terminal, or scripting CI | You want the command line |
 
 If you only read one paragraph:
 
@@ -17,10 +17,10 @@ If you only read one paragraph:
 > non-confidential. Material whose *business logic* is the secret should not go
 > to a commercial LLM, with or without this tool.
 
-The two user guides are not duplicates. The application covers one document at a
-time; the command line covers whole repositories and everything to do with the
-vault itself — backup, escrow, re-key, recovery, and the audit log. Desktop guide
-§9 is the parity list, and it is honest about which side is missing what.
+The two user guides cover the same capabilities through different surfaces. The
+application is at parity with the command line apart from `specshield report`,
+which measures detection metrics against the golden corpus and is a CI tool.
+Desktop guide §12 is the short list of what differs.
 
 ## Where the specifications live
 
