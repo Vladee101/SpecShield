@@ -1320,6 +1320,132 @@ fn verify_text(state: State<'_, AppState>, content: String) -> Result<VerifyResu
     })
 }
 
+// ---------------------------------------------------------------------------
+// File picking — P1-3
+//
+// The dialog runs **in Rust**. The frontend is given no dialog permission and no
+// filesystem permission, and none of these commands accepts a path to read: the
+// only way content enters the application is a file a human chose in a native
+// dialog.
+//
+// That distinction is the whole point. Granting the webview `fs:allow-read-*`
+// would have been two lines shorter and would have meant the frontend could read
+// anything on the machine — a capability that has to be reasoned about forever
+// afterwards, in a product whose main claim is about what it does not do.
+// ---------------------------------------------------------------------------
+
+/// Extensions offered in the open dialog. Formats this build has a parser for,
+/// plus the plain-text kinds that fall back to the text parser.
+const OPENABLE: &[&str] = &[
+    "md", "markdown", "txt", "sql", "yaml", "yml", "json", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs",
+];
+
+#[derive(Serialize)]
+struct PickedFile {
+    /// Absolute path, for display.
+    path: String,
+    /// The name the parser dispatches on.
+    name: String,
+    content: String,
+}
+
+/// Open a file the user chooses.
+///
+/// Returns `None` when the dialog is cancelled, which is not an error and should
+/// not be reported as one.
+///
+/// Text only: a binary would arrive as replacement characters and sanitize into
+/// nonsense. Saying so beats letting someone wonder why their PNG produced an
+/// empty document.
+#[tauri::command]
+fn pick_file(app: tauri::AppHandle) -> Result<Option<PickedFile>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let Some(picked) = app
+        .dialog()
+        .file()
+        .add_filter("Supported documents", OPENABLE)
+        .add_filter("All files", &["*"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+
+    let path = picked
+        .into_path()
+        .map_err(|e| fail(format!("that file could not be opened: {e}")))?;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|_| fail(format!("{} is not text this build can read", path.display())))?;
+
+    Ok(Some(PickedFile {
+        name: path
+            .file_name()
+            .map_or_else(|| "document".to_owned(), |n| n.to_string_lossy().into_owned()),
+        path: path.display().to_string(),
+        content,
+    }))
+}
+
+/// Choose a directory — a project root, a twin destination, a restore target.
+#[tauri::command]
+fn pick_directory(app: tauri::AppHandle) -> Result<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = picked
+        .into_path()
+        .map_err(|e| fail(format!("that folder could not be used: {e}")))?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Choose where to write something, and write it.
+///
+/// The content comes from the caller rather than a path, so this cannot be used
+/// to copy a file from one place to another — it writes what the application
+/// already had in hand.
+#[tauri::command]
+fn save_text(app: tauri::AppHandle, suggested_name: String, content: String) -> Result<Option<String>> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let Some(picked) = app.dialog().file().set_file_name(&suggested_name).blocking_save_file() else {
+        return Ok(None);
+    };
+
+    let path = picked
+        .into_path()
+        .map_err(|e| fail(format!("that location could not be used: {e}")))?;
+    std::fs::write(&path, content).map_err(|e| fail(format!("writing {}: {e}", path.display())))?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Save the verified twin, without it passing through the frontend.
+///
+/// The same reasoning as `copy_verified_twin` (SDD §17.5): the twin is read from
+/// session state rather than accepted over IPC, so there is no path by which the
+/// UI could write *original* content to a file the user thinks holds a twin.
+#[tauri::command]
+fn save_verified_twin(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    suggested_name: String,
+) -> Result<Option<String>> {
+    let twin = state
+        .verified_twin()
+        .ok_or_else(|| fail("nothing verified to save — sanitize first"))?;
+
+    let saved = save_text(app, suggested_name, twin)?;
+    if saved.is_some() {
+        state.with(|vault, _| {
+            vault.log("export", Some(1), None, Some("clean"), Some("file"))?;
+            Ok(())
+        })?;
+    }
+    Ok(saved)
+}
+
 /// Formats this build can process. The UI uses it to explain a refusal rather
 /// than showing a dead end.
 #[tauri::command]
@@ -1458,6 +1584,9 @@ fn prompt_envelope() -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // The dialog runs in Rust only — see `pick_file`. No dialog or
+        // filesystem permission is granted to the webview.
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             create_project,
@@ -1492,6 +1621,10 @@ pub fn run() {
             unify_proposals,
             unify_confirm,
             verify_text,
+            pick_file,
+            pick_directory,
+            save_text,
+            save_verified_twin,
             supported_formats,
         ])
         .run(tauri::generate_context!())
@@ -1657,6 +1790,59 @@ mod tests {
             report.diagnosis.contains("not a SpecShield vault"),
             "{}",
             report.diagnosis
+        );
+    }
+
+    #[test]
+    fn the_capability_set_stays_minimal() {
+        // The threat model says the webview holds no network, no shell, and no
+        // filesystem permission, and tells reviewers to check this exact file.
+        // Widening it should require deliberately editing this test and the
+        // document beside it, not slipping past review in a plugin's
+        // recommended setup.
+        //
+        // The file picker was added without touching this list: the dialog runs
+        // in Rust, so the webview never gains the permission.
+        let capabilities = include_str!("../capabilities/default.json");
+        let granted: Vec<&str> = capabilities
+            .split("\"permissions\"")
+            .nth(1)
+            .expect("a permissions array")
+            .split('"')
+            .filter(|s| s.contains(':') && !s.contains('\n'))
+            .collect();
+
+        assert_eq!(
+            granted,
+            vec![
+                "core:default",
+                "core:window:allow-start-dragging",
+                "clipboard-manager:allow-write-text",
+            ],
+            "the webview's capability set changed — update docs/Threat Model.md §5.5 too"
+        );
+
+        for forbidden in ["http:", "shell:", "fs:", "dialog:"] {
+            assert!(
+                !granted.iter().any(|p| p.starts_with(forbidden)),
+                "{forbidden} reached the webview"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_reads_a_caller_supplied_path_without_a_dialog() {
+        // `pick_file` takes no path. If it ever grows one, the frontend can read
+        // any file on the machine and the picker stops being a consent step.
+        let source = include_str!("lib.rs");
+        let signature = source
+            .lines()
+            .find(|l| l.contains("fn pick_file("))
+            .expect("pick_file exists");
+
+        assert!(
+            signature.contains("app: tauri::AppHandle") && !signature.contains("path"),
+            "pick_file must be dialog-driven only: {signature}"
         );
     }
 

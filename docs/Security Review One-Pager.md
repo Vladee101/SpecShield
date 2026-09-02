@@ -24,8 +24,13 @@ originals, the mapping database, the audit log, or the file index.
 
 The application cannot send it. Tauri capabilities grant no network and no shell
 permission; the entire permission list is three entries, one of which is
-*write-only* clipboard access. There is no HTTP client in the dependency tree.
-The user carries the twin out by clipboard or file, deliberately.
+*write-only* clipboard access, and a test pins it to exactly those three. There
+is no HTTP client in the dependency tree. The user carries the twin out by
+clipboard or file, deliberately.
+
+The file picker is worth a sentence: the webview has no filesystem permission
+either. The dialog is opened by a Rust command that reads the chosen file, so no
+command accepts a path from the frontend to read.
 
 ## The control that actually protects you
 

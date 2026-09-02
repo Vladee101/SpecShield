@@ -86,7 +86,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 |---|---|
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
-| M2 Tauri shell | Workflow A works end to end; P1-3/4/5 remain |
+| M2 Tauri shell | Workflow A works end to end; P1-4/5 remain |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
@@ -188,12 +188,17 @@ against a real window.
 Error paths are still unexercised — a blocked export, a wrong passphrase, an
 unsupported format. Worth a deliberate pass, but no longer the top risk.
 
-**P1-3. No file picker.** `app/src/App.tsx` uses paste-in `<textarea>`s and a
-typed filename. The document is now held once at the top level, so Review and
-Sanitize share it and a user pastes only once — but it still has to be pasted.
-Add `tauri-plugin-dialog` for open/save, and grant only the
-specific dialog permissions in the capability file. Keep the capability set free
-of network and shell.
+**P1-3. File picker. — DONE.** Every path field has a Browse button, the Review
+step has "Open file…", and the twin has "Save twin…".
+
+The design decision worth keeping: the dialog runs in Rust. The webview was
+granted no dialog permission and no filesystem permission, and no command takes
+a caller-supplied path to *read* — `pick_file` opens a dialog and returns the
+contents. Granting `fs:allow-read-*` would have been two lines shorter and would
+have meant the frontend could read anything on the machine. Two tests hold the
+line: one pins the capability list to exactly three entries, the other asserts
+`pick_file` never grows a path parameter.
+
 
 **P1-4. No interactive passphrase entry in the CLI.**
 `crates/cli/src/main.rs`, `passphrase()` requires `SPECSHIELD_PASSPHRASE` or

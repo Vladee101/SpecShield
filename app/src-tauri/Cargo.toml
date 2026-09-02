@@ -28,6 +28,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 getrandom = "0.4.3"
 tauri-plugin-clipboard-manager = "2.3.3"
+# The file picker runs entirely in Rust (P1-3). The frontend gets no dialog
+# permission and no filesystem permission — it calls a command, and the command
+# opens the dialog. See `pick_file` for why that distinction matters.
+tauri-plugin-dialog = "2"
 zeroize = "1.9.0"
 
 [lints]

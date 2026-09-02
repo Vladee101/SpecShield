@@ -167,9 +167,17 @@ Key material is zeroized on drop.
 
 - The Tauri capability set grants **no** network and **no** shell permission. The
   full permission list is `core:default`, `core:window:allow-start-dragging`,
-  `clipboard-manager:allow-write-text`.
+  `clipboard-manager:allow-write-text`. A test asserts that list is exactly those
+  three, so widening it requires editing the test and this document.
 - Clipboard access is **write-only**. Reading the user's clipboard is not this
   application's business.
+- **The file picker holds no permission either.** `tauri-plugin-dialog` appears
+  in `Cargo.toml`, but the webview is granted none of its permissions: the dialog
+  is opened by a Rust command, which then reads the chosen file and returns its
+  contents. Granting the webview `fs:allow-read-*` would have been shorter and
+  would have meant the frontend could read anything on the machine. As built, the
+  only way a file's contents enter the application is a file a human selected in
+  a native dialog, and no command accepts a caller-supplied path to read.
 - CSP is locked to local assets and the IPC origin.
 - The asset protocol is disabled.
 - No updater artifacts are produced. An auto-updater is a network dependency in a
@@ -296,6 +304,7 @@ the model, by design:
 | P14 | Two identities collide on one alias, making restore ambiguous | **Blocked.** Unique index on alias plus a deterministic disambiguator. |
 | P15 | Corrupt vault inspected, and inspection damages it further | **Blocked.** Recovery mode opens `immutable=1` and exposes no write method; a test asserts the bytes are unchanged. |
 | P16 | Recovery mode used to read names without the passphrase | **Blocked.** Only unsealed columns are readable; a test asserts no real name is reachable. |
+| P17 | Compromised or buggy frontend reads arbitrary files | **Blocked.** The webview has no filesystem permission, and `pick_file` takes no path — it opens a dialog. A test asserts the signature stays that way. |
 
 ---
 
@@ -303,7 +312,8 @@ the model, by design:
 
 Do not take this document's word for any of it. These are cheap to check:
 
-1. `cat app/src-tauri/capabilities/default.json` — the whole permission surface.
+1. `cat app/src-tauri/capabilities/default.json` — the whole permission surface,
+   pinned by `the_capability_set_stays_minimal`.
 2. `grep -rn "reqwest\|hyper\|ureq\|curl" crates/ app/src-tauri/src/` — no HTTP client is present.
 3. `cargo test --workspace` — 319 tests, including the SDD §16 error matrix.
 4. `cargo run -p specshield-cli -- report corpus --strict` — detection metrics

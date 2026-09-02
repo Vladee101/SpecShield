@@ -73,6 +73,53 @@ interface Doc {
   content: string;
 }
 
+
+/**
+ * A path field with a Browse button — P1-3.
+ *
+ * The field stays editable. A picker is the convenient way to name a path, not
+ * the only way: typing one is what someone reads out of a runbook, and the
+ * dialog cannot name a directory that does not exist yet.
+ */
+function PathField({
+  value,
+  onChange,
+  placeholder,
+  onError,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  onError: (e: string | null) => void;
+}) {
+  return (
+    <>
+      <input
+        className="grow mono"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        title="Choose a folder"
+        onClick={async () => {
+          onError(null);
+          try {
+            // null means cancelled, which is not an error and must not be
+            // reported as one.
+            const picked = await api.pickDirectory();
+            if (picked !== null) onChange(picked);
+          } catch (e) {
+            onError(String(e));
+          }
+        }}
+      >
+        Browse…
+      </button>
+    </>
+  );
+}
+
 export function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
   const [step, setStep] = useState<Screen>("project");
@@ -246,7 +293,9 @@ function ProjectPanel({
       <div style={{ display: "grid", gap: 10, maxWidth: 560 }}>
         <label>
           <div className="small muted">Project folder</div>
-          <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="C:\\work\\billing" />
+          <div className="row">
+            <PathField value={path} onChange={setPath} placeholder="C:\work\billing" onError={onError} />
+          </div>
         </label>
         <label>
           <div className="small muted">Passphrase</div>
@@ -339,6 +388,19 @@ function ReviewPanel({
             onChange={(e) => setFilename(e.target.value)}
             placeholder="filename, e.g. PRD.md"
           />
+          <button
+            onClick={async () => {
+              onError(null);
+              try {
+                const picked = await api.pickFile();
+                if (picked) setDoc({ filename: picked.name, content: picked.content });
+              } catch (e) {
+                onError(String(e));
+              }
+            }}
+          >
+            Open file…
+          </button>
           <button onClick={() => void scan()} disabled={!content}>Scan</button>
         </div>
         <textarea
@@ -504,6 +566,7 @@ function SanitizePanel({
   const setContent = (c: string) => setDoc({ ...doc, content: c });
   const [result, setResult] = useState<SanitizeResult | null>(null);
   const [copied, setCopied] = useState<number | null>(null);
+  const [savedTo, setSavedTo] = useState<string | null>(null);
 
   return (
     <>
@@ -598,11 +661,27 @@ function SanitizePanel({
             >
               Copy twin only
             </button>
+            <button
+              onClick={async () => {
+                onError(null);
+                try {
+                  // The twin is read from session state on the Rust side, never
+                  // sent from here — same rule as the clipboard (SDD §17.5).
+                  const saved = await api.saveVerifiedTwin(`${filename}.twin`);
+                  if (saved) setSavedTo(saved);
+                } catch (e) {
+                  onError(String(e));
+                }
+              }}
+            >
+              Save twin…
+            </button>
             {copied !== null && (
               <span className="small muted">
                 {copied} characters copied — cleared from the clipboard after 2 minutes
               </span>
             )}
+            {savedTo && <span className="small muted mono">saved to {savedTo}</span>}
           </div>
 
           <details>
@@ -1095,6 +1174,20 @@ function AuditPanel({ onError }: { onError: (e: string | null) => void }) {
           >
             Export CSV
           </button>
+          <button
+            onClick={async () => {
+              onError(null);
+              try {
+                const csv = auditCsv(rows ?? []);
+                const path = await api.saveText("specshield-audit.csv", csv);
+                if (path) setSaved(path);
+              } catch (e) {
+                onError(String(e));
+              }
+            }}
+          >
+            Save as…
+          </button>
           <span className="grow" />
           {rows && <span className="small muted">{rows.length} entries</span>}
         </div>
@@ -1194,7 +1287,7 @@ function BackupSection({ onError }: { onError: (e: string | null) => void }) {
       </p>
 
       <div className="row">
-        <input className="grow mono" value={dest} onChange={(e) => setDest(e.target.value)} />
+        <PathField value={dest} onChange={setDest} onError={onError} />
         <button
           className="primary"
           onClick={async () => {
@@ -1217,18 +1310,8 @@ function BackupSection({ onError }: { onError: (e: string | null) => void }) {
         middle of the incident it existed for.
       </p>
       <div className="row">
-        <input
-          className="grow mono"
-          value={backup}
-          onChange={(e) => setBackup(e.target.value)}
-          placeholder="backup file"
-        />
-        <input
-          className="grow mono"
-          value={into}
-          onChange={(e) => setInto(e.target.value)}
-          placeholder="destination"
-        />
+        <PathField value={backup} onChange={setBackup} placeholder="backup file" onError={onError} />
+        <PathField value={into} onChange={setInto} placeholder="destination" onError={onError} />
       </div>
       <div className="row" style={{ marginTop: 8 }}>
         <input
@@ -1288,7 +1371,7 @@ function EscrowSection({ onError }: { onError: (e: string | null) => void }) {
       </p>
 
       <div className="row">
-        <input className="grow mono" value={out} onChange={(e) => setOut(e.target.value)} />
+        <PathField value={out} onChange={setOut} onError={onError} />
       </div>
       <div className="row" style={{ marginTop: 8 }}>
         <input
@@ -1332,7 +1415,7 @@ function EscrowSection({ onError }: { onError: (e: string | null) => void }) {
 
       <h4>Recover a passphrase from an escrow file</h4>
       <div className="row">
-        <input className="grow mono" value={openFile} onChange={(e) => setOpenFile(e.target.value)} />
+        <PathField value={openFile} onChange={setOpenFile} onError={onError} />
         <input
           className="grow"
           type="password"
@@ -1651,7 +1734,7 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
       </p>
 
       <div className="row">
-        <input className="grow mono" value={dest} onChange={(e) => setDest(e.target.value)} />
+        <PathField value={dest} onChange={setDest} onError={onError} />
         <button
           className="primary"
           disabled={busy}
@@ -1700,17 +1783,12 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
         recorded the mapping when the twin was exported.
       </p>
       <div className="row">
-        <input
-          className="grow mono"
-          value={twinIn}
-          onChange={(e) => setTwinIn(e.target.value)}
-          placeholder="the twin directory"
-        />
-        <input
-          className="grow mono"
+        <PathField value={twinIn} onChange={setTwinIn} placeholder="the twin directory" onError={onError} />
+        <PathField
           value={restoreTo}
-          onChange={(e) => setRestoreTo(e.target.value)}
+          onChange={setRestoreTo}
           placeholder="where to put it back"
+          onError={onError}
         />
         <button
           disabled={busy}
@@ -1934,4 +2012,29 @@ function VerifySection({ onError }: { onError: (e: string | null) => void }) {
       )}
     </div>
   );
+}
+
+/**
+ * The same CSV the Rust side writes, for "Save as…".
+ *
+ * Duplicated deliberately and kept trivial: the alternative is a command that
+ * takes a path from the frontend and writes to it, which is the one thing the
+ * picker design exists to avoid.
+ */
+function auditCsv(rows: AuditRow[]): string {
+  const field = (v: string) => (/[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const lines = ["timestamp,operation,file_count,entity_count,verification,destination"];
+  for (const r of rows) {
+    lines.push(
+      [
+        String(r.ts),
+        field(r.operation),
+        r.file_count ?? "",
+        r.entity_count ?? "",
+        field(r.verification ?? ""),
+        field(r.destination ?? ""),
+      ].join(","),
+    );
+  }
+  return `${lines.join("\n")}\n`;
 }

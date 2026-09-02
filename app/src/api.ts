@@ -213,6 +213,13 @@ export interface VerifyResult {
   secrets: SecretFinding[];
 }
 
+export interface PickedFile {
+  path: string;
+  /** The name the parser dispatches on. */
+  name: string;
+  content: string;
+}
+
 export interface RecoveryReport {
   diagnosis: string;
   readable: boolean;
@@ -268,6 +275,23 @@ export const api = {
     invoke<AppliedPatch>("apply_patch", { filename, restored, branch }),
 
   undoPatch: () => invoke<string>("undo_patch"),
+
+  // --- File picking (P1-3) ------------------------------------------------
+  // The dialog runs in Rust. The frontend has no dialog permission and no
+  // filesystem permission, and cannot ask for a path it was not given by a
+  // human in a native dialog. `null` means the dialog was cancelled, which is
+  // not an error.
+
+  pickFile: () => invoke<PickedFile | null>("pick_file"),
+
+  pickDirectory: () => invoke<string | null>("pick_directory"),
+
+  saveText: (suggestedName: string, content: string) =>
+    invoke<string | null>("save_text", { suggestedName, content }),
+
+  /** Reads the twin from session state, never from the frontend — SDD §17.5. */
+  saveVerifiedTwin: (suggestedName: string) =>
+    invoke<string | null>("save_verified_twin", { suggestedName }),
 
   copyVerifiedTwin: (withEnvelope: boolean) =>
     invoke<number>("copy_verified_twin", { withEnvelope }),

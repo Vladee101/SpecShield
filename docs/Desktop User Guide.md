@@ -87,9 +87,12 @@ the vault holds. **Close** locks the vault and drops the keys from memory.
 
 This screen answers "what would happen", and writes nothing.
 
-Give the document a **filename** — it decides which parser is used, so
-`schema.sql` is parsed as SQL and `PRD.md` as Markdown. Paste the content and
-press **Scan**.
+**Open file…** picks a file from disk and fills in both the name and the
+content. Or paste the content and give it a **filename** yourself — the name is
+what decides which parser is used, so `schema.sql` is parsed as SQL and `PRD.md`
+as Markdown.
+
+Then press **Scan**.
 
 You get three lists.
 
@@ -144,6 +147,10 @@ Two copy buttons:
   instruction telling the model to preserve alias tokens exactly, which
   measurably reduces drift and therefore how much you have to review later.
 - **Copy twin only**.
+- **Save twin…** writes it to a file you choose. Like the copy buttons, this
+  reads the twin from the application's own memory rather than taking it from
+  the interface — there is no path by which the screen could write *original*
+  content to a file you think holds a twin.
 
 The clipboard is cleared after two minutes, and only if it still holds
 SpecShield's payload — clearing unconditionally would destroy whatever you copied
@@ -409,8 +416,13 @@ Two things exist only in the application, because they only make sense here:
 
 - **"Never alias"** on a scan suggestion, and hardened clipboard copy.
 
-One structural limit remains: **there is no file picker.** The app works on text
-you paste, and paths you type are resolved against the project folder.
+Every path field has a **Browse…** button and stays typeable. The picker is the
+convenient way to name a path, not the only one.
+
+Worth knowing about how it works: the dialog is opened by the Rust side, and the
+window itself holds no filesystem permission at all. The only way a file's
+contents enter the application is a file you chose in a dialog — no part of the
+interface can read a path on its own.
 
 ---
 
