@@ -355,13 +355,17 @@ enum EntityTypeArg {
     Organization,
     Service,
     Api,
-    Dto,
-    Enum,
-    Event,
+    Endpoint,
     Table,
     Column,
-    Host,
+    Dto,
+    Interface,
+    Enum,
+    Event,
+    Index,
     EnvVar,
+    Host,
+    PathSegment,
 }
 
 impl From<EntityTypeArg> for EntityType {
@@ -370,13 +374,17 @@ impl From<EntityTypeArg> for EntityType {
             EntityTypeArg::Organization => Self::Organization,
             EntityTypeArg::Service => Self::Service,
             EntityTypeArg::Api => Self::Api,
-            EntityTypeArg::Dto => Self::Dto,
-            EntityTypeArg::Enum => Self::Enum,
-            EntityTypeArg::Event => Self::Event,
+            EntityTypeArg::Endpoint => Self::Endpoint,
             EntityTypeArg::Table => Self::Table,
             EntityTypeArg::Column => Self::Column,
-            EntityTypeArg::Host => Self::Host,
+            EntityTypeArg::Dto => Self::Dto,
+            EntityTypeArg::Interface => Self::Interface,
+            EntityTypeArg::Enum => Self::Enum,
+            EntityTypeArg::Event => Self::Event,
+            EntityTypeArg::Index => Self::Index,
             EntityTypeArg::EnvVar => Self::EnvVar,
+            EntityTypeArg::Host => Self::Host,
+            EntityTypeArg::PathSegment => Self::PathSegment,
         }
     }
 }
@@ -941,6 +949,16 @@ fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()>
     let secret_findings = secrets::scan(&text);
 
     match &verdict {
+        // A vault with no interned identities has nothing to scan for, so
+        // everything is "clean". That is the shape of a silent pass: a CI job
+        // gating on this would go green having checked nothing at all. Say so,
+        // and exit non-zero — a gate that cannot fail is not a gate.
+        verify::Verdict::Clean if scanner.pattern_count() == 0 => {
+            eprintln!("NOT CHECKED — this project has no identities yet, so there was nothing to");
+            eprintln!("scan for. A dictionary term is not enough: a name is interned the first");
+            eprintln!("time it is aliased. Run `specshield sanitize` or `specshield export` first.");
+            std::process::exit(2);
+        }
         verify::Verdict::Clean => {
             println!("clean — {} patterns checked", scanner.pattern_count());
         }

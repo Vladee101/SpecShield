@@ -1,0 +1,35 @@
+# SpecShield documentation
+
+Four documents, three audiences.
+
+| Document | For | Read it when |
+|---|---|---|
+| [Security Review One-Pager](Security%20Review%20One-Pager.md) | The person approving use | You have ten minutes and a decision to make |
+| [Threat Model](Threat%20Model.md) | Security review | You want to know what is defended, where it is enforced, and how to check |
+| [Residual Risk](Residual%20Risk.md) | The person approving use | Before you approve. It is the least flattering document here, deliberately |
+| [User Guide](User%20Guide.md) | Analysts and engineers | You are about to use the tool |
+
+If you only read one paragraph:
+
+> SpecShield reduces disclosure to a commercial LLM from **"names plus
+> semantics"** to **"semantics only"**. It does not make the submission
+> non-confidential. Material whose *business logic* is the secret should not go
+> to a commercial LLM, with or without this tool.
+
+## Where the specifications live
+
+The product and design documents sit in the repository root and are the source
+of record for requirements and architecture:
+
+- `Product Requirements Document (PRD).md` — requirements, threat model §4,
+  success metrics §5
+- `Software Design Document (SDD).md` — architecture, alias grammar §6,
+  verification §7–8, vault §9, error matrix §16, security §17
+- `Implementation Plan.md` — milestones and decisions
+- `Design Review (PRD + SDD).md` — the review those two were revised against
+- `TODO.md` — what is done, what is not, and what is known to be wrong
+
+Where the documents in `docs/` and the specifications disagree, `docs/` describes
+**what was built** and says so explicitly. Two such divergences exist today and
+both are recorded in Residual Risk §3: there is no OS credential store, and
+encryption is per-value AEAD rather than SQLCipher.

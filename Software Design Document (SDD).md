@@ -708,15 +708,32 @@ Retrofitting migrations onto an encrypted store later is painful, and the alias 
 
 ## 9.4 Key management
 
-- The vault key is generated locally and stored in the **operating system credential
-  store**: Windows DPAPI / Credential Manager, macOS Keychain, Linux Secret Service.
-- It is never written to disk in plaintext next to the database — doing so would reduce
-  SQLCipher's protection to the single case of the `.db` being copied alone.
-- An optional user passphrase derives a key-encryption key via **Argon2id** (parameters
-  recorded in the vault header) which wraps the vault key. Required for portable vaults.
-- All key material is `zeroize`d after use.
-- **Key loss is unrecoverable.** A passphrase-protected escrow export is offered at
-  creation, with an explicit warning.
+**As built:**
+
+- The encryption and blind-index keys are derived directly from a user passphrase
+  with **Argon2id**, then split into two domain-separated subkeys. The salt lives in
+  the vault's `meta` table.
+- **No key is stored anywhere.** Nothing about the passphrase is written to disk, which
+  is why a wrong passphrase and a tampered ciphertext fail identically — both are an
+  AEAD authentication failure.
+- All key material is `zeroize`d on drop.
+- **Key loss is unrecoverable.** `specshield escrow` exports a passphrase-protected
+  escrow, with a warning authenticated into the file itself (FR-11).
+
+**Not built, and previously specified here:** an OS credential store (Windows
+Credential Manager, macOS Keychain, Linux Secret Service) holding a locally generated
+vault key wrapped by an optional passphrase.
+
+That design has a real advantage — it allows a passphrase change without re-encrypting
+every column, and lets escrow hand out a data key rather than the passphrase itself. It
+also has a cost the passphrase-only design avoids: a key at rest for local malware to
+take. What is implemented is the simpler half, and it is the half that is honest about
+the trade — but a reader comparing this document to the code would otherwise be
+misled, so the difference is recorded rather than quietly reconciled.
+
+Moving to a wrapped master key means re-encrypting every sealed value in every existing
+vault. It is a migration to write before 1.0, and it is the precondition for passphrase
+rotation.
 
 ## 9.5 Re-key
 
@@ -929,11 +946,16 @@ copies after the gate passes.
 
 ## 17.2 Encryption
 
-- SQLCipher, AES-256
-- Local device key held in the OS credential store (§9.4)
-- Optional Argon2id passphrase wrapping
-- `zeroize` on key material
-- No telemetry, no analytics
+- **Per-value AES-256-GCM** on every sensitive column — decision D-9, replacing the
+  whole-file SQLCipher approach this section originally specified. See §9.1 for why,
+  and for what whole-file encryption hid that per-value encryption does not.
+- Each ciphertext is bound to its location by associated data (`table:column:row`), so a
+  value cannot be relocated between rows or columns.
+- Searchability over ciphertext comes from a **blind index** — HMAC under a separate
+  domain-separated subkey — never from decryption.
+- Keys derived from the user passphrase with **Argon2id**; no key is stored (§9.4).
+- `zeroize` on key material.
+- No telemetry, no analytics.
 
 ## 17.3 Egress control
 
