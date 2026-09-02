@@ -309,6 +309,30 @@ anything that depends on a live vault, and it is the same gap P1-5 describes.
 
 ---
 
+**P2-10. The desktop app is not at parity with the CLI.** Documented in Desktop
+User Guide §9 rather than left to be discovered. Missing from the app entirely:
+
+- **FR-11 — backup, restore, escrow, re-key.** These are the operations that
+  make a lost or over-shared vault survivable, and none is reachable without the
+  command line. This is the most serious of the gaps: the app's users are the
+  ones least likely to open a terminal.
+- **FR-9 — the audit log.** `audit_log` is registered as a command and has a
+  typed wrapper in `api.ts`. It has no screen, so the artifact a security team
+  asks for is unreachable in the product they were shown.
+- **SDD §16 recovery mode**, **SDD §5 unification**, project **index/rescan/
+  export**, and a standalone **verify**.
+
+Also structural: no file picker (P1-3), so the app works on pasted text and can
+only address a file on disk in the diff-and-apply step.
+
+Going the other way, the app has two things the CLI does not: the "never alias"
+allowlist, and hardened clipboard copy.
+
+The cheapest meaningful fix is the audit screen — the command already exists.
+FR-11 needs four new commands on the Rust side plus a screen.
+
+---
+
 **P2-8. M6 packaging and signing.** The engine half of M6 is done and the four
 security documents are written (`docs/`). What remains needs credentials that
 are not the repository's to hold:

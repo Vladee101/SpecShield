@@ -1028,6 +1028,26 @@ mod tests {
     }
 
     #[test]
+    fn the_frontend_knows_every_entity_type_the_engine_has() {
+        // Two languages, one list. A type the frontend does not offer is a type
+        // the dictionary cannot express, and the dictionary is the only
+        // protection for a name no rule can recognise — so an omission here is
+        // a silent hole, not a cosmetic gap.
+        //
+        // This has already happened twice: `INDEX` was missing from the
+        // frontend and four types were missing from the CLI.
+        let api = include_str!("../../src/api.ts");
+
+        for entity_type in EntityType::ALL {
+            let quoted = format!("\"{}\"", entity_type.prefix());
+            assert!(
+                api.contains(&quoted),
+                "app/src/api.ts is missing {quoted} — add it to EntityType and to                  ENTITY_TYPES in App.tsx"
+            );
+        }
+    }
+
+    #[test]
     fn an_unresolved_note_carries_the_token_the_form_needs() {
         // The naming form submits `token`. An empty one makes the whole SDD §12
         // flow unusable while looking perfectly fine on screen.

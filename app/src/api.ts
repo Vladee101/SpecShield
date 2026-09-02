@@ -8,6 +8,14 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * Every entity type the engine has — `EntityType::prefix()` in
+ * `crates/core/src/model.rs`.
+ *
+ * Kept exhaustive on purpose, and checked by a Rust test that reads this file.
+ * A type missing here is a type the dictionary cannot express, and the
+ * dictionary is the only protection for a name no rule can recognise.
+ */
 export type EntityType =
   | "ORG"
   | "SERVICE"
@@ -19,6 +27,7 @@ export type EntityType =
   | "IFACE"
   | "ENUM"
   | "EVENT"
+  | "INDEX"
   | "ENV"
   | "HOST"
   | "PATH";

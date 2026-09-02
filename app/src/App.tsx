@@ -27,8 +27,8 @@ import {
 type Step = "project" | "review" | "verify" | "restore" | "apply";
 
 const ENTITY_TYPES: EntityType[] = [
-  "ORG", "SERVICE", "API", "ENDPOINT", "DB_TABLE",
-  "COLUMN", "DTO", "IFACE", "ENUM", "EVENT", "ENV", "HOST", "PATH",
+  "ORG", "SERVICE", "API", "ENDPOINT", "DB_TABLE", "COLUMN", "DTO",
+  "IFACE", "ENUM", "EVENT", "INDEX", "ENV", "HOST", "PATH",
 ];
 
 /// The document under review, held once at the top so Review and Sanitize
@@ -368,11 +368,16 @@ function ReviewPanel({
                     {result.suggestions.map((s, i) => (
                       <tr key={i}>
                         <td className="mono">{s.real_name}</td>
+                        <td className="muted">{s.entity_type}</td>
                         <td className="muted">{s.confidence.toFixed(2)}</td>
                         <td>
                           <button
                             onClick={async () => {
-                              await api.addTerm(s.real_name, "ORG");
+                              // The detector already classified this. Confirming
+                              // as ORG regardless — which is what this did —
+                              // gave a service the organization prefix and put a
+                              // wrong category in front of the model.
+                              await api.addTerm(s.real_name, s.entity_type as EntityType);
                               onTermAdded();
                               await scan();
                             }}

@@ -1,13 +1,14 @@
 # SpecShield documentation
 
-Four documents, three audiences.
+Five documents, three audiences.
 
 | Document | For | Read it when |
 |---|---|---|
 | [Security Review One-Pager](Security%20Review%20One-Pager.md) | The person approving use | You have ten minutes and a decision to make |
 | [Threat Model](Threat%20Model.md) | Security review | You want to know what is defended, where it is enforced, and how to check |
 | [Residual Risk](Residual%20Risk.md) | The person approving use | Before you approve. It is the least flattering document here, deliberately |
-| [User Guide](User%20Guide.md) | Analysts and engineers | You are about to use the tool |
+| [Desktop User Guide](Desktop%20User%20Guide.md) | Analysts and engineers | You are about to use the application |
+| [User Guide](User%20Guide.md) | Engineers working across a repository | You want the command line, or a capability the app does not have yet |
 
 If you only read one paragraph:
 
@@ -15,6 +16,11 @@ If you only read one paragraph:
 > semantics"** to **"semantics only"**. It does not make the submission
 > non-confidential. Material whose *business logic* is the secret should not go
 > to a commercial LLM, with or without this tool.
+
+The two user guides are not duplicates. The application covers one document at a
+time; the command line covers whole repositories and everything to do with the
+vault itself — backup, escrow, re-key, recovery, and the audit log. Desktop guide
+§9 is the parity list, and it is honest about which side is missing what.
 
 ## Where the specifications live
 
