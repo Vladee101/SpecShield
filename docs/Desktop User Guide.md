@@ -103,7 +103,10 @@ above the confidence floor and will be applied.
 
 - **Confirm** adds it to the dictionary using the type the detector worked out,
   so it is aliased everywhere from now on.
-- **Never alias** adds it to the allowlist, so it is left alone everywhere.
+- **Never alias** adds it to the allowlist, so it is left alone everywhere —
+  and the export gate stops looking for it too. Both halves, or the name would
+  survive into the twin and block every export from then on. This is the only
+  way the gate opens, so be deliberate: an allowlisted name can leave in a twin.
 
 Neither is a guess on the tool's part. Nothing in this list is aliased unless you
 say so.

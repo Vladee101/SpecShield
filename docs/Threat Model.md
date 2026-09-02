@@ -126,6 +126,13 @@ detector being right. If detection misses a name, the gate catches it in the
 output and refuses. Detection recall is a quality metric; the gate is the
 security control.
 
+**One thing opens it: the allowlist** (PRD FR-10). A name the user has marked
+never-alias is excluded from the scan. That hole has to exist — without it,
+allowlisting a name the vault already knows would stop it being aliased, leave
+it in the twin, and then block every export forever with no way forward. It is
+as wide as what the user typed and no wider, and every caller reports how many
+names were excluded, so an open gate is never silent.
+
 *Enforced in* `crates/core/src/verify.rs`. *Tested in* `crates/cli/tests/error_matrix.rs`.
 
 ### 5.3 Secret redaction — A3
@@ -303,6 +310,7 @@ the model, by design:
 | P13 | Application exfiltrates data itself | **Structurally impossible.** No network capability is granted; CI proves the suite passes with no route out. |
 | P14 | Two identities collide on one alias, making restore ambiguous | **Blocked.** Unique index on alias plus a deterministic disambiguator. |
 | P15 | Corrupt vault inspected, and inspection damages it further | **Blocked.** Recovery mode opens `immutable=1` and exposes no write method; a test asserts the bytes are unchanged. |
+| P16a | A name is allowlisted and then leaves in a twin | **Permitted, and reported.** FR-10 exists so the user can decide a detection is wrong. The count of excluded names is shown on every export. |
 | P16 | Recovery mode used to read names without the passphrase | **Blocked.** Only unsealed columns are readable; a test asserts no real name is reachable. |
 | P17 | Compromised or buggy frontend reads arbitrary files | **Blocked.** The webview has no filesystem permission, and `pick_file` takes no path — it opens a dialog. A test asserts the signature stays that way. |
 

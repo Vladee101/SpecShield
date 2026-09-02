@@ -252,11 +252,15 @@ fn close_project(state: State<'_, AppState>) {
 
 #[tauri::command]
 fn add_term(state: State<'_, AppState>, name: String, entity_type: String) -> Result<usize> {
+    add_term_in(&state, &name, &entity_type)
+}
+
+fn add_term_in(state: &AppState, name: &str, entity_type: &str) -> Result<usize> {
     state.with(|vault, _| {
         let parsed: EntityType = entity_type
             .parse()
             .map_err(|_| fail(format!("unknown entity type {entity_type:?}")))?;
-        vault.add_term(&name, parsed.prefix())?;
+        vault.add_term(name, parsed.prefix())?;
         vault.log("term.add", None, Some(1), None, None)?;
         Ok(vault.dictionary()?.len())
     })
@@ -272,12 +276,16 @@ fn add_allowed(state: State<'_, AppState>, term: String) -> Result<()> {
 
 #[tauri::command]
 fn scan_text(state: State<'_, AppState>, filename: String, content: String) -> Result<ScanResult> {
-    let parser = require_parser(&filename, &content)?;
+    scan_text_in(&state, &filename, &content)
+}
+
+fn scan_text_in(state: &AppState, filename: &str, content: &str) -> Result<ScanResult> {
+    let parser = require_parser(filename, content)?;
     state.with(|vault, _| {
         let detector = detector_from(vault)?;
-        let findings = secrets::scan(&content);
-        let redacted = secrets::redact(&content, &findings);
-        let candidates = detector.scan_text(&redacted, &filename, OccurrenceKind::Reference);
+        let findings = secrets::scan(content);
+        let redacted = secrets::redact(content, &findings);
+        let candidates = detector.scan_text(&redacted, filename, OccurrenceKind::Reference);
 
         let (confident, suggestions): (Vec<_>, Vec<_>) = candidates
             .into_iter()
@@ -294,7 +302,13 @@ fn scan_text(state: State<'_, AppState>, filename: String, content: String) -> R
 
 #[tauri::command]
 fn sanitize_text(state: State<'_, AppState>, filename: String, content: String) -> Result<SanitizeResult> {
-    let parser = require_parser(&filename, &content)?;
+    sanitize_text_in(&state, &filename, &content)
+}
+
+/// The body, split from the IPC wrapper so the gate can be tested. This is the
+/// command that decides whether a twin exists at all.
+fn sanitize_text_in(state: &AppState, filename: &str, content: &str) -> Result<SanitizeResult> {
+    let parser = require_parser(filename, content)?;
     let result = state.with(|vault, _| {
         let mut graph = graph_from(vault)?;
         let detector = detector_from(vault)?;
@@ -302,8 +316,8 @@ fn sanitize_text(state: State<'_, AppState>, filename: String, content: String) 
         let members = context_from(vault)?;
 
         let result = sanitize::sanitize(
-            &content,
-            &filename,
+            content,
+            filename,
             &detector,
             &mut graph,
             Some(parser.as_ref()),
@@ -315,7 +329,7 @@ fn sanitize_text(state: State<'_, AppState>, filename: String, content: String) 
 
         // SDD §8 — the gate runs here, on the Rust side. The frontend is never
         // handed unverified content.
-        let scanner = verify::LeakScanner::new(graph.real_names());
+        let scanner = project::gate(vault, &graph)?;
         let verdict = scanner.scan(&result.twin);
         let twin_secrets = secrets::scan(&result.twin);
         let blocking: Vec<SecretFinding> = twin_secrets
@@ -1117,6 +1131,8 @@ struct ExportSummary {
     abandoned: Vec<(String, String)>,
     /// Non-empty means nothing was written at all.
     blocked: Vec<(String, Vec<String>)>,
+    /// Vault names the gate was told to ignore — FR-10.
+    allowlisted: usize,
     destination: String,
 }
 
@@ -1210,6 +1226,7 @@ fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSumm
             unchecked: result.unchecked,
             abandoned: result.abandoned,
             blocked: result.blocked,
+            allowlisted: result.allowlisted,
             destination: destination.display().to_string(),
         })
     })
@@ -1293,11 +1310,15 @@ fn unify_confirm(state: State<'_, AppState>, concept: String) -> Result<(usize, 
 /// file edited by hand, or a fragment about to be pasted somewhere.
 #[tauri::command]
 fn verify_text(state: State<'_, AppState>, content: String) -> Result<VerifyResult> {
+    verify_text_in(&state, &content)
+}
+
+fn verify_text_in(state: &AppState, content: &str) -> Result<VerifyResult> {
     state.with(|vault, _| {
         let graph = project::graph_from(vault)?;
-        let scanner = verify::LeakScanner::new(graph.real_names());
-        let verdict = scanner.scan(&content);
-        let findings = secrets::scan(&content);
+        let scanner = project::gate(vault, &graph)?;
+        let verdict = scanner.scan(content);
+        let findings = secrets::scan(content);
 
         let leaks = match &verdict {
             verify::Verdict::Clean => Vec::new(),
@@ -1791,6 +1812,96 @@ mod tests {
             "{}",
             report.diagnosis
         );
+    }
+
+    // --- P1-5: the commands, not just the helpers ---------------------------
+
+    #[test]
+    fn sanitizing_aliases_a_dictionary_term_and_makes_the_twin_copyable() {
+        let project = TempProject::new("sanitize-ok");
+        let state = project.open();
+        add_term_in(&state, "Vantor", "ORG").expect("term");
+
+        let result = sanitize_text_in(&state, "a.md", "Vantor owns billing.\n").expect("sanitize");
+
+        assert!(result.verified);
+        let twin = result.twin.expect("a verified twin is returned");
+        assert!(!twin.contains("Vantor"), "{twin}");
+        assert_eq!(state.verified_twin().as_deref(), Some(twin.as_str()));
+        assert!(
+            !result.not_checked.is_empty(),
+            "PRD §4.3 — every green state carries what was not checked"
+        );
+    }
+
+    #[test]
+    fn a_format_with_no_parser_is_refused_rather_than_guessed_at() {
+        let project = TempProject::new("no-parser");
+        let state = project.open();
+
+        let result = scan_text_in(&state, "photo.png", "not really a png");
+        assert!(
+            result.is_err(),
+            "a format with no parser must be named, not silently text-scanned"
+        );
+    }
+
+    #[test]
+    fn an_unknown_entity_type_is_refused() {
+        let project = TempProject::new("bad-type");
+        let state = project.open();
+        assert!(add_term_in(&state, "Vantor", "NOT_A_TYPE").is_err());
+    }
+
+    #[test]
+    fn the_standalone_gate_blocks_on_a_name_the_vault_knows() {
+        let project = TempProject::new("verify-blocks");
+        let state = project.open();
+        add_term_in(&state, "Vantor", "ORG").expect("term");
+        // Interning happens on the first sanitize, which is what gives the gate
+        // something to look for.
+        sanitize_text_in(&state, "a.md", "Vantor owns billing.\n").expect("sanitize");
+
+        let result = verify_text_in(&state, "A note about Vantor.").expect("verify");
+        assert!(!result.clean);
+        assert!(result.patterns_checked > 0);
+        assert_eq!(result.leaks.len(), 1);
+        assert_eq!(result.leaks[0].matched, "Vantor");
+    }
+
+    #[test]
+    fn the_standalone_gate_reports_zero_patterns_rather_than_a_false_clean() {
+        // A project with no identities has nothing for the gate to look for.
+        // Reporting that as clean is how a check that verified nothing looks
+        // exactly like one that passed.
+        let project = TempProject::new("verify-nothing");
+        let state = project.open();
+
+        let result = verify_text_in(&state, "Anything at all.").expect("verify");
+        assert_eq!(result.patterns_checked, 0);
+        assert!(result.leaks.is_empty());
+    }
+
+    #[test]
+    fn an_allowlisted_name_stops_being_aliased_and_stops_blocking() {
+        // PRD FR-10, both halves. Fixing only the detector would leave the name
+        // in the twin for the gate to block on, forever.
+        let project = TempProject::new("allowlisted");
+        let state = project.open();
+        add_term_in(&state, "invoice", "DB_TABLE").expect("term");
+        sanitize_text_in(&state, "a.md", "The invoice table.\n").expect("first sanitize interns it");
+
+        state
+            .with(|vault, _| {
+                vault.add_allowed("invoice", Some("a common word here"))?;
+                Ok(())
+            })
+            .expect("allow");
+
+        let result = sanitize_text_in(&state, "a.md", "The invoice table.\n").expect("sanitize");
+        let twin = result.twin.expect("not blocked");
+        assert!(twin.contains("invoice"), "the user said leave it alone: {twin}");
+        assert!(result.verified, "and the gate must not then block on it");
     }
 
     #[test]

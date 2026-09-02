@@ -319,8 +319,16 @@ Usually one of:
 - **A name inside a compound**, like `old_vantor_id`. `_` and `-` are word
   boundaries for this scan.
 - **A common word that is also one of your table names.** If `invoice` is a table,
-  the word "invoice" in a sentence is flagged. If that is wrong for you, add it to
-  the allowlist.
+  the word "invoice" in a sentence is flagged. If that is wrong for you:
+
+  ```bash
+  specshield allow invoice
+  ```
+
+  That stops it being aliased **and** stops the gate looking for it — both
+  halves, or the name would survive into the twin and block every export from
+  then on. It is the only way the gate opens, so it is worth being deliberate
+  about: a name on the allowlist can leave in a twin.
 
 There is no override that emits the twin anyway.
 

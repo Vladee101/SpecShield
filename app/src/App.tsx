@@ -1830,6 +1830,8 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
             {result.aliased} alias applications, {result.identities} identities in the vault,{" "}
             {result.renamed} path(s) renamed. Every file passed the gate, paths included.
             <br />
+            {result.allowlisted > 0 &&
+              ` ${result.allowlisted} name(s) the gate was told to ignore.`}{" "}
             {result.unchecked} file(s) had no structure to verify against.
             {result.abandoned.length === 0
               ? " Every parsed file verified structurally."

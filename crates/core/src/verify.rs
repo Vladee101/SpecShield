@@ -61,6 +61,25 @@ impl LeakScanner {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        Self::with_allowlist(real_names, &std::collections::BTreeSet::new())
+    }
+
+    /// The same, minus names the user has marked never-alias — PRD FR-10.
+    ///
+    /// This is the one place the user can open the gate, and it has to exist.
+    /// Without it, allowlisting a name the vault already knows is a deadlock:
+    /// the detector correctly stops aliasing it, the name survives into the
+    /// twin, and the gate blocks every export from then on with no way forward
+    /// except deleting the identity.
+    ///
+    /// It is a real hole in the product's main control, so it is deliberate on
+    /// both sides — the user typed the term — and callers report how many names
+    /// were excluded, so an open gate is never silent.
+    pub fn with_allowlist<I, S>(real_names: I, allowed: &std::collections::BTreeSet<String>) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         let mut patterns = Vec::new();
         let mut origins = Vec::new();
 
@@ -69,6 +88,9 @@ impl LeakScanner {
             if name.len() < MIN_NAME_LEN {
                 // Very short names produce runaway false positives ("id", "db")
                 // and are not identifying on their own.
+                continue;
+            }
+            if allowed.contains(name) {
                 continue;
             }
             for variant in case_variants(name) {
@@ -321,5 +343,30 @@ mod tests {
             ["customer", "Subscription", "Service"]
         );
         assert_eq!(split_words("customer_subscription"), ["customer", "subscription"]);
+    }
+
+    #[test]
+    fn an_allowlisted_name_does_not_block_the_gate() {
+        // PRD FR-10. Without this, marking a name never-alias is a deadlock:
+        // the detector stops aliasing it, so it survives into the twin, and the
+        // gate then blocks every export forever.
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert("invoice".to_owned());
+
+        let scanner = LeakScanner::with_allowlist(vec!["invoice".to_owned(), "Vantor".to_owned()], &allowed);
+
+        assert!(scanner.scan("The invoice table.").is_clean());
+        assert!(
+            !scanner.scan("The Vantor invoice table.").is_clean(),
+            "allowlisting one name must not open the gate for the others"
+        );
+    }
+
+    #[test]
+    fn the_allowlist_is_the_only_way_the_gate_opens() {
+        // Every other name in the vault still blocks. The hole is exactly as
+        // wide as what the user typed, and no wider.
+        let scanner = LeakScanner::with_allowlist(vec!["invoice".to_owned()], &std::collections::BTreeSet::new());
+        assert!(!scanner.scan("The invoice table.").is_clean());
     }
 }

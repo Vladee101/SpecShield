@@ -82,7 +82,18 @@ them captures the twin anyway. The captured content has passed the gate, so this
 is disclosure of aliased content — but on a machine with an aggressive clipboard
 tool, the twin should be treated as having been logged.
 
-### 2.6 Anything pasted by hand
+### 2.6 The allowlist opens the gate
+
+Marking a term never-alias (PRD FR-10) removes it from the export gate as well
+as from detection. It has to: otherwise the name stops being aliased, survives
+into the twin, and blocks every export from then on.
+
+So an allowlisted name **can leave in a twin**. That is the user's decision and
+the only way the gate opens, but it is a decision, and one worth reviewing
+periodically — `specshield audit` records that terms were added, and every
+export reports how many names the gate was told to ignore.
+
+### 2.7 Anything pasted by hand
 
 SpecShield protects what goes through SpecShield.
 

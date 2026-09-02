@@ -86,7 +86,7 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 |---|---|
 | M0 foundations + spikes | done — see `spikes/M0-*.md` |
 | M1 core engine, Markdown/text, vault | done — corpus gate enforced in CI |
-| M2 Tauri shell | Workflow A works end to end; P1-5 remains |
+| M2 Tauri shell | done |
 | M3 SQL / YAML / OpenAPI | parsers done; P2-4 unification remains |
 | M4 TypeScript + repo scale | done — parser, index, project export, path aliasing |
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
@@ -218,12 +218,20 @@ Two things worth remembering about the implementation:
   pipeline forever.
 
 
-**P1-5. Thin test coverage in the Tauri layer.** `app/src-tauri/src/state.rs`
-has six tests covering the copyable-twin state machine, and
-`app/src-tauri/src/clipboard.rs` drives the real Win32 path. The *commands* in
-`lib.rs` still have none — they need a harness that can stand up an `AppState`
-and drive `sanitize_text` / `copy_verified_twin` without a window.
+**P1-5. Tauri command coverage. — DONE.** `app/src-tauri/src/lib.rs` has 30
+tests now, covering the commands rather than only the helpers: the sanitize
+gate and the copyable-twin transition, the parser refusal, the standalone
+gate's clean-versus-nothing-checked distinction, the staleness and unresolved
+guards on apply, re-key's confirmation, escrow's passphrase check, and the
+capability set.
 
+`tauri::test`'s mock runtime does not link on Windows
+(`STATUS_ENTRYPOINT_NOT_FOUND`), so the commands are split into a thin
+`#[tauri::command]` wrapper and a `_in` body taking `&AppState`. The wrapper is
+one line; everything worth testing is below it.
+
+**The coverage immediately earned itself** — see the allowlist defect it found,
+recorded in the commit for FR-10.
 ---
 
 ### P2 — M3, next milestone

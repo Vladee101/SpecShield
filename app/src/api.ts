@@ -181,6 +181,8 @@ export interface ExportSummary {
   abandoned: [string, string][];
   /** Non-empty means nothing was written at all. */
   blocked: [string, string[]][];
+  /** Vault names the gate was told to ignore — FR-10. */
+  allowlisted: number;
   destination: string;
 }
 

@@ -778,6 +778,10 @@ fn run_allow(project: &Path, term: &str, reason: Option<&str>, explicit: Option<
 
     println!("{term:?} will never be aliased in this project.");
     println!("{} term(s) on the allowlist.", vault.allowlist()?.len());
+    println!();
+    println!("This also stops the export gate looking for it. If the project has already");
+    println!("interned that name, it can now leave in a twin — which is what you asked for,");
+    println!("and is the only way the gate opens.");
     Ok(())
 }
 
@@ -835,7 +839,7 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
     let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()), &context)?;
 
     // SDD §8 — nothing is emitted before the gate passes.
-    let scanner = verify::LeakScanner::new(graph.real_names());
+    let scanner = project::gate(&vault, &graph)?;
     let verdict = scanner.scan(&result.twin);
     let secret_findings = secrets::scan(&result.twin);
 
@@ -921,7 +925,7 @@ fn run_verify(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()>
     let text = std::fs::read_to_string(file)?;
     let graph = graph_from(&vault)?;
 
-    let scanner = verify::LeakScanner::new(graph.real_names());
+    let scanner = project::gate(&vault, &graph)?;
     let verdict = scanner.scan(&text);
     let secret_findings = secrets::scan(&text);
 
@@ -1116,6 +1120,12 @@ fn report_export(dest: &Path, result: &project::Exported) {
         result.aliased, result.identities
     );
     println!("  every file passed the gate (SDD §8), paths included");
+    if result.allowlisted > 0 {
+        println!(
+            "  {} name(s) the gate was told to ignore — `specshield allow` (FR-10)",
+            result.allowlisted
+        );
+    }
     println!("  {} path(s) renamed in the twin tree", result.renamed);
     println!("  {} file(s) had no structure to verify against", result.unchecked);
     if result.abandoned.is_empty() {

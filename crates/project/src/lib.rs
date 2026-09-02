@@ -133,6 +133,23 @@ pub fn context_from_graph(graph: &Graph) -> ProjectContext {
     ProjectContext::new(members, names)
 }
 
+/// The names the user has marked never-alias — PRD FR-10.
+///
+/// Needed by the gate as well as the detector: allowlisting a name the vault
+/// already knows would otherwise stop it being aliased and then block every
+/// export on it. See [`specshield_core::verify::LeakScanner::with_allowlist`].
+pub fn allowlist(vault: &vault::Vault) -> Result<std::collections::BTreeSet<String>> {
+    Ok(vault.allowlist()?.into_iter().collect())
+}
+
+/// A gate that honours the project's allowlist.
+pub fn gate(vault: &vault::Vault, graph: &Graph) -> Result<verify::LeakScanner> {
+    Ok(verify::LeakScanner::with_allowlist(
+        graph.real_names(),
+        &allowlist(vault)?,
+    ))
+}
+
 /// Seed a detector from everything the project knows — SDD §5.
 ///
 /// The SQL scan interns the table `invoice`; the OpenAPI spec next to it then
@@ -337,6 +354,9 @@ pub struct Exported {
     /// Non-empty means nothing was written. A partially clean twin project is
     /// not clean.
     pub blocked: Vec<(String, Vec<String>)>,
+    /// How many vault names the gate was told to ignore — PRD FR-10. Reported
+    /// because an open gate must never be silent.
+    pub allowlisted: usize,
 }
 
 impl Exported {
@@ -377,7 +397,7 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
     // throwing them away would hand different aliases to the next run.
     persist(vault, &graph)?;
 
-    let scanner = verify::LeakScanner::new(graph.real_names());
+    let scanner = gate(vault, &graph)?;
     for (path, content) in &twins.staged {
         let Payload::Text(twin) = content else { continue };
         if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
@@ -418,6 +438,7 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
             renamed,
             unchecked: twins.unchecked,
             written: 0,
+            allowlisted: allowlist(vault)?.len(),
         });
     }
 
@@ -458,6 +479,7 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
         unchecked: twins.unchecked,
         abandoned: twins.abandoned,
         blocked: Vec::new(),
+        allowlisted: allowlist(vault)?.len(),
     })
 }
 

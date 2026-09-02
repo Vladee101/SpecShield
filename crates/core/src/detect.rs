@@ -248,6 +248,13 @@ impl Detector {
             let mut patterns: Vec<String> = Vec::new();
             let mut types: Vec<EntityType> = Vec::new();
             for (term, entity_type) in &self.dictionary {
+                // An allowlisted term contributes no variants either. Filtering
+                // only by the variant's own text let `invoice` through as
+                // `Invoice`, which the case-insensitive automaton then matched
+                // against the very word the user had just excluded.
+                if self.is_allowed(term) {
+                    continue;
+                }
                 for variant in crate::verify::case_variants(term) {
                     if variant == *term || variant.len() < 4 || self.is_allowed(&variant) {
                         continue;
@@ -326,6 +333,20 @@ impl Detector {
                     continue;
                 }
                 let (term, entity_type) = &self.dictionary[m.pattern().as_usize()];
+
+                // The allowlist wins over the dictionary — PRD FR-10 says the
+                // user may mark *any* term never-alias, with no carve-out for
+                // terms they added themselves.
+                //
+                // It did not, and the omission was invisible: `specshield allow`
+                // reported success and the term kept being aliased. A user who
+                // adds `invoice` as a table and then decides the word in prose
+                // is a false positive has said something more specific and more
+                // recent, and it has to be honoured.
+                if self.is_allowed(term) {
+                    continue;
+                }
+
                 push(
                     Candidate {
                         real_name: term.clone(),
@@ -840,5 +861,18 @@ mod tests {
     fn whole_token_matching_ignores_substrings() {
         assert!(whole_token_spans("invoice_id", "invoice").is_empty());
         assert_eq!(whole_token_spans("the invoice here", "invoice"), vec![(4, 11)]);
+    }
+
+    #[test]
+    fn the_allowlist_beats_a_dictionary_term() {
+        // PRD FR-10: the user may mark *any* term never-alias, including one
+        // they added themselves. `specshield allow` reported success and the
+        // term kept being aliased.
+        let d = Detector::new()
+            .with_term("invoice", EntityType::Table)
+            .with_allowed("invoice");
+
+        let found = d.scan_text("The invoice table.", "doc", OccurrenceKind::Reference);
+        assert!(found.iter().all(|c| c.real_name != "invoice"), "{found:#?}");
     }
 }
