@@ -256,10 +256,10 @@ specshield escrow ~/secure/project.escrow --escrow-passphrase 'held by security'
 The **backup** is a consistent encrypted copy, opened by the same passphrase. It
 is not a second factor: whoever has it and the passphrase has the mapping.
 
-The **escrow** file holds the vault passphrase itself, sealed under a second,
-separate passphrase. Give it to whoever holds recovery responsibility — they can
-get back in without knowing your passphrase. That also means they can get *all*
-the way in; there is no partial access.
+The **escrow** file holds the vault's *data key*, sealed under a second, separate
+passphrase. Give it to whoever holds recovery responsibility: they can get back
+in, and they never learn your passphrase — which matters if you reuse it
+anywhere. They do get all the way in; there is no partial access.
 
 To use them:
 
@@ -268,7 +268,31 @@ specshield restore-vault ~/secure/project.vault.backup --into .specshield/vault.
 specshield escrow-open ~/secure/project.escrow --escrow-passphrase 'held by security'
 ```
 
-Neither ever writes over an existing vault.
+`restore-vault` never writes over an existing vault. `escrow-open` re-wraps the
+data key under a passphrase you choose and asks for it, so nothing sensitive
+crosses the terminal.
+
+### Changing the passphrase
+
+```bash
+specshield passphrase
+```
+
+Re-wraps the data key. Nothing is re-encrypted, no alias changes, and every twin
+and backup keeps working.
+
+### Revoking an escrow
+
+Handing an escrow file back does not revoke it — whoever held it may have copied
+the key. Only rotating the data key does:
+
+```bash
+specshield rotate-key --confirm
+```
+
+That re-encrypts every stored value. Aliases do not change and twins keep
+working — this is not `rekey`. What stops working is every escrow issued before
+now.
 
 ### When the vault will not open
 

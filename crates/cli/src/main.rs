@@ -302,17 +302,47 @@ enum Command {
         passphrase: Option<String>,
     },
 
-    /// Recover a vault passphrase from an escrow file — PRD FR-11.
+    /// Get back into a vault with an escrow file — PRD FR-11.
     ///
-    /// Prints the passphrase on stdout so it can be piped straight into
-    /// `SPECSHIELD_PASSPHRASE`; everything explanatory goes to stderr.
+    /// Re-wraps the vault's data key under a passphrase you choose. The escrow
+    /// holds a key, not a passphrase, so this never reveals the original one.
     EscrowOpen {
         file: PathBuf,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
         #[arg(long)]
         escrow_passphrase: String,
-        /// Check it against this project's vault before printing anything.
+        /// The passphrase to set. Prompted for when omitted.
         #[arg(long)]
-        verify_against: Option<PathBuf>,
+        new_passphrase: Option<String>,
+    },
+
+    /// Rotate the vault's data key — PRD FR-11.
+    ///
+    /// Re-encrypts every stored value. Aliases do not change and twins keep
+    /// working; what stops working is every escrow file and every backup taken
+    /// before now. That is what revoking an escrow means.
+    RotateKey {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// Change the vault passphrase — PRD FR-11.
+    ///
+    /// Re-wraps the data key. Not one encrypted value moves, which is why this
+    /// is possible at all.
+    Passphrase {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        /// The new passphrase. Prompted for, twice, when omitted.
+        #[arg(long)]
+        new_passphrase: Option<String>,
+        #[arg(long)]
+        passphrase: Option<String>,
     },
 
     /// Regenerate every alias under a new project key — PRD FR-11.
@@ -531,9 +561,20 @@ fn main() -> Result<()> {
         } => run_escrow(&project, &out, &escrow_passphrase, passphrase.as_deref()),
         Command::EscrowOpen {
             file,
+            project,
             escrow_passphrase,
-            verify_against,
-        } => run_escrow_open(&file, &escrow_passphrase, verify_against.as_deref()),
+            new_passphrase,
+        } => run_escrow_open(&file, &escrow_passphrase, &project, new_passphrase.as_deref()),
+        Command::RotateKey {
+            project,
+            confirm,
+            passphrase,
+        } => run_rotate_key(&project, confirm, passphrase.as_deref()),
+        Command::Passphrase {
+            project,
+            new_passphrase,
+            passphrase,
+        } => run_passphrase(&project, new_passphrase.as_deref(), passphrase.as_deref()),
         Command::Rekey {
             project,
             confirm,
@@ -633,6 +674,27 @@ fn passphrase(explicit: Option<&str>) -> Result<Zeroizing<String>> {
         }
         Source::Unavailable => bail!(NO_TERMINAL),
     }
+}
+
+/// Ask for a passphrase to *set*, twice, with no environment fallback.
+///
+/// Distinct from [`new_passphrase`], which is for `init` and lets a script
+/// supply one. Here the caller has already decided a new value is needed, and
+/// `SPECSHIELD_PASSPHRASE` holds the *old* one — reading it would silently set
+/// the passphrase to what it already was.
+fn new_passphrase_prompt() -> Result<Zeroizing<String>> {
+    if !terminal_available() {
+        bail!("no terminal to ask on — pass --new-passphrase");
+    }
+
+    let first = ask("New passphrase: ")?;
+    if first.is_empty() {
+        bail!("an empty passphrase protects nothing");
+    }
+    if *first != *ask("Again: ")? {
+        bail!("those did not match — nothing was changed");
+    }
+    Ok(first)
 }
 
 /// A passphrase for a vault that does not exist yet — asked twice.
@@ -1592,12 +1654,9 @@ fn run_escrow(project: &Path, out: &Path, escrow_passphrase: &str, explicit: Opt
     // Opening proves the passphrase is the right one before it is escrowed. An
     // escrow file holding a wrong passphrase is worse than none: it is a
     // recovery plan that fails only when it is needed.
-    let passphrase = passphrase(explicit)?;
-    let vault = vault::Vault::open(&vault_path(project), &passphrase)?;
-
-    let sealed = vault::backup::export_escrow(&passphrase, escrow_passphrase)?;
+    let vault = open(project, explicit)?;
+    let sealed = vault.export_escrow(escrow_passphrase)?;
     std::fs::write(out, &sealed)?;
-    vault.log("vault.escrow", None, None, None, None)?;
 
     println!("Escrow written to {}", out.display());
     println!();
@@ -1609,23 +1668,81 @@ fn run_escrow(project: &Path, out: &Path, escrow_passphrase: &str, explicit: Opt
 ///
 /// An escrow file nobody can open is not a recovery plan, it is a reassurance.
 /// This is the verb that makes it real.
-fn run_escrow_open(file: &Path, escrow_passphrase: &str, verify_against: Option<&Path>) -> Result<()> {
+fn run_escrow_open(file: &Path, escrow_passphrase: &str, project: &Path, new_passphrase: Option<&str>) -> Result<()> {
     let sealed = std::fs::read(file).with_context(|| format!("reading {}", file.display()))?;
-    let recovered = vault::backup::open_escrow(&sealed, escrow_passphrase)?;
 
-    if let Some(project) = verify_against {
-        // Better to fail here than to hand someone a passphrase that turns out
-        // to belong to a different vault.
-        vault::Vault::open(&vault_path(project), &recovered)
-            .context("the escrowed passphrase does not open that project's vault")?;
-        eprintln!("Verified against {}.", vault_path(project).display());
+    // The recovery operation itself, rather than printing a key out. Nothing
+    // sensitive crosses the terminal, and the holder ends up with a vault they
+    // can open normally.
+    let chosen = match new_passphrase {
+        Some(given) => Zeroizing::new(given.to_owned()),
+        None => new_passphrase_prompt()?,
+    };
+
+    vault::Vault::recover_with_escrow(&vault_path(project), &sealed, escrow_passphrase, &chosen)?;
+
+    println!("Recovered {}.", vault_path(project).display());
+    println!("The vault now opens with the passphrase you just set.");
+    println!();
+    println!("The escrow file still holds the data key. To make it stop working,");
+    println!("rotate the key: `specshield rotate-key --confirm`.");
+    Ok(())
+}
+
+/// PRD FR-11 — rotate the vault's data key.
+///
+/// The counterpart to `passphrase`: that one re-wraps the key and touches
+/// nothing; this one replaces the key and re-encrypts everything. It is the only
+/// operation that makes an issued escrow or an old backup stop working, because
+/// whoever holds one has the *old* key and no amount of re-wrapping takes that
+/// back.
+fn run_rotate_key(project: &Path, confirm: bool, explicit: Option<&str>) -> Result<()> {
+    let mut vault = open(project, explicit)?;
+    let identities = vault.identities()?.len();
+
+    if !confirm {
+        println!("Rotating the data key re-encrypts all {identities} stored identities.");
+        println!();
+        println!("Aliases do not change and twins keep working — this is not `rekey`.");
+        println!("What stops working:");
+        println!("  · every escrow file issued before now");
+        println!("  · every backup taken before now (it still opens with its own passphrase,");
+        println!("    but it holds the old key, so a later escrow against it will not match)");
+        println!();
+        println!("Do this when an escrow file has been over-shared. Then:");
+        println!("  specshield rotate-key --confirm");
+        return Ok(());
     }
 
-    eprintln!(
-        "Recovered from {}. Treat what follows as the passphrase itself.",
-        file.display()
-    );
-    println!("{recovered}");
+    let passphrase = passphrase(explicit)?;
+    vault.rotate_data_key(&passphrase)?;
+
+    println!("Data key rotated. {identities} identities re-encrypted.");
+    println!("  Aliases are unchanged; every twin still restores.");
+    println!("  Every escrow issued before now no longer opens this vault.");
+    println!();
+    println!("Issue a fresh escrow: specshield escrow <path> --escrow-passphrase <p>");
+    Ok(())
+}
+
+/// PRD FR-11 — change the vault passphrase.
+fn run_passphrase(project: &Path, new: Option<&str>, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let old = passphrase(explicit)?;
+
+    let chosen = match new {
+        Some(given) => Zeroizing::new(given.to_owned()),
+        None => new_passphrase_prompt()?,
+    };
+
+    vault.change_passphrase(&old, &chosen)?;
+
+    println!("Passphrase changed.");
+    println!("  Nothing was re-encrypted — only the wrapper around the vault's data key.");
+    println!("  Every alias, every twin, and every backup still works.");
+    println!();
+    println!("An escrow file issued earlier still opens this vault: it holds the data key,");
+    println!("not the passphrase. `specshield rotate-key --confirm` is what stops one working.");
     Ok(())
 }
 

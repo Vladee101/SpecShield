@@ -106,43 +106,42 @@ assume instead.
 
 ### 3.1 There is no OS credential store integration
 
-SDD §9.4 and §17.2 describe a vault key held in Windows Credential Manager, macOS
-Keychain, or Linux Secret Service, with an optional passphrase wrapping it.
-**None of that is implemented.** The passphrase is the only key path: it is read
-from `SPECSHIELD_PASSPHRASE` or `--passphrase`, and the encryption keys are
-derived from it directly with Argon2id.
+SDD §9.4 and §17.2 once described a vault key held in Windows Credential
+Manager, macOS Keychain, or Linux Secret Service. **That is not implemented.**
+The passphrase is the only way in: it derives a key-encryption key with Argon2id,
+which wraps the vault's data key.
 
 Consequences:
 
 - The command line prompts with echo off when nothing else is supplied, and
   `init` asks twice. But **`--passphrase` is still visible in the process list**
-  to other users on the machine — it warns each time it is used, and it is
-  supported because some automation has no alternative.
+  to other users on the machine — it warns each time, and it is supported
+  because some automation has no alternative.
 - In scripted use the passphrase is in an environment variable, with whatever
   exposure that carries in the surrounding system (CI logs, process inspection,
   crash dumps).
-- Nothing about the passphrase is stored anywhere, so a forgotten passphrase is
-  an unrecoverable vault. This is by design and is why escrow exists — but with
-  no credential store there is also no convenience path that would make people
-  choose a strong passphrase and not write it down.
+- Nothing about the passphrase is stored, so a forgotten passphrase means
+  recovering through an escrow file or a backup. That is what they are for.
 
-Whether this is worse than the designed behaviour is genuinely arguable: there is
-no stored key for malware to steal. It is nonetheless *not what the design
-documents describe*, and a reviewer comparing the two would otherwise be misled.
+Arguably better than the design it replaced: there is no key at rest for malware
+to steal. It is nonetheless *not what those sections once described*, which is
+why they now describe what exists.
 
-### 3.2 Escrow holds the passphrase, not a wrapped key
+### 3.2 Escrow can be revoked, but only by re-encrypting
 
-Because keys derive straight from the passphrase, there is no independent key to
-escrow. An escrow file therefore contains **the vault passphrase**, sealed under a
-second passphrase with Argon2id + AES-256-GCM.
+Schema v3 wraps a random data key with a passphrase-derived key, so:
 
-Consequence: whoever holds the escrow file and its passphrase holds the vault
-passphrase itself, not a revocable credential. There is no way to grant recovery
-access without granting full access, and no way to revoke an escrow file once
-issued other than changing the vault passphrase — which currently means creating
-a new vault, since passphrase rotation would require re-encrypting every column.
+- **Changing the passphrase** re-wraps 32 bytes. Nothing is re-encrypted.
+- **Escrow holds the data key**, not the passphrase. Whoever holds an escrow
+  file can recover access; they never learn the passphrase, which matters
+  because people reuse them.
+- **Revoking an issued escrow** means rotating the data key, which re-encrypts
+  every stored value. `specshield rotate-key --confirm`.
 
-A wrapped-master-key design fixes all of this and should land before 1.0.
+The residual point: an escrow file is a *bearer* credential until you rotate.
+Handing one back does not revoke it — whoever held it may have copied the key.
+Rotation is the only revocation, it takes time proportional to the vault, and it
+invalidates every backup taken before it as an escrow source.
 
 ### 3.3 The desktop UI has not been driven end to end
 

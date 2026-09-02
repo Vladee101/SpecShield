@@ -48,13 +48,18 @@ never restored — a high-confidence finding blocks the export.
 ## Where the mapping lives
 
 `.specshield/vault.bin`, per project. Every sensitive column is sealed with
-AES-256-GCM under a key derived from the user's passphrase with Argon2id. Each
-ciphertext is bound to its table, column, and row, so values cannot be relocated.
-Searchability comes from a blind index (HMAC), not from decryption. Key material
-is zeroized.
+AES-256-GCM under a random **data key**, which is itself wrapped by a key derived
+from the passphrase with Argon2id. Each ciphertext is bound to its table, column,
+and row, so values cannot be relocated. Searchability comes from a blind index
+(HMAC), not from decryption. Key material is zeroized.
 
-**Nothing about the passphrase is stored.** A lost passphrase is an unrecoverable
-vault; that is the design, and it is why backup and escrow exist.
+The indirection is what makes key management possible: changing the passphrase
+re-wraps 32 bytes rather than re-encrypting the database, and escrow hands out
+the data key rather than the passphrase — so a recovery holder never learns a
+credential the user may have reused elsewhere.
+
+**Nothing about the passphrase is stored.** A lost passphrase is recovered
+through an escrow file or a backup, or not at all.
 
 ## Writing back
 
@@ -79,12 +84,13 @@ outright — a stale patch can apply cleanly and silently revert a colleague's w
 
 ## Gaps in this build, stated plainly
 
-- **No OS credential store.** SDD §9.4 describes one; it does not exist. The CLI
-  prompts with echo off, but for scripts the passphrase lives in an environment
-  variable — and `--passphrase`, still supported for automation that has no
-  alternative, is visible in the process list.
-- **Escrow holds the passphrase itself**, not a revocable key, because keys derive
-  directly from the passphrase.
+- **No OS credential store.** SDD §9.4 once described one; it does not exist. The
+  CLI prompts with echo off, but for scripts the passphrase lives in an
+  environment variable — and `--passphrase`, still supported for automation that
+  has no alternative, is visible in the process list.
+- **An escrow file is a bearer credential** until the data key is rotated.
+  Handing one back does not revoke it; `specshield rotate-key` does, by
+  re-encrypting the vault.
 - **Installers are unsigned.**
 - **The desktop UI has not been driven end to end**; verification has been through
   the CLI.

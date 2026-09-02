@@ -5,20 +5,23 @@
 //! passphrase. Everything here is about making that survivable *before* it
 //! happens.
 //!
-//! # Why escrow holds the passphrase
+//! # What escrow holds
 //!
-//! The encryption keys are derived straight from the passphrase (Argon2id over
-//! passphrase + salt, then two domain-separated subkeys). There is no random
-//! master key sitting behind a wrapping key, so there is nothing to escrow
-//! *except* the passphrase. An escrow file therefore holds the vault passphrase,
-//! sealed under a second, separate one.
+//! The vault's **data key**, sealed under a separate escrow passphrase — schema
+//! v3. Whoever holds the file and its passphrase can open the vault; they cannot
+//! learn the vault passphrase, which matters because people reuse passphrases
+//! and a recovery credential should not double as a credential for someone's
+//! other accounts.
 //!
-//! A wrapped-master-key design would be better: it would let the passphrase be
-//! changed without re-encrypting every column, and would let escrow hand out the
-//! data key without handing out the passphrase. It is not what this build does,
-//! because moving to it means re-encrypting every sealed value in every existing
-//! vault. That is a migration worth writing before 1.0, not a change to slip in
-//! alongside a backup feature.
+//! Recovery re-wraps that key under a passphrase the holder chooses
+//! ([`crate::Vault::recover_with_escrow`]) rather than printing a key out. It is
+//! the operation someone actually wants, and nothing sensitive crosses a
+//! terminal.
+//!
+//! Earlier builds escrowed the passphrase itself, because the content keys were
+//! derived straight from it and there was nothing else to escrow. The magic
+//! bytes changed with the format, so an escrow file from one of those is
+//! refused rather than silently misread.
 //!
 //! # No destructive operations
 //!
@@ -39,7 +42,12 @@ use crate::{SALT_LEN, VaultError, random_bytes, schema};
 
 /// Magic bytes so an escrow file is identifiable and cannot be confused with a
 /// vault, a backup, or anything else.
-const ESCROW_MAGIC: &[u8; 16] = b"SPECSHIELD-ESCR\x01";
+/// Bumped from `\x01` when the format changed from holding the passphrase to
+/// holding the data key (schema v3). A file in the old format is refused rather
+/// than decrypted into 32 bytes of something that is not a key.
+const ESCROW_MAGIC: &[u8; 16] = b"SPECSHIELD-ESCR\x02";
+#[cfg(test)]
+const ESCROW_MAGIC_V1: &[u8; 16] = b"SPECSHIELD-ESCR\x01";
 const NONCE_LEN: usize = 12;
 
 /// The warning FR-11 requires, carried inside the artifact rather than only
@@ -50,6 +58,10 @@ SpecShield key escrow.
 This file plus its escrow passphrase opens the vault it came from, and the vault
 maps every alias back to a real name. Store it the way you would store the
 passphrase itself.
+
+It holds the vault's data key, not its passphrase. Whoever has it can open the
+vault; they cannot learn the passphrase. Handing it back is not revocation —
+only rotating the data key does that, and it re-encrypts the whole vault.
 
 If both this file and the vault passphrase are lost, the mapping is gone. There
 is no recovery path, by design: nothing about the passphrase is stored anywhere,
@@ -123,11 +135,14 @@ pub fn restore_from(backup: &Path, dest: &Path, passphrase: &str) -> Result<(), 
     Ok(())
 }
 
-/// Seal the vault passphrase under a separate escrow passphrase.
+/// Seal the vault's data key under an escrow passphrase.
 ///
 /// Layout: magic ‖ salt ‖ nonce ‖ ciphertext. The warning is authenticated as
 /// associated data, so it cannot be stripped from a file that still decrypts.
-pub fn export_escrow(vault_passphrase: &str, escrow_passphrase: &str) -> Result<Vec<u8>, VaultError> {
+///
+/// Call [`crate::Vault::export_escrow`] rather than this directly — the data key
+/// does not otherwise leave the vault type.
+pub fn seal_escrow(data_key: &[u8; 32], escrow_passphrase: &str) -> Result<Vec<u8>, VaultError> {
     if escrow_passphrase.is_empty() {
         return Err(VaultError::KeyDerivation(
             "an escrow passphrase of nothing protects nothing".to_owned(),
@@ -151,7 +166,7 @@ pub fn export_escrow(vault_passphrase: &str, escrow_passphrase: &str) -> Result<
         .encrypt(
             &Nonce::from(nonce_bytes),
             Payload {
-                msg: vault_passphrase.as_bytes(),
+                msg: data_key,
                 aad: ESCROW_WARNING.as_bytes(),
             },
         )
@@ -165,14 +180,19 @@ pub fn export_escrow(vault_passphrase: &str, escrow_passphrase: &str) -> Result<
     Ok(out)
 }
 
-/// Recover the vault passphrase from an escrow file.
-pub fn open_escrow(escrow: &[u8], escrow_passphrase: &str) -> Result<String, VaultError> {
+/// Recover the vault's data key from an escrow file.
+pub fn open_escrow(escrow: &[u8], escrow_passphrase: &str) -> Result<[u8; 32], VaultError> {
     let header = ESCROW_MAGIC.len() + SALT_LEN + NONCE_LEN;
     if escrow.len() <= header {
         return Err(VaultError::Corrupt);
     }
     if &escrow[..ESCROW_MAGIC.len()] != ESCROW_MAGIC {
-        return Err(VaultError::NotAVault("not a SpecShield escrow file".to_owned()));
+        // An escrow written before schema v3 held the passphrase, not the data
+        // key. Refusing it beats decrypting 32 bytes of something else and
+        // calling it a key.
+        return Err(VaultError::NotAVault(
+            "not a SpecShield escrow file, or one written by a build before schema v3".to_owned(),
+        ));
     }
 
     let salt = &escrow[ESCROW_MAGIC.len()..ESCROW_MAGIC.len() + SALT_LEN];
@@ -198,7 +218,12 @@ pub fn open_escrow(escrow: &[u8], escrow_passphrase: &str) -> Result<String, Vau
         )
         .map_err(|_| VaultError::Decryption)?;
 
-    String::from_utf8(plaintext).map_err(|_| VaultError::Corrupt)
+    let mut data_key = [0u8; 32];
+    if plaintext.len() != data_key.len() {
+        return Err(VaultError::Corrupt);
+    }
+    data_key.copy_from_slice(&plaintext);
+    Ok(data_key)
 }
 
 #[cfg(test)]
@@ -338,29 +363,26 @@ mod tests {
         );
     }
 
+    const A_KEY: [u8; 32] = [42u8; 32];
+
     #[test]
-    fn escrow_round_trips_the_passphrase() {
-        let sealed = export_escrow("the vault passphrase", "the escrow passphrase").unwrap();
-        assert_eq!(
-            open_escrow(&sealed, "the escrow passphrase").unwrap(),
-            "the vault passphrase"
-        );
+    fn escrow_round_trips_the_data_key() {
+        let sealed = seal_escrow(&A_KEY, "the escrow passphrase").unwrap();
+        assert_eq!(open_escrow(&sealed, "the escrow passphrase").unwrap(), A_KEY);
     }
 
     #[test]
-    fn an_escrow_file_never_contains_the_passphrase_in_the_clear() {
-        let sealed = export_escrow("hunter2-correct-horse", "escrow").unwrap();
+    fn an_escrow_file_never_contains_the_key_in_the_clear() {
+        let sealed = seal_escrow(&A_KEY, "escrow").unwrap();
         assert!(
-            !sealed
-                .windows("hunter2-correct-horse".len())
-                .any(|w| w == b"hunter2-correct-horse"),
+            !sealed.windows(A_KEY.len()).any(|w| w == A_KEY),
             "the escrow file leaks what it exists to protect"
         );
     }
 
     #[test]
     fn the_wrong_escrow_passphrase_fails_rather_than_returning_rubbish() {
-        let sealed = export_escrow("vault-pw", "escrow-pw").unwrap();
+        let sealed = seal_escrow(&A_KEY, "escrow-pw").unwrap();
         assert!(matches!(open_escrow(&sealed, "not-it"), Err(VaultError::Decryption)));
     }
 
@@ -368,7 +390,7 @@ mod tests {
     fn the_warning_cannot_be_stripped_from_a_file_that_still_opens() {
         // The warning is authenticated as associated data. An escrow file that
         // arrives without it is not an escrow file.
-        let sealed = export_escrow("vault-pw", "escrow-pw").unwrap();
+        let sealed = seal_escrow(&A_KEY, "escrow-pw").unwrap();
         let mut tampered = sealed.clone();
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
@@ -384,25 +406,42 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_escrow_passphrase_is_refused() {
-        assert!(export_escrow("vault-pw", "").is_err());
+    fn an_escrow_from_before_v3_is_refused_rather_than_misread() {
+        // Those held the passphrase, not the data key. Decrypting 32 bytes of
+        // something else and calling it a key would be worse than failing.
+        let mut old_format = Vec::new();
+        old_format.extend_from_slice(ESCROW_MAGIC_V1);
+        old_format.extend_from_slice(&[0u8; SALT_LEN + NONCE_LEN + 48]);
+
+        let result = open_escrow(&old_format, "pw");
+        assert!(matches!(result, Err(VaultError::NotAVault(_))), "{result:?}");
     }
 
     #[test]
-    fn escrow_opens_the_real_vault_end_to_end() {
-        // The point of the feature: a colleague with the escrow file and the
-        // escrow passphrase can get back into the vault.
+    fn an_empty_escrow_passphrase_is_refused() {
+        assert!(seal_escrow(&A_KEY, "").is_err());
+    }
+
+    #[test]
+    fn escrow_gets_a_colleague_back_in_without_the_passphrase() {
+        // The point of the feature, and of holding the data key rather than the
+        // passphrase: the holder recovers access and never learns what the
+        // original passphrase was.
         let dir = TempDir::new("end-to-end");
         let path = dir.join("vault.bin");
 
         let vault = Vault::create(&path, "the-real-passphrase", &settings()).unwrap();
         vault.put_identity(&identity()).unwrap();
+        let sealed = vault.export_escrow("held-by-security").unwrap();
         drop(vault);
 
-        let sealed = export_escrow("the-real-passphrase", "held-by-security").unwrap();
-        let recovered = open_escrow(&sealed, "held-by-security").unwrap();
+        Vault::recover_with_escrow(&path, &sealed, "held-by-security", "a-new-passphrase").unwrap();
 
-        let reopened = Vault::open(&path, &recovered).unwrap();
+        let reopened = Vault::open(&path, "a-new-passphrase").unwrap();
         assert_eq!(reopened.identities().unwrap()[0].real_name, "CustomerService");
+        assert!(
+            Vault::open(&path, "the-real-passphrase").is_err(),
+            "recovery sets the passphrase the recoverer chose"
+        );
     }
 }

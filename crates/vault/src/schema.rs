@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::VaultError;
 
 /// Current schema version. Bump *and* add a migration; never edit V1 in place.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const V1: &str = r"
 CREATE TABLE meta (
@@ -130,6 +130,14 @@ CREATE TABLE concepts (
 CREATE INDEX ix_concept ON concepts(concept_idx);
 ";
 
+/// The highest version this function can reach on its own.
+///
+/// v3 is not a DDL change. It re-encrypts every sealed value under a new data
+/// key, which needs the passphrase, so `Vault::open` performs it and stamps the
+/// version — see `crate::migrate_to_v3`. A vault that still reads 2 after this
+/// runs is one waiting for that step.
+const DDL_VERSION: i64 = 2;
+
 /// Create or upgrade the schema.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
@@ -137,7 +145,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     if version > SCHEMA_VERSION {
         return Err(VaultError::VersionMismatch { found: version });
     }
-    if version == SCHEMA_VERSION {
+    if version >= DDL_VERSION {
         return Ok(());
     }
 
@@ -147,9 +155,9 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     if version < 2 {
         conn.execute_batch(V2)?;
     }
-    // Future migrations append here, each guarded by `if version < N`.
+    // Future DDL migrations append here, each guarded by `if version < N`.
 
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    conn.pragma_update(None, "user_version", DDL_VERSION)?;
     Ok(())
 }
 
@@ -210,7 +218,19 @@ mod tests {
         migrate(&c).unwrap();
         migrate(&c).unwrap();
         let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(version, DDL_VERSION);
+    }
+
+    #[test]
+    fn the_ddl_migration_stops_short_of_v3() {
+        // v3 re-encrypts every sealed value under a new data key, which needs
+        // the passphrase. `Vault::create` and `Vault::open` stamp it; this
+        // function cannot, and must not pretend to — a vault marked v3 whose
+        // content is still encrypted the old way would never open again.
+        let c = conn();
+        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, DDL_VERSION);
+        assert_ne!(DDL_VERSION, SCHEMA_VERSION, "v3 is not reachable by DDL alone");
     }
 
     #[test]

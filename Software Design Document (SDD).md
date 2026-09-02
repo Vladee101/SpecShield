@@ -708,32 +708,44 @@ Retrofitting migrations onto an encrypted store later is painful, and the alias 
 
 ## 9.4 Key management
 
-**As built:**
+**As built (schema v3):**
 
-- The encryption and blind-index keys are derived directly from a user passphrase
-  with **Argon2id**, then split into two domain-separated subkeys. The salt lives in
-  the vault's `meta` table.
-- **No key is stored anywhere.** Nothing about the passphrase is written to disk, which
-  is why a wrong passphrase and a tampered ciphertext fail identically — both are an
-  AEAD authentication failure.
+- A random 32-byte **data key** is generated at vault creation. Every encrypted
+  column and every blind index derives from it, through two domain-separated
+  subkeys.
+- The data key is stored **wrapped**: `AES-256-GCM(subkey(Argon2id(passphrase,
+  salt), "wrap"), data_key)`, in `meta.data_key`, with associated data binding it
+  to that purpose.
+- **No key is stored unwrapped**, and nothing about the passphrase is written
+  anywhere. A wrong passphrase fails when unwrapping the data key, before
+  anything tries to decrypt content.
 - All key material is `zeroize`d on drop.
-- **Key loss is unrecoverable.** `specshield escrow` exports a passphrase-protected
-  escrow, with a warning authenticated into the file itself (FR-11).
+
+The indirection is the point:
+
+| Operation | Cost |
+|---|---|
+| Change the passphrase | Re-wrap 32 bytes. Nothing else moves. |
+| Export an escrow | Seal the data key under a second passphrase. The vault passphrase is never revealed. |
+| Recover with an escrow | Re-wrap the data key under a passphrase the recoverer chooses. |
+| Revoke an issued escrow | Rotate the data key — a full re-encryption. The only real revocation. |
+
+Before v3 the content keys were derived straight from the passphrase. Changing a
+passphrase would have meant re-encrypting every value, so it was not offered, and
+there was nothing to escrow but the passphrase itself.
+
+**Migrating a v1/v2 vault** happens on first open, in one transaction: decrypt
+with the old keys, re-encrypt with the new ones, recompute every blind index —
+`dictionary`, `allowlist`, and `concepts` use the blind index as their associated
+data, so index and ciphertext must move together. A half-migrated vault is a
+destroyed vault, which is why it commits or rolls back as a unit and why the
+passphrase is proved against the canary before the first write.
 
 **Not built, and previously specified here:** an OS credential store (Windows
-Credential Manager, macOS Keychain, Linux Secret Service) holding a locally generated
-vault key wrapped by an optional passphrase.
-
-That design has a real advantage — it allows a passphrase change without re-encrypting
-every column, and lets escrow hand out a data key rather than the passphrase itself. It
-also has a cost the passphrase-only design avoids: a key at rest for local malware to
-take. What is implemented is the simpler half, and it is the half that is honest about
-the trade — but a reader comparing this document to the code would otherwise be
-misled, so the difference is recorded rather than quietly reconciled.
-
-Moving to a wrapped master key means re-encrypting every sealed value in every existing
-vault. It is a migration to write before 1.0, and it is the precondition for passphrase
-rotation.
+Credential Manager, macOS Keychain, Linux Secret Service) holding the vault key.
+Its advantage was convenience; its cost is a key at rest for local malware to
+take. What exists is the simpler half, and the passphrase remains the only way
+in.
 
 ## 9.5 Re-key
 
@@ -953,7 +965,9 @@ copies after the gate passes.
   value cannot be relocated between rows or columns.
 - Searchability over ciphertext comes from a **blind index** — HMAC under a separate
   domain-separated subkey — never from decryption.
-- Keys derived from the user passphrase with **Argon2id**; no key is stored (§9.4).
+- A random data key encrypts content; the passphrase-derived key only wraps it,
+  so the passphrase can change without touching a single value (§9.4).
+- No key is stored unwrapped.
 - `zeroize` on key material.
 - No telemetry, no analytics.
 

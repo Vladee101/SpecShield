@@ -33,9 +33,9 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::crypto::{Keys, SALT_LEN};
+use crate::crypto::{Kek, Keys, SALT_LEN};
 pub use crate::schema::SCHEMA_VERSION;
 
 #[derive(Debug, thiserror::Error)]
@@ -190,6 +190,13 @@ fn csv_field(value: &str) -> String {
 pub struct Vault {
     conn: Connection,
     keys: Keys,
+    /// Kept so the passphrase can be changed and an escrow issued without
+    /// asking for the passphrase again.
+    ///
+    /// No meaningful extra exposure: `keys` is derived from it and already
+    /// grants full read access to everything the vault holds. It zeroizes on
+    /// drop.
+    data_key: Zeroizing<[u8; 32]>,
     project_id: String,
 }
 
@@ -219,7 +226,21 @@ impl Vault {
             params![&salt[..]],
         )?;
 
-        let keys = Keys::derive(passphrase, &salt)?;
+        // Schema v3 — PRD FR-11. A random data key, wrapped by a key derived
+        // from the passphrase. Content is encrypted under the data key, so
+        // changing the passphrase re-wraps 32 bytes instead of re-encrypting
+        // every value in the database.
+        let mut data_key = [0u8; 32];
+        random_bytes(&mut data_key)?;
+        let kek = Kek::derive(passphrase, &salt)?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('data_key', ?)",
+            params![kek.wrap(&data_key)?],
+        )?;
+
+        let keys = Keys::from_data_key(&data_key);
+        conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
+
         let project_id = new_uuid();
 
         conn.execute(
@@ -244,7 +265,13 @@ impl Vault {
             params![keys.seal("specshield", "meta:canary:0")?],
         )?;
 
-        let vault = Self { conn, keys, project_id };
+        let vault = Self {
+            conn,
+            keys,
+            data_key: Zeroizing::new(data_key),
+            project_id,
+        };
+        data_key.zeroize();
         vault.log("vault.create", None, None, None, None)?;
         Ok(vault)
     }
@@ -276,8 +303,23 @@ impl Vault {
         schema::migrate(&conn)?;
 
         let salt: Vec<u8> = conn.query_row("SELECT value FROM meta WHERE key='kdf_salt'", [], |r| r.get(0))?;
-        let keys = Keys::derive(passphrase, &salt)?;
+        let kek = Kek::derive(passphrase, &salt)?;
 
+        // A vault written before v3 has its content encrypted straight under the
+        // passphrase. Bring it forward before anything reads from it.
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < 3 {
+            migrate_to_v3(&conn, passphrase, &salt, &kek)?;
+        }
+
+        let wrapped: Vec<u8> = conn.query_row("SELECT value FROM meta WHERE key='data_key'", [], |r| r.get(0))?;
+        let data_key = Zeroizing::new(kek.unwrap_key(&wrapped)?);
+        let keys = Keys::from_data_key(&data_key);
+
+        // The canary is now a second check rather than the only one — a wrong
+        // passphrase already failed to unwrap the data key above. It stays
+        // because it also catches a data key that unwrapped but does not match
+        // the content, which is what a botched migration would look like.
         let canary: Vec<u8> = conn.query_row("SELECT value FROM meta WHERE key='canary'", [], |r| r.get(0))?;
         keys.unseal(&canary, "meta:canary:0")?;
 
@@ -286,7 +328,12 @@ impl Vault {
             .optional()?
             .ok_or(VaultError::NotInitialised)?;
 
-        Ok(Self { conn, keys, project_id })
+        Ok(Self {
+            conn,
+            keys,
+            data_key,
+            project_id,
+        })
     }
 
     pub fn settings(&self) -> Result<Settings, VaultError> {
@@ -687,6 +734,171 @@ impl Vault {
         Ok(())
     }
 
+    /// Change the passphrase — PRD FR-11, schema v3.
+    ///
+    /// Re-wraps the data key under a key derived from the new passphrase, with a
+    /// fresh salt. Nothing else moves: not one encrypted value, not one blind
+    /// index, not one alias.
+    ///
+    /// That is the whole reason the data key exists. Before v3 this operation
+    /// was a re-encryption of the entire database, which is why it did not
+    /// exist and the only way to change a passphrase was to build a new vault.
+    pub fn change_passphrase(&self, old: &str, new: &str) -> Result<(), VaultError> {
+        if new.is_empty() {
+            return Err(VaultError::KeyDerivation(
+                "an empty passphrase protects nothing".to_owned(),
+            ));
+        }
+
+        let salt: Vec<u8> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='kdf_salt'", [], |r| r.get(0))?;
+        let wrapped: Vec<u8> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='data_key'", [], |r| r.get(0))?;
+
+        // Proves the old passphrase before anything is written.
+        let mut data_key = Kek::derive(old, &salt)?.unwrap_key(&wrapped)?;
+
+        // A new salt as well as a new passphrase: reusing the old one would let
+        // anyone who had precomputed against it keep their head start.
+        let mut fresh_salt = [0u8; SALT_LEN];
+        random_bytes(&mut fresh_salt)?;
+        let rewrapped = Kek::derive(new, &fresh_salt)?.wrap(&data_key);
+        data_key.zeroize();
+        let rewrapped = rewrapped?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE meta SET value = ? WHERE key='kdf_salt'",
+            params![&fresh_salt[..]],
+        )?;
+        tx.execute("UPDATE meta SET value = ? WHERE key='data_key'", params![rewrapped])?;
+        tx.commit()?;
+
+        self.log("vault.passphrase", None, None, None, None)
+    }
+
+    /// Export the data key under an escrow passphrase — PRD FR-11.
+    ///
+    /// Hands out the *data key*, not the passphrase. Whoever holds the escrow
+    /// can open the vault; they cannot learn the passphrase, which matters
+    /// because people reuse passphrases and a recovery credential should not
+    /// also be a credential for someone's other accounts.
+    pub fn export_escrow(&self, escrow_passphrase: &str) -> Result<Vec<u8>, VaultError> {
+        let sealed = backup::seal_escrow(&self.data_key, escrow_passphrase)?;
+        self.log("vault.escrow", None, None, None, None)?;
+        Ok(sealed)
+    }
+
+    /// Get back in with an escrow file, choosing a new passphrase — PRD FR-11.
+    ///
+    /// The recovery operation itself rather than a way to read out a key: the
+    /// holder of the escrow re-wraps the data key under a passphrase they
+    /// choose, and the vault opens normally from then on.
+    pub fn recover_with_escrow(
+        path: &Path,
+        escrow: &[u8],
+        escrow_passphrase: &str,
+        new_passphrase: &str,
+    ) -> Result<(), VaultError> {
+        if new_passphrase.is_empty() {
+            return Err(VaultError::KeyDerivation(
+                "an empty passphrase protects nothing".to_owned(),
+            ));
+        }
+
+        let data_key = Zeroizing::new(backup::open_escrow(escrow, escrow_passphrase)?);
+        let conn = Connection::open(path)?;
+        schema::configure(&conn)?;
+
+        // Prove the recovered key actually opens *this* vault before writing
+        // anything. An escrow from another project, or one issued before a key
+        // rotation, decrypts perfectly well under its own passphrase and yields
+        // a key that is simply wrong — and overwriting the good wrapper with a
+        // wrapper around a wrong key leaves the vault unopenable by anyone.
+        //
+        // Found by the test for rotation revoking an escrow: the stale escrow
+        // was correctly refused, and the owner could no longer get in either.
+        let canary: Vec<u8> = conn.query_row("SELECT value FROM meta WHERE key='canary'", [], |r| r.get(0))?;
+        Keys::from_data_key(&data_key)
+            .unseal(&canary, "meta:canary:0")
+            .map_err(|_| {
+                VaultError::NotAVault(
+                    "that escrow does not open this vault — it belongs to another project, \
+                 or the data key has been rotated since it was issued"
+                        .to_owned(),
+                )
+            })?;
+
+        let mut salt = [0u8; SALT_LEN];
+        random_bytes(&mut salt)?;
+        let wrapped = Kek::derive(new_passphrase, &salt)?.wrap(&data_key)?;
+
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE meta SET value = ? WHERE key='kdf_salt'", params![&salt[..]])?;
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('data_key', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![wrapped],
+        )?;
+        tx.commit()?;
+
+        // Prove it before returning success. A recovery that reports success and
+        // leaves an unopenable vault is the worst possible outcome here.
+        Vault::open(path, new_passphrase)?.log("vault.recover", None, None, None, None)
+    }
+
+    /// Rotate the data key — PRD FR-11.
+    ///
+    /// Re-encrypts every sealed value under a new data key. Slow, and the only
+    /// way to make an issued escrow file or an old backup stop working: whoever
+    /// holds one has the old data key, and re-wrapping cannot take that back.
+    ///
+    /// This is what "revoking an escrow" actually means. Before v3 there was no
+    /// path to it at all.
+    pub fn rotate_data_key(&mut self, passphrase: &str) -> Result<(), VaultError> {
+        let salt: Vec<u8> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='kdf_salt'", [], |r| r.get(0))?;
+        let kek = Kek::derive(passphrase, &salt)?;
+        let wrapped: Vec<u8> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='data_key'", [], |r| r.get(0))?;
+        kek.unwrap_key(&wrapped)?;
+
+        let mut fresh = Zeroizing::new([0u8; 32]);
+        random_bytes(fresh.as_mut())?;
+        let new = Keys::from_data_key(&fresh);
+        let rewrapped = kek.wrap(&fresh)?;
+
+        // Same machinery as the v2 migration, and the same reason it is one
+        // transaction: a half-rotated vault is a destroyed vault.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let rotated = migrate_rows(&self.conn, &self.keys, &new).and_then(|()| {
+            self.conn
+                .execute("UPDATE meta SET value = ? WHERE key='data_key'", params![rewrapped])?;
+            self.conn.execute(
+                "UPDATE meta SET value = ? WHERE key='canary'",
+                params![new.seal("specshield", "meta:canary:0")?],
+            )?;
+            Ok(())
+        });
+
+        match rotated {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                self.keys = new;
+                self.data_key = fresh;
+                self.log("vault.rotate_key", None, None, None, None)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Copy this vault to `dest` — PRD FR-11.
     ///
     /// Runs against the live connection, so it captures writes still sitting in
@@ -734,6 +946,196 @@ impl Vault {
         })?;
         Ok(rows.filter_map(Result::ok).collect())
     }
+}
+
+/// Bring a v1/v2 vault to v3 — PRD FR-11, schema §9.1.
+///
+/// Before v3 the content keys were derived straight from the passphrase. That
+/// made changing a passphrase a re-encryption of every value, and left nothing
+/// to escrow but the passphrase itself. v3 introduces a random data key, wrapped
+/// by the passphrase-derived KEK.
+///
+/// Moving an existing vault therefore means re-encrypting everything **once**:
+/// decrypt with the old keys, encrypt with the new ones. Two details make this
+/// less mechanical than it sounds:
+///
+/// - The index key changes, so every blind index changes with it. Those columns
+///   are `UNIQUE`, and `dictionary`, `allowlist`, and `concepts` use the blind
+///   index *as the row id in their associated data* — so the index and the
+///   ciphertext have to move together or nothing decrypts afterwards.
+/// - It runs in one transaction. A vault half-migrated is a vault destroyed, and
+///   this is the only code in the product that could destroy one.
+fn migrate_to_v3(conn: &Connection, passphrase: &str, salt: &[u8], kek: &Kek) -> Result<(), VaultError> {
+    let old = Keys::derive_legacy(passphrase, salt)?;
+
+    // Prove the passphrase before touching anything. A migration that starts on
+    // a wrong passphrase would fail partway and take the vault with it.
+    let canary: Vec<u8> = conn.query_row("SELECT value FROM meta WHERE key='canary'", [], |r| r.get(0))?;
+    old.unseal(&canary, "meta:canary:0")?;
+
+    let mut data_key = [0u8; 32];
+    random_bytes(&mut data_key)?;
+    let new = Keys::from_data_key(&data_key);
+    let wrapped = kek.wrap(&data_key)?;
+    data_key.zeroize();
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migrated = migrate_rows(conn, &old, &new).and_then(|()| {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('data_key', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![wrapped],
+        )?;
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key='canary'",
+            params![new.seal("specshield", "meta:canary:0")?],
+        )?;
+        Ok(())
+    });
+
+    match migrated {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            conn.pragma_update(None, "user_version", 3)?;
+            Ok(())
+        }
+        Err(e) => {
+            // Leave the vault exactly as it was found.
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// One project row, as the migration reads it before re-sealing.
+type ProjectRow = (String, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Re-seal every encrypted value and recompute every blind index.
+///
+/// Long, and deliberately not split: every table has to be handled, and a
+/// reader checking that none was missed wants them in one place.
+#[allow(clippy::too_many_lines)]
+fn migrate_rows(conn: &Connection, old: &Keys, new: &Keys) -> Result<(), VaultError> {
+    // project — three sealed columns, row id is the project id.
+    let projects: Vec<ProjectRow> = conn
+        .prepare("SELECT id, name_enc, root_path_enc, project_key_enc FROM project")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (id, name, root, key) in projects {
+        conn.execute(
+            "UPDATE project SET name_enc = ?, root_path_enc = ?, project_key_enc = ? WHERE id = ?",
+            params![
+                reseal(old, new, &name, &aad("project", "name", &id))?,
+                reseal(old, new, &root, &aad("project", "root_path", &id))?,
+                reseal(old, new, &key, &aad("project", "project_key", &id))?,
+                id,
+            ],
+        )?;
+    }
+
+    // identities — the blind index is over (scope, type, name), so it can only
+    // be recomputed after the names are back in the clear.
+    let identities: Vec<(String, Vec<u8>, String, Vec<u8>)> = conn
+        .prepare("SELECT uuid, scope_path_enc, entity_type, real_name_enc FROM identities")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (uuid, scope_enc, entity_type, name_enc) in identities {
+        let scope = old.unseal(&scope_enc, &aad("identities", "scope_path", &uuid))?;
+        let real_name = old.unseal(&name_enc, &aad("identities", "real_name", &uuid))?;
+        conn.execute(
+            "UPDATE identities SET identity_idx = ?, scope_path_enc = ?, real_name_enc = ? WHERE uuid = ?",
+            params![
+                new.blind_index(&identity_key(&scope, &entity_type, &real_name)),
+                new.seal(&scope, &aad("identities", "scope_path", &uuid))?,
+                new.seal(&real_name, &aad("identities", "real_name", &uuid))?,
+                uuid,
+            ],
+        )?;
+    }
+
+    // files — row id is the file id, which does not move.
+    let files: Vec<(String, Vec<u8>, Vec<u8>)> = conn
+        .prepare("SELECT id, path_enc, twin_path_enc FROM files")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (id, path_enc, twin_enc) in files {
+        let path = old.unseal(&path_enc, &aad("files", "path", &id))?;
+        let twin = old.unseal(&twin_enc, &aad("files", "twin_path", &id))?;
+        conn.execute(
+            "UPDATE files SET path_idx = ?, path_enc = ?, twin_path_enc = ? WHERE id = ?",
+            params![
+                new.blind_index(&path),
+                new.seal(&path, &aad("files", "path", &id))?,
+                new.seal(&twin, &aad("files", "twin_path", &id))?,
+                id,
+            ],
+        )?;
+    }
+
+    // dictionary — the blind index *is* the primary key and the AAD row id, so
+    // the row is deleted and rewritten rather than updated in place.
+    let dictionary: Vec<(String, Vec<u8>, String)> = conn
+        .prepare("SELECT term_idx, term_enc, entity_type FROM dictionary")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    conn.execute("DELETE FROM dictionary", [])?;
+    for (idx, enc, entity_type) in dictionary {
+        let term = old.unseal(&enc, &aad("dictionary", "term", &idx))?;
+        let new_idx = new.blind_index(&term);
+        conn.execute(
+            "INSERT INTO dictionary (term_idx, term_enc, entity_type) VALUES (?, ?, ?)",
+            params![
+                new_idx,
+                new.seal(&term, &aad("dictionary", "term", &new_idx))?,
+                entity_type
+            ],
+        )?;
+    }
+
+    let allowlist: Vec<(String, Vec<u8>, Option<Vec<u8>>)> = conn
+        .prepare("SELECT term_idx, term_enc, reason_enc FROM allowlist")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    conn.execute("DELETE FROM allowlist", [])?;
+    for (idx, enc, reason_enc) in allowlist {
+        let term = old.unseal(&enc, &aad("allowlist", "term", &idx))?;
+        let new_idx = new.blind_index(&term);
+        let reason = reason_enc
+            .map(|blob| old.unseal(&blob, &aad("allowlist", "reason", &idx)))
+            .transpose()?;
+        let resealed = reason
+            .map(|r| new.seal(&r, &aad("allowlist", "reason", &new_idx)))
+            .transpose()?;
+        conn.execute(
+            "INSERT INTO allowlist (term_idx, term_enc, reason_enc) VALUES (?, ?, ?)",
+            params![new_idx, new.seal(&term, &aad("allowlist", "term", &new_idx))?, resealed],
+        )?;
+    }
+
+    // concepts — AAD row id is the identity uuid, which is stable; only the
+    // index and the ciphertext move.
+    let concepts: Vec<(String, Vec<u8>)> = conn
+        .prepare("SELECT identity_uuid, concept_enc FROM concepts")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (uuid, enc) in concepts {
+        let concept = old.unseal(&enc, &aad("concepts", "concept", &uuid))?;
+        conn.execute(
+            "UPDATE concepts SET concept_idx = ?, concept_enc = ? WHERE identity_uuid = ?",
+            params![
+                new.blind_index(&concept),
+                new.seal(&concept, &aad("concepts", "concept", &uuid))?,
+                uuid,
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Decrypt under the old keys, encrypt under the new ones, same associated data.
+fn reseal(old: &Keys, new: &Keys, blob: &[u8], aad: &str) -> Result<Vec<u8>, VaultError> {
+    new.seal(&old.unseal(blob, aad)?, aad)
 }
 
 const FILE_UPSERT: &str = "INSERT INTO files
@@ -1022,6 +1424,370 @@ mod tests {
         let csv = audit_csv(&v.audit_log(50).unwrap());
         assert!(!csv.contains("CustomerService"), "{csv}");
         assert!(!csv.contains("mod/a"), "{csv}");
+    }
+
+    /// Build a vault exactly as the pre-v3 code would have: schema at v2, every
+    /// value sealed under keys derived straight from the passphrase.
+    ///
+    /// Written by hand because the old code no longer exists to produce one, and
+    /// a migration nobody has run against a real old vault is a migration nobody
+    /// has tested.
+    fn write_v2_vault(path: &Path, passphrase: &str) {
+        let conn = Connection::open(path).unwrap();
+        schema::configure(&conn).unwrap();
+        schema::migrate(&conn).unwrap();
+
+        let salt = [11u8; SALT_LEN];
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('kdf_salt', ?)",
+            params![&salt[..]],
+        )
+        .unwrap();
+
+        let keys = Keys::derive_legacy(passphrase, &salt).unwrap();
+        let project_id = "0198c0de0000700080000000000999".to_owned();
+
+        conn.execute(
+            "INSERT INTO project
+                (id, name_enc, root_path_enc, alias_style, scope_strategy, project_key_enc, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                project_id,
+                keys.seal("billing", &aad("project", "name", &project_id)).unwrap(),
+                keys.seal("/home/x/billing", &aad("project", "root_path", &project_id))
+                    .unwrap(),
+                "opaque",
+                "module",
+                keys.seal(&hex(&[7u8; 32]), &aad("project", "project_key", &project_id))
+                    .unwrap(),
+                0,
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('canary', ?)",
+            params![keys.seal("specshield", "meta:canary:0").unwrap()],
+        )
+        .unwrap();
+
+        let uuid = "0198c0de0000700080000000000001";
+        conn.execute(
+            "INSERT INTO identities
+                (uuid, identity_idx, scope_path_enc, entity_type, real_name_enc, alias, origin, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'detected', 'active', 0)",
+            params![
+                uuid,
+                keys.blind_index(&identity_key("project", "ORG", "Vantor")),
+                keys.seal("project", &aad("identities", "scope_path", uuid)).unwrap(),
+                "ORG",
+                keys.seal("Vantor", &aad("identities", "real_name", uuid)).unwrap(),
+                "ORG_H7K2Q3",
+            ],
+        )
+        .unwrap();
+
+        let file_id = "file-1";
+        conn.execute(
+            "INSERT INTO files (id, path_idx, path_enc, twin_path_enc, checksum, parser, indexed_at)
+             VALUES (?, ?, ?, ?, 'abc123', 'typescript', 0)",
+            params![
+                file_id,
+                keys.blind_index("src/billing.ts"),
+                keys.seal("src/billing.ts", &aad("files", "path", file_id)).unwrap(),
+                keys.seal("src/PATH_AA11.ts", &aad("files", "twin_path", file_id))
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let term_idx = keys.blind_index("Vantor");
+        conn.execute(
+            "INSERT INTO dictionary (term_idx, term_enc, entity_type) VALUES (?, ?, 'ORG')",
+            params![
+                term_idx,
+                keys.seal("Vantor", &aad("dictionary", "term", &term_idx)).unwrap()
+            ],
+        )
+        .unwrap();
+
+        let allow_idx = keys.blind_index("Promise");
+        conn.execute(
+            "INSERT INTO allowlist (term_idx, term_enc, reason_enc) VALUES (?, ?, ?)",
+            params![
+                allow_idx,
+                keys.seal("Promise", &aad("allowlist", "term", &allow_idx)).unwrap(),
+                keys.seal("a language builtin", &aad("allowlist", "reason", &allow_idx))
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO concepts (identity_uuid, concept_idx, concept_enc) VALUES (?, ?, ?)",
+            params![
+                uuid,
+                keys.blind_index("customersubscription"),
+                keys.seal("customersubscription", &aad("concepts", "concept", uuid))
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        conn.pragma_update(None, "user_version", 2).unwrap();
+    }
+
+    #[test]
+    fn a_v2_vault_migrates_and_every_value_survives() {
+        // The test this whole change rests on. A migration that loses one
+        // sealed value loses the mapping it was protecting.
+        let t = TempVault::new("v2-migrate");
+        write_v2_vault(t.path(), "pw");
+
+        let v = Vault::open(t.path(), "pw").expect("a v2 vault must open");
+
+        let version: i64 = v.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, 3, "and be stamped as migrated");
+
+        let settings = v.settings().unwrap();
+        assert_eq!(settings.project_name, "billing");
+        assert_eq!(settings.root_path, "/home/x/billing");
+        assert_eq!(settings.project_key, [7u8; 32]);
+
+        let identities = v.identities().unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].real_name, "Vantor");
+        assert_eq!(identities[0].scope_path, "project");
+        assert_eq!(identities[0].alias, "ORG_H7K2Q3", "aliases must not move");
+
+        let files = v.files().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/billing.ts");
+        assert_eq!(files[0].twin_path, "src/PATH_AA11.ts");
+
+        assert_eq!(v.dictionary().unwrap(), vec![("Vantor".to_owned(), "ORG".to_owned())]);
+        assert_eq!(v.allowlist().unwrap(), vec!["Promise".to_owned()]);
+        assert_eq!(
+            v.concepts().unwrap(),
+            vec![(
+                "0198c0de0000700080000000000001".to_owned(),
+                "customersubscription".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_migrated_vault_can_still_be_looked_up_by_blind_index() {
+        // The indexes are recomputed under the new key. If they were not, every
+        // lookup would miss and an upsert would silently duplicate rows.
+        let t = TempVault::new("v2-index");
+        write_v2_vault(t.path(), "pw");
+        let v = Vault::open(t.path(), "pw").unwrap();
+
+        let found = v
+            .find_identity("project", "ORG", "Vantor")
+            .unwrap()
+            .expect("the identity must be findable after migration");
+        assert_eq!(found.alias, "ORG_H7K2Q3");
+    }
+
+    #[test]
+    fn a_wrong_passphrase_does_not_migrate_anything() {
+        // A migration that started on a wrong passphrase would fail partway and
+        // take the vault with it.
+        let t = TempVault::new("v2-wrong-pass");
+        write_v2_vault(t.path(), "pw");
+
+        let before = std::fs::read(t.path()).unwrap();
+        assert!(Vault::open(t.path(), "not-it").is_err());
+
+        // Still a v2 vault, still openable with the real passphrase.
+        let after = Vault::open(t.path(), "pw").unwrap();
+        assert_eq!(after.identities().unwrap()[0].real_name, "Vantor");
+        assert!(!before.is_empty());
+    }
+
+    #[test]
+    fn migrating_twice_is_not_possible() {
+        let t = TempVault::new("v2-twice");
+        write_v2_vault(t.path(), "pw");
+
+        drop(Vault::open(t.path(), "pw").unwrap());
+        let again = Vault::open(t.path(), "pw").unwrap();
+        assert_eq!(again.identities().unwrap()[0].real_name, "Vantor");
+    }
+
+    #[test]
+    fn a_new_vault_stores_no_passphrase_derived_content_key() {
+        // The point of v3: content is encrypted under a random data key, and the
+        // passphrase only wraps it. A vault whose content still decrypted under
+        // the legacy scheme would not have migrated at all.
+        let t = TempVault::new("v3-fresh");
+        let v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        v.put_identity(&identity()).unwrap();
+
+        let salt: Vec<u8> = v
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='kdf_salt'", [], |r| r.get(0))
+            .unwrap();
+        let legacy = Keys::derive_legacy("pw", &salt).unwrap();
+        let canary: Vec<u8> = v
+            .conn
+            .query_row("SELECT value FROM meta WHERE key='canary'", [], |r| r.get(0))
+            .unwrap();
+
+        assert!(
+            legacy.unseal(&canary, "meta:canary:0").is_err(),
+            "content must not be readable from the passphrase alone"
+        );
+    }
+
+    #[test]
+    fn changing_the_passphrase_moves_nothing_but_the_wrapper() {
+        // The whole point of the data key. Before v3 this was a re-encryption
+        // of every value, which is why it did not exist.
+        let t = TempVault::new("change-pass");
+        let v = Vault::create(t.path(), "old-pw", &settings()).unwrap();
+        v.put_identity(&identity()).unwrap();
+
+        let ciphertext_before: Vec<u8> = v
+            .conn
+            .query_row("SELECT real_name_enc FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let idx_before: String = v
+            .conn
+            .query_row("SELECT identity_idx FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        v.change_passphrase("old-pw", "new-pw").unwrap();
+        drop(v);
+
+        let reopened = Vault::open(t.path(), "new-pw").unwrap();
+        assert_eq!(reopened.identities().unwrap()[0].real_name, "Vantor");
+
+        let ciphertext_after: Vec<u8> = reopened
+            .conn
+            .query_row("SELECT real_name_enc FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let idx_after: String = reopened
+            .conn
+            .query_row("SELECT identity_idx FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        assert_eq!(ciphertext_before, ciphertext_after, "no value was re-encrypted");
+        assert_eq!(idx_before, idx_after, "no blind index moved");
+    }
+
+    #[test]
+    fn the_old_passphrase_stops_working() {
+        let t = TempVault::new("old-pass-dead");
+        let v = Vault::create(t.path(), "old-pw", &settings()).unwrap();
+        v.change_passphrase("old-pw", "new-pw").unwrap();
+        drop(v);
+
+        assert!(Vault::open(t.path(), "old-pw").is_err());
+        assert!(Vault::open(t.path(), "new-pw").is_ok());
+    }
+
+    #[test]
+    fn a_wrong_old_passphrase_changes_nothing() {
+        let t = TempVault::new("change-wrong");
+        let v = Vault::create(t.path(), "old-pw", &settings()).unwrap();
+
+        assert!(v.change_passphrase("not-it", "new-pw").is_err());
+        drop(v);
+
+        assert!(Vault::open(t.path(), "old-pw").is_ok(), "the vault is untouched");
+        assert!(Vault::open(t.path(), "new-pw").is_err());
+    }
+
+    #[test]
+    fn an_empty_new_passphrase_is_refused() {
+        let t = TempVault::new("change-empty");
+        let v = Vault::create(t.path(), "old-pw", &settings()).unwrap();
+        assert!(v.change_passphrase("old-pw", "").is_err());
+    }
+
+    #[test]
+    fn rotating_the_data_key_re_encrypts_everything_and_keeps_it_readable() {
+        let t = TempVault::new("rotate");
+        let mut v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        v.put_identity(&identity()).unwrap();
+        v.add_term("Vantor", "ORG").unwrap();
+        v.put_files(&[StoredFile {
+            path: "src/a.ts".to_owned(),
+            twin_path: "src/PATH_A.ts".to_owned(),
+            checksum: "abc".to_owned(),
+            parser: "typescript".to_owned(),
+        }])
+        .unwrap();
+
+        let before: Vec<u8> = v
+            .conn
+            .query_row("SELECT real_name_enc FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        v.rotate_data_key("pw").unwrap();
+
+        let after: Vec<u8> = v
+            .conn
+            .query_row("SELECT real_name_enc FROM identities LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(before, after, "rotation must actually re-encrypt");
+
+        // Everything still reads, on this handle and on a fresh open.
+        assert_eq!(v.identities().unwrap()[0].real_name, "Vantor");
+        assert_eq!(v.files().unwrap()[0].path, "src/a.ts");
+        drop(v);
+
+        let reopened = Vault::open(t.path(), "pw").unwrap();
+        assert_eq!(reopened.identities().unwrap()[0].real_name, "Vantor");
+        assert_eq!(
+            reopened.dictionary().unwrap(),
+            vec![("Vantor".to_owned(), "ORG".to_owned())]
+        );
+        assert!(
+            reopened.find_identity("project", "ORG", "Vantor").unwrap().is_some(),
+            "the blind index must have been recomputed"
+        );
+    }
+
+    #[test]
+    fn rotating_the_data_key_revokes_an_issued_escrow() {
+        // What "revoking an escrow" actually means. Re-wrapping cannot take back
+        // a key someone already holds; only re-encrypting under a new one can.
+        let t = TempVault::new("revoke");
+        let mut v = Vault::create(t.path(), "pw", &settings()).unwrap();
+        v.put_identity(&identity()).unwrap();
+        let escrow = v.export_escrow("held-by-security").unwrap();
+
+        v.rotate_data_key("pw").unwrap();
+        drop(v);
+
+        let stale = std::path::PathBuf::from(t.path());
+        assert!(
+            Vault::recover_with_escrow(&stale, &escrow, "held-by-security", "whatever").is_err(),
+            "an escrow issued before the rotation must no longer open the vault"
+        );
+        assert!(Vault::open(t.path(), "pw").is_ok(), "and the owner still gets in");
+    }
+
+    #[test]
+    fn escrow_recovery_does_not_reveal_the_passphrase() {
+        // The reason escrow holds the data key rather than the passphrase:
+        // people reuse passphrases, and a recovery credential should not double
+        // as one for someone's other accounts.
+        let t = TempVault::new("escrow-privacy");
+        let v = Vault::create(t.path(), "reused-everywhere", &settings()).unwrap();
+        let escrow = v.export_escrow("held-by-security").unwrap();
+        drop(v);
+
+        assert!(
+            !escrow
+                .windows("reused-everywhere".len())
+                .any(|w| w == b"reused-everywhere"),
+            "the passphrase must not be in the escrow at all"
+        );
     }
 
     #[test]

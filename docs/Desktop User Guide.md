@@ -390,10 +390,11 @@ is not a second factor: whoever has it and the passphrase has the whole mapping.
 **Restore** never writes over an existing vault, and proves the backup opens
 before the destination exists.
 
-**Key escrow** seals this vault's passphrase under a second, separate one. Give
-it to whoever holds recovery responsibility. They can then get back in without
-knowing your passphrase — and also all the way in: there is no partial access,
-and an escrow file cannot be revoked once issued.
+**Key escrow** seals this vault's *data key* under a second, separate
+passphrase. Give it to whoever holds recovery responsibility: they can get back
+in and never learn your passphrase. They do get all the way in — there is no
+partial access — and handing the file back does not revoke it. Only rotating the
+data key does that.
 
 **Re-key** changes every alias in the project. Every twin already shared stops
 resolving, which is the point when one has escaped and a disaster otherwise. It

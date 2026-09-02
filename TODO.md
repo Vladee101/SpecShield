@@ -362,20 +362,27 @@ are not the repository's to hold:
   identity. Until then: SmartScreen warnings on Windows, Gatekeeper refusal on
   macOS without an explicit override.
 
-**P2-9. The key-management divergence is documented, not resolved.** SDD §9.4
-and §17.2 described an OS credential store and SQLCipher; neither was built, and
-both sections now say so. The passphrase-only design that exists is defensible —
-no key at rest to steal — but it has two costs worth fixing before 1.0:
+**P2-9. Wrapped master key. — DONE.** Schema v3. A random data key encrypts all
+content; the passphrase-derived key only wraps it.
 
-- **No passphrase rotation.** Changing it means re-encrypting every sealed value.
-- **Escrow hands out the passphrase itself**, not a revocable key, so recovery
-  access cannot be granted without granting full access, and an issued escrow
-  file cannot be revoked.
+What this bought:
 
-Both fall out of a wrapped-master-key design: a random data key, wrapped by a
-passphrase-derived KEK. The migration is the work — every existing vault has to
-be re-encrypted — which is why it is written down rather than done in passing.
+- `specshield passphrase` — changing a passphrase re-wraps 32 bytes. A test
+  asserts not one ciphertext and not one blind index moves.
+- Escrow holds the **data key**, not the passphrase, so a recovery holder never
+  learns a credential the user may have reused elsewhere. `escrow-open` re-wraps
+  under a passphrase they choose rather than printing a key.
+- `specshield rotate-key` — re-encrypts everything under a new data key, which
+  is what revoking an issued escrow actually means. There was no path to it at
+  all before.
 
+The migration runs on first open, in one transaction, and is tested against a
+hand-built v2 vault covering every sealed table. Two bugs it caught are in the
+commit message; the worse one is that a stale escrow used to brick the vault.
+
+Still true and now stated precisely in Residual Risk §3.2: an escrow file is a
+**bearer credential** until the key is rotated. Handing one back does not revoke
+it.
 ---
 
 ### P3 — open questions, not yet decided

@@ -930,13 +930,13 @@ fn export_escrow_in(state: &AppState, out: &str, escrow_passphrase: &str, passph
             )));
         }
 
-        // Prove the passphrase is the right one before escrowing it. An escrow
-        // holding a wrong passphrase is worse than none: it is a recovery plan
-        // that fails only when it is needed.
+        // The escrow holds the vault's data key, not the passphrase — schema
+        // v3. The passphrase is still checked, because issuing an escrow is not
+        // something to do on a vault you cannot open.
         vault::Vault::open(&crate::state::vault_path(root), passphrase)
             .map_err(|_| fail("that is not this vault's passphrase"))?;
 
-        let sealed = vault::backup::export_escrow(passphrase, escrow_passphrase)?;
+        let sealed = vault.export_escrow(escrow_passphrase)?;
         std::fs::write(&path, &sealed).map_err(|e| fail(format!("writing {}: {e}", path.display())))?;
         vault.log("vault.escrow", None, None, None, None)?;
 
@@ -956,11 +956,55 @@ const fn escrow_warning() -> &'static str {
 /// Returns the passphrase. There is nothing else it could usefully return: the
 /// point of escrow is to hand back the way in.
 #[tauri::command]
-fn open_escrow(state: State<'_, AppState>, file: String, escrow_passphrase: String) -> Result<String> {
+fn open_escrow(
+    state: State<'_, AppState>,
+    file: String,
+    escrow_passphrase: String,
+    new_passphrase: String,
+) -> Result<String> {
+    if new_passphrase.is_empty() {
+        return Err(fail("an empty passphrase protects nothing"));
+    }
+
     state.with(|_, root| {
         let path = resolve(root, &file);
         let sealed = std::fs::read(&path).map_err(|e| fail(format!("reading {}: {e}", path.display())))?;
-        Ok(vault::backup::open_escrow(&sealed, &escrow_passphrase)?)
+
+        // Re-wraps the data key under the passphrase the recoverer chose. It
+        // never reveals the original one — that is the point of escrowing a key
+        // rather than a passphrase.
+        vault::Vault::recover_with_escrow(
+            &crate::state::vault_path(root),
+            &sealed,
+            &escrow_passphrase,
+            &new_passphrase,
+        )?;
+        Ok(crate::state::vault_path(root).display().to_string())
+    })
+}
+
+/// Change the vault passphrase — PRD FR-11.
+///
+/// Re-wraps the data key. Not one encrypted value moves, which is what makes
+/// this possible at all: before schema v3 it would have been a re-encryption of
+/// the entire vault.
+#[tauri::command]
+fn change_passphrase(state: State<'_, AppState>, old: String, new: String) -> Result<()> {
+    state.with(|vault, _| {
+        vault.change_passphrase(&old, &new)?;
+        Ok(())
+    })
+}
+
+/// Rotate the vault's data key — PRD FR-11.
+///
+/// Re-encrypts every sealed value. The only way to make an escrow file or an old
+/// backup stop working, and slow in proportion to the vault.
+#[tauri::command]
+fn rotate_vault_key(state: State<'_, AppState>, passphrase: String) -> Result<()> {
+    state.with(|vault, _| {
+        vault.rotate_data_key(&passphrase)?;
+        Ok(())
     })
 }
 
@@ -1632,6 +1676,8 @@ pub fn run() {
             export_escrow,
             escrow_warning,
             open_escrow,
+            change_passphrase,
+            rotate_vault_key,
             rekey_preview,
             rekey_project,
             recover_vault,
@@ -1795,8 +1841,15 @@ mod tests {
         let path = export_escrow_in(&state, out.to_str().expect("path"), "escrow-pw", "pw").expect("export");
         assert!(std::path::Path::new(&path).exists());
 
+        // The escrow holds the vault's data key, not the passphrase (schema
+        // v3), so what it proves is that recovery works — not that it hands
+        // back a string somebody could reuse elsewhere.
         let sealed = std::fs::read(&path).expect("read");
-        assert_eq!(vault::backup::open_escrow(&sealed, "escrow-pw").expect("open"), "pw");
+        assert!(vault::backup::open_escrow(&sealed, "escrow-pw").is_ok());
+        assert!(
+            !sealed.windows(2).any(|w| w == b"pw"),
+            "the passphrase must not be in the escrow"
+        );
     }
 
     #[test]
