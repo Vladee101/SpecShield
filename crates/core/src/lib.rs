@@ -27,6 +27,7 @@ pub mod edit;
 pub mod model;
 pub mod parser;
 pub mod paths;
+pub mod rekey;
 pub mod restore;
 pub mod sanitize;
 pub mod secrets;

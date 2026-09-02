@@ -15,6 +15,8 @@ import { useCallback, useEffect, useState } from "react";
 import {
   api,
   type AppliedPatch,
+  type AuditRow,
+  type RecoveryReport,
   type DiffReview,
   type EntityType,
   type PatchStatus,
@@ -24,7 +26,31 @@ import {
   type ScanResult,
 } from "./api";
 
+/// The workflow, in order. Numbered in the interface because they are meant to
+/// be walked through.
 type Step = "project" | "review" | "verify" | "restore" | "apply";
+
+/// Everything that is not a workflow step. Kept visually separate: an audit log
+/// is not step six of sanitizing a document, and numbering it alongside the
+/// others would say it was.
+type Tool = "audit" | "vault";
+
+type Screen = Step | Tool;
+
+const STEPS: Step[] = ["project", "review", "verify", "restore", "apply"];
+const STEP_LABELS: Record<Step, string> = {
+  project: "Project",
+  review: "Review",
+  verify: "Sanitize & verify",
+  restore: "Restore",
+  apply: "Diff & apply",
+};
+
+const TOOLS: Tool[] = ["audit", "vault"];
+const TOOL_LABELS: Record<Tool, string> = {
+  audit: "Audit log",
+  vault: "Vault",
+};
 
 const ENTITY_TYPES: EntityType[] = [
   "ORG", "SERVICE", "API", "ENDPOINT", "DB_TABLE", "COLUMN", "DTO",
@@ -42,7 +68,7 @@ interface Doc {
 
 export function App() {
   const [project, setProject] = useState<ProjectInfo | null>(null);
-  const [step, setStep] = useState<Step>("project");
+  const [step, setStep] = useState<Screen>("project");
   const [error, setError] = useState<string | null>(null);
   const [doc, setDoc] = useState<Doc>({ filename: "PRD.md", content: "" });
   /// The twin from the last sanitize that passed the gate, held here so the
@@ -102,23 +128,25 @@ export function App() {
       )}
 
       <nav className="steps">
-        {(["project", "review", "verify", "restore", "apply"] as Step[]).map((s, i) => (
+        {STEPS.map((s, i) => (
           <button
             key={s}
             className={`step ${step === s ? "active" : ""}`}
             disabled={s !== "project" && !project}
             onClick={() => setStep(s)}
           >
-            {i + 1}.{" "}
-            {
-              {
-                project: "Project",
-                review: "Review",
-                verify: "Sanitize & verify",
-                restore: "Restore",
-                apply: "Diff & apply",
-              }[s]
-            }
+            {i + 1}. {STEP_LABELS[s]}
+          </button>
+        ))}
+        <span className="nav-gap" />
+        {TOOLS.map((t) => (
+          <button
+            key={t}
+            className={`step ${step === t ? "active" : ""}`}
+            disabled={!project}
+            onClick={() => setStep(t)}
+          >
+            {TOOL_LABELS[t]}
           </button>
         ))}
       </nav>
@@ -147,6 +175,18 @@ export function App() {
       )}
       {step === "restore" && project && <RestorePanel onError={setError} />}
       {step === "apply" && project && <DiffPanel doc={doc} twin={twin} onError={setError} />}
+      {step === "audit" && project && <AuditPanel onError={setError} />}
+      {step === "vault" && project && (
+        <VaultPanel
+          onError={setError}
+          onRekeyed={() => {
+            // Every alias moved, so the session's twin is orphaned and the
+            // identity count in the header is stale.
+            setTwin(null);
+            void refresh();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -969,6 +1009,501 @@ function UnresolvedPanel({
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/**
+ * The local audit log — PRD FR-9.
+ *
+ * This is the artifact a security team asks for, and until now it existed only
+ * on the command line: the log was being written on every operation with no way
+ * to read it in the product people were actually shown.
+ *
+ * What it records is deliberately thin — that an operation happened, and its
+ * shape. No names, no content, ever. That is what makes it safe to keep, safe to
+ * export, and readable even when the vault itself will not open.
+ */
+function AuditPanel({ onError }: { onError: (e: string | null) => void }) {
+  const [rows, setRows] = useState<AuditRow[] | null>(null);
+  const [limit, setLimit] = useState(100);
+  const [saved, setSaved] = useState<string | null>(null);
+
+  const load = useCallback(
+    async (n: number) => {
+      onError(null);
+      setSaved(null);
+      try {
+        setRows(await api.auditLog(n));
+      } catch (e) {
+        setRows(null);
+        onError(String(e));
+      }
+    },
+    [onError],
+  );
+
+  useEffect(() => {
+    void load(limit);
+  }, [load, limit]);
+
+  return (
+    <>
+      <div className="panel">
+        <h3 style={{ marginTop: 0 }}>Audit log</h3>
+        <p className="muted small">
+          Append-only, local, never transmitted. It records that an operation happened —
+          never a real name and never any of your content. This is not telemetry; the
+          product has none.
+        </p>
+
+        <div className="row">
+          <label className="small muted">Show</label>
+          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+            {[50, 100, 500, 2000].map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+          <button onClick={() => void load(limit)}>Refresh</button>
+          <button
+            onClick={async () => {
+              onError(null);
+              try {
+                setSaved(await api.exportAuditCsv(limit));
+              } catch (e) {
+                onError(String(e));
+              }
+            }}
+          >
+            Export CSV
+          </button>
+          <span className="grow" />
+          {rows && <span className="small muted">{rows.length} entries</span>}
+        </div>
+
+        {saved && (
+          <div className="banner ok" style={{ marginTop: 10 }}>
+            <strong>Written.</strong>
+            <div className="small mono" style={{ marginTop: 4 }}>{saved}</div>
+          </div>
+        )}
+      </div>
+
+      {rows && rows.length === 0 && (
+        <div className="panel">
+          <p className="muted">Nothing recorded yet.</p>
+        </div>
+      )}
+
+      {rows && rows.length > 0 && (
+        <div className="panel">
+          <div className="scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Operation</th>
+                  <th>Files</th>
+                  <th>Entities</th>
+                  <th>Result</th>
+                  <th>Destination</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr key={i}>
+                    <td className="muted small">{formatTimestamp(row.ts)}</td>
+                    <td className="mono">{row.operation}</td>
+                    <td className="muted">{row.file_count ?? "—"}</td>
+                    <td className="muted">{row.entity_count ?? "—"}</td>
+                    <td className={row.verification === "blocked" ? "error" : "muted"}>
+                      {row.verification ?? "—"}
+                    </td>
+                    <td className="muted small">{row.destination ?? "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Unix seconds as the local machine reads them. The log stores UTC seconds. */
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts * 1000);
+  return Number.isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+}
+
+/**
+ * Vault operations — PRD FR-11 and SDD §16.
+ *
+ * Backup, escrow, re-key, and recovery. These make a lost or over-shared vault
+ * survivable, and they lived only on the command line — out of reach of exactly
+ * the people least likely to open a terminal.
+ *
+ * Two of the four are destructive in ways that cannot be undone, so both are
+ * behind an explicit confirmation that states the consequence in full rather
+ * than asking "are you sure?".
+ */
+function VaultPanel({ onError, onRekeyed }: { onError: (e: string | null) => void; onRekeyed: () => void }) {
+  return (
+    <>
+      <BackupSection onError={onError} />
+      <EscrowSection onError={onError} />
+      <RekeySection onError={onError} onRekeyed={onRekeyed} />
+      <RecoverySection onError={onError} />
+    </>
+  );
+}
+
+function BackupSection({ onError }: { onError: (e: string | null) => void }) {
+  const [dest, setDest] = useState("../project.vault.backup");
+  const [backup, setBackup] = useState("../project.vault.backup");
+  const [into, setInto] = useState("../restored/.specshield/vault.bin");
+  const [passphrase, setPassphrase] = useState("");
+  const [done, setDone] = useState<string | null>(null);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Backup</h3>
+      <p className="muted small">
+        A consistent copy, encrypted exactly as the vault is and opened by the same
+        passphrase. It is not a second factor: whoever has this file and the passphrase
+        has the whole mapping. Relative paths are resolved against the project folder.
+      </p>
+
+      <div className="row">
+        <input className="grow mono" value={dest} onChange={(e) => setDest(e.target.value)} />
+        <button
+          className="primary"
+          onClick={async () => {
+            onError(null);
+            try {
+              setDone(`Backed up to ${await api.backupVault(dest)}`);
+            } catch (e) {
+              onError(String(e));
+            }
+          }}
+        >
+          Back up
+        </button>
+      </div>
+
+      <h4>Restore a backup</h4>
+      <p className="muted small">
+        Never writes over an existing vault, and proves the backup opens before the
+        destination exists — a backup nobody can open is a failure discovered in the
+        middle of the incident it existed for.
+      </p>
+      <div className="row">
+        <input
+          className="grow mono"
+          value={backup}
+          onChange={(e) => setBackup(e.target.value)}
+          placeholder="backup file"
+        />
+        <input
+          className="grow mono"
+          value={into}
+          onChange={(e) => setInto(e.target.value)}
+          placeholder="destination"
+        />
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
+        <input
+          className="grow"
+          type="password"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          placeholder="the backup's passphrase"
+        />
+        <button
+          disabled={!passphrase}
+          onClick={async () => {
+            onError(null);
+            try {
+              setDone(`Restored to ${await api.restoreVault(backup, into, passphrase)}`);
+            } catch (e) {
+              onError(String(e));
+            }
+          }}
+        >
+          Restore
+        </button>
+      </div>
+
+      {done && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <div className="small mono">{done}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EscrowSection({ onError }: { onError: (e: string | null) => void }) {
+  const [out, setOut] = useState("../project.escrow");
+  const [escrowPassphrase, setEscrowPassphrase] = useState("");
+  const [passphrase, setPassphrase] = useState("");
+  const [warning, setWarning] = useState("");
+  const [written, setWritten] = useState<string | null>(null);
+
+  const [openFile, setOpenFile] = useState("../project.escrow");
+  const [openWith, setOpenWith] = useState("");
+  const [recovered, setRecovered] = useState<string | null>(null);
+
+  useEffect(() => {
+    void api.escrowWarning().then(setWarning).catch(() => setWarning(""));
+  }, []);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Key escrow</h3>
+      <p className="muted small">
+        Seals this vault's passphrase under a second, separate one. Give the file to
+        whoever holds recovery responsibility — they can get back in without knowing your
+        passphrase. That also means they can get <em>all</em> the way in: there is no
+        partial access, and an escrow file cannot be revoked once issued.
+      </p>
+
+      <div className="row">
+        <input className="grow mono" value={out} onChange={(e) => setOut(e.target.value)} />
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
+        <input
+          className="grow"
+          type="password"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          placeholder="this vault's passphrase"
+        />
+        <input
+          className="grow"
+          type="password"
+          value={escrowPassphrase}
+          onChange={(e) => setEscrowPassphrase(e.target.value)}
+          placeholder="the escrow passphrase (different)"
+        />
+        <button
+          className="primary"
+          disabled={!passphrase || !escrowPassphrase}
+          onClick={async () => {
+            onError(null);
+            try {
+              setWritten(await api.exportEscrow(out, escrowPassphrase, passphrase));
+            } catch (e) {
+              onError(String(e));
+            }
+          }}
+        >
+          Export
+        </button>
+      </div>
+
+      {written && (
+        <div className="banner warn" style={{ marginTop: 10 }}>
+          <strong>Written to {written}</strong>
+          <pre className="small mono" style={{ whiteSpace: "pre-wrap", marginTop: 8 }}>
+            {warning}
+          </pre>
+        </div>
+      )}
+
+      <h4>Recover a passphrase from an escrow file</h4>
+      <div className="row">
+        <input className="grow mono" value={openFile} onChange={(e) => setOpenFile(e.target.value)} />
+        <input
+          className="grow"
+          type="password"
+          value={openWith}
+          onChange={(e) => setOpenWith(e.target.value)}
+          placeholder="the escrow passphrase"
+        />
+        <button
+          disabled={!openWith}
+          onClick={async () => {
+            onError(null);
+            try {
+              setRecovered(await api.openEscrow(openFile, openWith));
+            } catch (e) {
+              setRecovered(null);
+              onError(String(e));
+            }
+          }}
+        >
+          Recover
+        </button>
+      </div>
+
+      {recovered && (
+        <div className="banner block" style={{ marginTop: 10 }}>
+          <strong>Treat this as the passphrase itself.</strong>
+          <div className="mono" style={{ marginTop: 6 }}>{recovered}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RekeySection({ onError, onRekeyed }: { onError: (e: string | null) => void; onRekeyed: () => void }) {
+  const [count, setCount] = useState<number | null>(null);
+  const [armed, setArmed] = useState(false);
+  const [result, setResult] = useState<number | null>(null);
+
+  useEffect(() => {
+    void api
+      .rekeyPreview()
+      .then((p) => setCount(p.identities))
+      .catch(() => setCount(null));
+  }, [result]);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Re-key</h3>
+
+      <div className="banner block">
+        <strong>Re-keying changes every alias in this project.</strong>
+        <div className="small" style={{ marginTop: 4 }}>
+          {count === null ? "" : `All ${count} of them. `}
+          Every twin you have already shared becomes unrestorable — its aliases will no
+          longer resolve to anything. Do this when a twin has been over-shared, or when
+          the alias style changes. Not otherwise.
+          <br />
+          <br />
+          It does nothing to submissions already made: those twins sit in the provider's
+          logs exactly as sent. What changes is that they no longer connect to anything
+          you produce from now on.
+          <br />
+          <br />
+          <strong>Back up first.</strong>
+        </div>
+      </div>
+
+      <div className="row">
+        <label className="small">
+          <input type="checkbox" checked={armed} onChange={(e) => setArmed(e.target.checked)} />{" "}
+          I have a backup and I understand every shared twin stops working
+        </label>
+        <span className="grow" />
+        <button
+          disabled={!armed}
+          onClick={async () => {
+            onError(null);
+            try {
+              setResult(await api.rekeyProject(true));
+              setArmed(false);
+              onRekeyed();
+            } catch (e) {
+              onError(String(e));
+            }
+          }}
+        >
+          Re-key
+        </button>
+      </div>
+
+      {result !== null && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <strong>{result} alias(es) changed.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            Re-sanitize and re-send anything still in flight with a model.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RecoverySection({ onError }: { onError: (e: string | null) => void }) {
+  const [path, setPath] = useState("");
+  const [report, setReport] = useState<RecoveryReport | null>(null);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Recovery</h3>
+      <p className="muted small">
+        For a vault that will not open. Needs no passphrase, reveals no real name, and
+        cannot modify the file it is inspecting — it reports what the vault holds and what
+        is wrong with it. Give the full path to a <span className="mono">vault.bin</span>.
+      </p>
+
+      <div className="row">
+        <input
+          className="grow mono"
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+          placeholder="C:\\work\\billing\\.specshield\\vault.bin"
+        />
+        <button
+          disabled={!path}
+          onClick={async () => {
+            onError(null);
+            try {
+              setReport(await api.recoverVault(path));
+            } catch (e) {
+              setReport(null);
+              onError(String(e));
+            }
+          }}
+        >
+          Inspect
+        </button>
+      </div>
+
+      {report && (
+        <>
+          <div className={`banner ${report.readable ? "warn" : "block"}`} style={{ marginTop: 10 }}>
+            <strong>Diagnosis</strong>
+            <div className="small" style={{ marginTop: 4 }}>{report.diagnosis}</div>
+          </div>
+
+          {report.readable && (
+            <>
+              <div className="row small muted">
+                <span>schema v{report.schema_version}</span>
+                <span>· {report.identities} identities</span>
+                <span>· {report.files} indexed files</span>
+              </div>
+
+              {report.entity_types.length > 0 && (
+                <table style={{ marginTop: 10 }}>
+                  <thead><tr><th>Type</th><th>Count</th></tr></thead>
+                  <tbody>
+                    {report.entity_types.map(([kind, n]) => (
+                      <tr key={kind}>
+                        <td className="mono">{kind}</td>
+                        <td className="muted">{n}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              {report.audit.length > 0 && (
+                <>
+                  <h4>Last operations</h4>
+                  <div className="scroll">
+                    <table>
+                      <tbody>
+                        {report.audit.map((row, i) => (
+                          <tr key={i}>
+                            <td className="muted small">{formatTimestamp(row.ts)}</td>
+                            <td className="mono">{row.operation}</td>
+                            <td className="muted">{row.verification ?? "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </>
+      )}
     </div>
   );
 }

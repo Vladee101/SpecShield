@@ -110,3 +110,6 @@ pre.diff .del { color: var(--block); }
 .note.fuzzy { color: var(--warn); }
 .note.unresolved { color: var(--block); }
 .note.redaction { color: var(--muted); }
+
+/* Separates the numbered workflow steps from the tools beside them. */
+.nav-gap { flex: 1; min-width: 16px; }

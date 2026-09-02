@@ -570,11 +570,7 @@ fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
 /// across invocations (SDD §6.5).
 fn graph_from(vault: &vault::Vault) -> Result<Graph> {
     let settings = vault.settings()?;
-    let style = match settings.alias_style.as_str() {
-        "opaque" => AliasStyle::Opaque,
-        "pseudonymous" => AliasStyle::Pseudonymous,
-        _ => AliasStyle::Typed,
-    };
+    let style = alias_style(&settings.alias_style);
     let mut settings = settings;
     let mut graph = Graph::new(ProjectKey::take_bytes(&mut settings.project_key), style);
     let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
@@ -2155,48 +2151,51 @@ fn run_unify(project: &Path, confirm: Option<&str>, explicit: Option<&str>) -> R
 ///
 /// Returns how many aliases actually changed, so the caller can warn only when
 /// there is something to warn about.
-fn rekey(vault: &vault::Vault) -> Result<u32> {
-    use std::collections::HashSet;
-
+fn rekey(vault: &vault::Vault) -> Result<usize> {
     let settings = vault.settings()?;
-    let style = match settings.alias_style.as_str() {
+    let style = alias_style(&settings.alias_style);
+    let key = ProjectKey::from_bytes(settings.project_key);
+    let concepts: HashMap<String, String> = vault.concepts()?.into_iter().collect();
+
+    let stored = vault.identities()?;
+    let mut identities: Vec<specshield_core::rekey::Rekeyed> = stored
+        .iter()
+        .filter_map(|s| {
+            let entity_type = s.entity_type.parse().ok()?;
+            Some(specshield_core::rekey::Rekeyed {
+                uuid: s.uuid.clone(),
+                key: specshield_core::model::IdentityKey::new(&s.scope_path, entity_type, &s.real_name),
+                alias: s.alias.clone(),
+                concept: concepts.get(&s.uuid).cloned(),
+            })
+        })
+        .collect();
+
+    let changed = specshield_core::rekey::rederive(&key, style, &mut identities);
+
+    let by_uuid: HashMap<&str, &specshield_core::rekey::Rekeyed> =
+        identities.iter().map(|i| (i.uuid.as_str(), i)).collect();
+    for mut row in stored {
+        let Some(rekeyed) = by_uuid.get(row.uuid.as_str()) else {
+            continue;
+        };
+        if rekeyed.alias != row.alias {
+            row.alias = rekeyed.alias.clone();
+            vault.put_identity(&row)?;
+        }
+    }
+
+    Ok(changed)
+}
+
+/// One place that maps the stored style name to the enum. Three call sites had
+/// their own copy, and a fourth would have been a coin toss.
+fn alias_style(stored: &str) -> AliasStyle {
+    match stored {
         "opaque" => AliasStyle::Opaque,
         "pseudonymous" => AliasStyle::Pseudonymous,
         _ => AliasStyle::Typed,
-    };
-    let key = ProjectKey::from_bytes(settings.project_key);
-    let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
-
-    // Stable order, or the disambiguator suffixes would shuffle between runs.
-    let mut identities = vault.identities()?;
-    identities.sort_by(|a, b| a.uuid.cmp(&b.uuid));
-
-    let mut used: HashSet<String> = HashSet::new();
-    let mut changed = 0;
-
-    for mut stored in identities {
-        let Ok(entity_type) = stored.entity_type.parse::<EntityType>() else {
-            continue;
-        };
-        let identity = specshield_core::model::IdentityKey::new(&stored.scope_path, entity_type, &stored.real_name);
-        let concept = concepts.get(&stored.uuid).map(String::as_str);
-
-        let mut disambiguator = None;
-        let alias = loop {
-            let candidate = specshield_core::alias::derive_in_concept(&key, &identity, style, disambiguator, concept);
-            if used.insert(candidate.clone()) {
-                break candidate;
-            }
-            disambiguator = Some(disambiguator.unwrap_or(1) + 1);
-        };
-
-        if alias != stored.alias {
-            changed += 1;
-            stored.alias = alias;
-            vault.put_identity(&stored)?;
-        }
     }
-    Ok(changed)
 }
 
 /// SDD §11 / PRD FR-6b.

@@ -154,9 +154,20 @@ export interface AppliedPatch {
   files: number;
 }
 
+export interface RecoveryReport {
+  diagnosis: string;
+  readable: boolean;
+  schema_version: number;
+  identities: number;
+  files: number;
+  entity_types: [string, number][];
+  audit: AuditRow[];
+}
+
 export interface AuditRow {
   ts: number;
   operation: string;
+  file_count: number | null;
   entity_count: number | null;
   verification: string | null;
   destination: string | null;
@@ -203,6 +214,33 @@ export const api = {
     invoke<number>("copy_verified_twin", { withEnvelope }),
 
   auditLog: (limit: number) => invoke<AuditRow[]>("audit_log", { limit }),
+
+  /** Writes the CSV on the Rust side and returns where it landed — FR-9. */
+  exportAuditCsv: (limit: number) => invoke<string>("export_audit_csv", { limit }),
+
+  // --- FR-11: backup, escrow, re-key -------------------------------------
+  // Paths are resolved against the project root on the Rust side; the app has
+  // no filesystem capability and does not acquire one to save a file.
+
+  backupVault: (dest: string) => invoke<string>("backup_vault", { dest }),
+
+  restoreVault: (backup: string, into: string, passphrase: string) =>
+    invoke<string>("restore_vault", { backup, into, passphrase }),
+
+  exportEscrow: (out: string, escrowPassphrase: string, passphrase: string) =>
+    invoke<string>("export_escrow", { out, escrowPassphrase, passphrase }),
+
+  escrowWarning: () => invoke<string>("escrow_warning"),
+
+  openEscrow: (file: string, escrowPassphrase: string) =>
+    invoke<string>("open_escrow", { file, escrowPassphrase }),
+
+  rekeyPreview: () => invoke<{ identities: number }>("rekey_preview"),
+
+  rekeyProject: (confirm: boolean) => invoke<number>("rekey_project", { confirm }),
+
+  /** SDD §16. Takes a path: the case this exists for is a vault that would not open. */
+  recoverVault: (path: string) => invoke<RecoveryReport>("recover_vault", { path }),
 
   supportedFormats: () => invoke<string[]>("supported_formats"),
 };

@@ -165,6 +165,10 @@ pub struct RestoreResult {
 pub struct AuditRow {
     pub ts: i64,
     pub operation: String,
+    /// FR-9 lists file count among the recorded fields. The wire type was
+    /// dropping it, so the one screen that shows the log showed less than the
+    /// log holds.
+    pub file_count: Option<i64>,
     pub entity_count: Option<i64>,
     pub verification: Option<String>,
     pub destination: Option<String>,
@@ -796,12 +800,275 @@ fn audit_log(state: State<'_, AppState>, limit: usize) -> Result<Vec<AuditRow>> 
             .map(|e| AuditRow {
                 ts: e.ts,
                 operation: e.operation,
+                file_count: e.file_count,
                 entity_count: e.entity_count,
                 verification: e.verification,
                 destination: e.destination,
             })
             .collect())
     })
+}
+
+/// Write the audit log to a CSV file — PRD FR-9, "exportable as CSV for
+/// compliance review".
+///
+/// Rust writes the file rather than the frontend, because the application holds
+/// no filesystem capability and is not going to acquire one to save a report.
+/// The destination is inside `.specshield/`, which is already ignored by git:
+/// the log contains no names and no content, but an operations history is not
+/// something to scatter through someone's repository either.
+#[tauri::command]
+fn export_audit_csv(state: State<'_, AppState>, limit: usize) -> Result<String> {
+    state.with(|vault, root| {
+        let csv = vault::audit_csv(&vault.audit_log(limit)?);
+        let path = root.join(".specshield").join("audit.csv");
+        std::fs::write(&path, csv).map_err(|e| fail(format!("writing {}: {e}", path.display())))?;
+
+        // Deliberately not logged. An audit export that appends to the audit log
+        // makes every export look like activity in the next one.
+        Ok(path.display().to_string())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Vault operations — PRD FR-11, SDD §16
+//
+// These are the operations that make a lost or over-shared vault survivable.
+// They lived only on the command line, which put them out of reach of the users
+// least likely to open a terminal.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct RekeyPreview {
+    /// How many aliases would move. Shown before the user commits, because
+    /// every one of them orphans a twin already shared.
+    identities: usize,
+}
+
+#[derive(Serialize)]
+struct RecoveryReport {
+    diagnosis: String,
+    readable: bool,
+    schema_version: i64,
+    identities: usize,
+    files: usize,
+    entity_types: Vec<(String, usize)>,
+    audit: Vec<AuditRow>,
+}
+
+/// Copy the vault somewhere safe — FR-11.
+///
+/// `dest` is resolved relative to the project root when it is not absolute. The
+/// application has no filesystem capability and no file picker; Rust does the
+/// writing, and it refuses to overwrite.
+#[tauri::command]
+fn backup_vault(state: State<'_, AppState>, dest: String) -> Result<String> {
+    state.with(|vault, root| {
+        let path = resolve(root, &dest);
+        vault.backup_to(&path)?;
+        Ok(path.display().to_string())
+    })
+}
+
+/// Put a backup back — FR-11.
+///
+/// Takes its own passphrase because the backup may predate the current one, and
+/// verifies the backup opens before the destination exists. Restoring a backup
+/// nobody can open is a failure discovered in the middle of the incident the
+/// backup existed for.
+#[tauri::command]
+fn restore_vault(state: State<'_, AppState>, backup: String, into: String, passphrase: String) -> Result<String> {
+    state.with(|_, root| {
+        let from = resolve(root, &backup);
+        let to = resolve(root, &into);
+        vault::backup::restore_from(&from, &to, &passphrase)?;
+        Ok(to.display().to_string())
+    })
+}
+
+/// Export a passphrase-protected key escrow — FR-11.
+#[tauri::command]
+fn export_escrow(
+    state: State<'_, AppState>,
+    out: String,
+    escrow_passphrase: String,
+    passphrase: String,
+) -> Result<String> {
+    export_escrow_in(&state, &out, &escrow_passphrase, &passphrase)
+}
+
+/// The body, split from the IPC wrapper so it can be tested — a `State` cannot
+/// be constructed outside a running Tauri app.
+fn export_escrow_in(state: &AppState, out: &str, escrow_passphrase: &str, passphrase: &str) -> Result<String> {
+    state.with(|vault, root| {
+        let path = resolve(root, out);
+        if path.exists() {
+            return Err(fail(format!(
+                "{} already exists — refusing to overwrite an escrow file",
+                path.display()
+            )));
+        }
+
+        // Prove the passphrase is the right one before escrowing it. An escrow
+        // holding a wrong passphrase is worse than none: it is a recovery plan
+        // that fails only when it is needed.
+        vault::Vault::open(&crate::state::vault_path(root), passphrase)
+            .map_err(|_| fail("that is not this vault's passphrase"))?;
+
+        let sealed = vault::backup::export_escrow(passphrase, escrow_passphrase)?;
+        std::fs::write(&path, &sealed).map_err(|e| fail(format!("writing {}: {e}", path.display())))?;
+        vault.log("vault.escrow", None, None, None, None)?;
+
+        Ok(path.display().to_string())
+    })
+}
+
+/// The warning FR-11 requires, so the screen shows the same words the file
+/// carries rather than a paraphrase of them.
+#[tauri::command]
+const fn escrow_warning() -> &'static str {
+    vault::backup::ESCROW_WARNING
+}
+
+/// Recover a vault passphrase from an escrow file — FR-11.
+///
+/// Returns the passphrase. There is nothing else it could usefully return: the
+/// point of escrow is to hand back the way in.
+#[tauri::command]
+fn open_escrow(state: State<'_, AppState>, file: String, escrow_passphrase: String) -> Result<String> {
+    state.with(|_, root| {
+        let path = resolve(root, &file);
+        let sealed = std::fs::read(&path).map_err(|e| fail(format!("reading {}: {e}", path.display())))?;
+        Ok(vault::backup::open_escrow(&sealed, &escrow_passphrase)?)
+    })
+}
+
+/// What a re-key would cost, without doing it.
+#[tauri::command]
+fn rekey_preview(state: State<'_, AppState>) -> Result<RekeyPreview> {
+    state.with(|vault, _| {
+        Ok(RekeyPreview {
+            identities: vault.identities()?.len(),
+        })
+    })
+}
+
+/// Regenerate every alias under a new project key — FR-11.
+///
+/// The operation with the worst failure mode in the product: every twin already
+/// shared stops resolving. `confirm` is required, and the caller is expected to
+/// have shown `rekey_preview` first.
+#[tauri::command]
+fn rekey_project(state: State<'_, AppState>, confirm: bool) -> Result<usize> {
+    rekey_project_in(&state, confirm)
+}
+
+/// The body, split from the IPC wrapper so the confirmation guard can be
+/// tested. A `State` cannot be constructed outside a running Tauri app, and
+/// this is the operation that orphans every twin a project has produced.
+fn rekey_project_in(state: &AppState, confirm: bool) -> Result<usize> {
+    if !confirm {
+        return Err(fail("re-keying orphans every twin already shared — confirm first"));
+    }
+
+    state
+        .with(|vault, _| {
+            let mut fresh = [0u8; 32];
+            getrandom::fill(&mut fresh).map_err(|e| fail(format!("entropy source unavailable: {e}")))?;
+            vault.rotate_project_key(&fresh)?;
+            fresh.zeroize();
+
+            let settings = vault.settings()?;
+            let project_key = alias::ProjectKey::from_bytes(settings.project_key);
+            let style = alias_style(&settings.alias_style);
+            let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
+
+            let stored = vault.identities()?;
+            let mut identities: Vec<specshield_core::rekey::Rekeyed> = stored
+                .iter()
+                .filter_map(|s| {
+                    let entity_type = s.entity_type.parse().ok()?;
+                    Some(specshield_core::rekey::Rekeyed {
+                        uuid: s.uuid.clone(),
+                        key: specshield_core::model::IdentityKey::new(&s.scope_path, entity_type, &s.real_name),
+                        alias: s.alias.clone(),
+                        concept: concepts.get(&s.uuid).cloned(),
+                    })
+                })
+                .collect();
+
+            let changed = specshield_core::rekey::rederive(&project_key, style, &mut identities);
+
+            let by_uuid: std::collections::HashMap<&str, &specshield_core::rekey::Rekeyed> =
+                identities.iter().map(|i| (i.uuid.as_str(), i)).collect();
+            for mut row in stored {
+                let Some(rekeyed) = by_uuid.get(row.uuid.as_str()) else {
+                    continue;
+                };
+                if rekeyed.alias != row.alias {
+                    row.alias = rekeyed.alias.clone();
+                    vault.put_identity(&row)?;
+                }
+            }
+
+            // The session's verified twin was produced under the old key and no
+            // longer restores. Holding on to it would let the user copy something
+            // this vault can no longer reverse.
+            Ok(changed)
+        })
+        .inspect(|_| state.set_verified_twin(None))
+}
+
+/// Inspect a vault that will not open — SDD §16.
+///
+/// Takes a path rather than using the session, because the case this exists for
+/// is a vault that could not be opened in the first place.
+#[tauri::command]
+fn recover_vault(path: String) -> Result<RecoveryReport> {
+    let recovery = vault::Recovery::open(std::path::Path::new(&path))?;
+
+    Ok(RecoveryReport {
+        diagnosis: recovery.diagnosis().to_owned(),
+        readable: recovery.is_readable(),
+        schema_version: recovery.schema_version().unwrap_or(0),
+        identities: recovery.identity_count(),
+        files: recovery.file_count(),
+        entity_types: recovery.entity_types(),
+        audit: recovery
+            .audit_log(50)
+            .into_iter()
+            .map(|e| AuditRow {
+                ts: e.ts,
+                operation: e.operation,
+                file_count: e.file_count,
+                entity_count: e.entity_count,
+                verification: e.verification,
+                destination: e.destination,
+            })
+            .collect(),
+    })
+}
+
+/// Resolve a user-supplied path against the project root.
+///
+/// A relative path lands beside the project, which is what someone typing
+/// `../billing.backup` means. An absolute one is taken as given.
+fn resolve(root: &std::path::Path, given: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(given);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+/// The stored style name to the enum. Mirrors the CLI's helper of the same name.
+fn alias_style(stored: &str) -> alias::AliasStyle {
+    match stored {
+        "opaque" => alias::AliasStyle::Opaque,
+        "pseudonymous" => alias::AliasStyle::Pseudonymous,
+        _ => alias::AliasStyle::Typed,
+    }
 }
 
 /// Formats this build can process. The UI uses it to explain a refusal rather
@@ -960,6 +1227,15 @@ pub fn run() {
             undo_patch,
             copy_verified_twin,
             audit_log,
+            export_audit_csv,
+            backup_vault,
+            restore_vault,
+            export_escrow,
+            escrow_warning,
+            open_escrow,
+            rekey_preview,
+            rekey_project,
+            recover_vault,
             supported_formats,
         ])
         .run(tauri::generate_context!())
@@ -1025,6 +1301,107 @@ mod tests {
                 Ok(())
             })
             .expect("record");
+    }
+
+    #[test]
+    fn a_relative_path_lands_beside_the_project_and_an_absolute_one_is_taken_as_given() {
+        let root = std::path::Path::new("/work/billing");
+        assert_eq!(resolve(root, "../billing.backup"), root.join("../billing.backup"));
+
+        let absolute = if cfg!(windows) {
+            "C:/secure/x.backup"
+        } else {
+            "/secure/x.backup"
+        };
+        assert_eq!(resolve(root, absolute), std::path::PathBuf::from(absolute));
+    }
+
+    #[test]
+    fn re_keying_without_confirmation_does_nothing() {
+        // The frontend gates this behind a checkbox. A checkbox is a courtesy;
+        // this is the control. Every twin the project ever shared stops working.
+        let project = TempProject::new("rekey-unconfirmed");
+        let state = project.open();
+
+        let before = state.with(|vault, _| Ok(vault.identities()?)).expect("read");
+        assert!(rekey_project_in(&state, false).is_err());
+        let after = state.with(|vault, _| Ok(vault.identities()?)).expect("read");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn re_keying_moves_every_alias_and_drops_the_session_twin() {
+        let project = TempProject::new("rekey-confirmed");
+        let state = project.open();
+        state
+            .with(|vault, _| {
+                vault.put_identity(&vault::StoredIdentity {
+                    uuid: "0198c0de0000700080000000000001".to_owned(),
+                    scope_path: "mod/a".to_owned(),
+                    entity_type: "SERVICE".to_owned(),
+                    real_name: "CustomerService".to_owned(),
+                    alias: "SERVICE_AAA111".to_owned(),
+                    origin: "detected".to_owned(),
+                    status: "active".to_owned(),
+                })?;
+                Ok(())
+            })
+            .expect("seed");
+        state.set_verified_twin(Some("SERVICE_AAA111 owns it".to_owned()));
+
+        let changed = rekey_project_in(&state, true).expect("rekey");
+        assert_eq!(changed, 1);
+
+        let alias = state
+            .with(|vault, _| Ok(vault.identities()?[0].alias.clone()))
+            .expect("read");
+        assert_ne!(alias, "SERVICE_AAA111");
+        assert!(
+            state.verified_twin().is_none(),
+            "the session twin was produced under the old key and no longer restores —              keeping it would let the user copy something this vault cannot reverse"
+        );
+    }
+
+    #[test]
+    fn escrow_refuses_a_passphrase_that_is_not_this_vaults() {
+        // An escrow file holding the wrong passphrase is worse than none: it is
+        // a recovery plan that fails only when it is needed.
+        let project = TempProject::new("escrow-wrong");
+        let state = project.open();
+
+        let out = project.0.join("wrong.escrow");
+        let result = export_escrow_in(&state, out.to_str().expect("path"), "escrow-pw", "not-the-passphrase");
+
+        assert!(result.is_err());
+        assert!(!out.exists(), "nothing was written");
+    }
+
+    #[test]
+    fn escrow_round_trips_through_the_app_layer() {
+        let project = TempProject::new("escrow-ok");
+        let state = project.open();
+
+        let out = project.0.join("good.escrow");
+        let path = export_escrow_in(&state, out.to_str().expect("path"), "escrow-pw", "pw").expect("export");
+        assert!(std::path::Path::new(&path).exists());
+
+        let sealed = std::fs::read(&path).expect("read");
+        assert_eq!(vault::backup::open_escrow(&sealed, "escrow-pw").expect("open"), "pw");
+    }
+
+    #[test]
+    fn recovery_reports_a_garbage_file_without_failing() {
+        let project = TempProject::new("recover");
+        let path = project.0.join("broken.bin");
+        std::fs::write(&path, b"not a vault").expect("write");
+
+        let report = recover_vault(path.display().to_string()).expect("recovery is not a dead end");
+        assert!(!report.readable);
+        assert!(
+            report.diagnosis.contains("not a SpecShield vault"),
+            "{}",
+            report.diagnosis
+        );
     }
 
     #[test]
