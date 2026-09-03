@@ -92,7 +92,11 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
 | M6 hardening + packaging | engine and docs done; packaging and signing remain |
 
-Corpus, current: all six projects gated, 98.6% recall / 95.8% precision;
+Vault schema is at **v4**. v3 (wrapped data key) is a *content* migration and is
+not keyed on `user_version` — see `crates/vault/src/schema.rs` `DDL_VERSION`, and
+read it before adding a migration of either kind.
+
+Corpus, current: all six projects gated, 98.6% recall / 96.3% precision;
 secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
 excluded from the verdict — see `crates/cli/src/report.rs`.
 
@@ -416,11 +420,47 @@ its generator knew to emit. Decorators, generics with constraints, barrel
 re-exports, and ambient `.d.ts` remain untested, and they are where heuristic
 scoping is most likely to break.
 
-**P3-5. Unused vault tables.** `redactions` and `edges` exist in the schema with
-no writer. Occurrences have a writer in `crates/vault` but nothing in the CLI or
-app calls it. (`files` gained one in M4: `specshield index`, `rescan`, and
-`export` all write it.) Either wire them up as their milestones land, or drop them from
-the schema — an empty table is a claim the product does not honour.
+**P3-5. Unused vault tables. — DONE.** Two wired up, one dropped.
+
+- **`occurrences`** — written by `export`, read by `specshield where <name>` and
+  the desktop “Where is it” panel. Answers both directions: where the project
+  uses a name, and what an alias was before it was one.
+- **`redactions`** — written by `export`, read by `specshield secrets`, the
+  desktop “Secrets found” panel, and `specshield recover` (which needs no
+  passphrase, and where the count matters most: those credentials are in the
+  working tree whatever happens to the vault). The export reports how many were
+  new, which is the one thing `match_idx` can do.
+- **`edges`** — **dropped**, schema v4. It never had a producer: no parser emits
+  a relation and `Relation` was never constructed. SDD §5 and PRD §11 now say the
+  relation graph is deferred, what it would cost (a `relations` method on
+  `ArtifactParser`, SQL `REFERENCES` first), and what it would buy (a better
+  twin, not a stronger guarantee).
+
+Four defects came out of it, two of them mine and two much older:
+
+1. **`Applied` byte offsets were in the wrong coordinate system.** The alias pass
+   runs over text in which secrets are already markers of a different length, so
+   every offset past the first secret was displaced — silently, and only in files
+   that contained one. Nothing had consumed those offsets before, which is why it
+   had never shown. `sanitize` now maps them back to the caller's source and says
+   so on `Sanitized`.
+2. **A rescan threw away the twin-path mapping.** `files.twin_path` is the only
+   record of where an exported file went, and `restore_project` is the only thing
+   that can put it back — but `index` and `rescan` both overwrote the column with
+   the real path. A routine rescan silently orphaned every twin tree already
+   produced: restore found no mapping and left each file at its alias name. Found
+   by running it, not by reading it.
+3. **`export` never forgot deleted files.** `rescan` did; `export` did not, so
+   `specshield secrets` went on naming a file that no longer existed.
+4. **Keying the v3 content migration on `user_version` was wrong** — my own, and
+   caught by an existing test. The DDL runner stamps the version before any
+   passphrase is checked, so one mistyped passphrase would have left a pre-v3
+   vault permanently unopenable. The question is now put to `meta`: the wrapped
+   `data_key` row *is* v3, so it cannot drift from the truth the way a stamp can.
+
+Still true: `occurrences` and `redactions` are written by `export` alone. A
+project that has only been scanned has neither, and both readers say so rather
+than showing an empty list.
 
 ---
 

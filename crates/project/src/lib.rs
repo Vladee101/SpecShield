@@ -56,6 +56,9 @@ pub enum ProjectError {
 
 type Result<T> = std::result::Result<T, ProjectError>;
 
+/// Written out so the escape cannot be mangled by a source rewrite.
+const NEWLINE: char = '\n';
+
 /// The stored style name to the enum. One place, because three call sites had
 /// their own copy and a fourth would have been a coin toss.
 #[must_use]
@@ -258,6 +261,32 @@ pub enum Payload {
     Copy(PathBuf),
 }
 
+/// Where one identity was found in one file — PRD FR-5, before the vault has
+/// been asked for the file's row id.
+#[derive(Debug, Clone)]
+pub struct Sighting {
+    pub path: String,
+    pub identity_uuid: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub kind: specshield_core::model::OccurrenceKind,
+}
+
+/// One secret that was redacted out of one file — SDD §4.3.
+///
+/// **Carries no plaintext.** `match_idx` is computed at the point of the match
+/// and the matched text is dropped there; a struct that held the secret until
+/// the end of an export would keep every credential in the project alive in
+/// memory for the length of it.
+#[derive(Debug, Clone)]
+pub struct Redacted {
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub secret_type: String,
+    pub match_idx: String,
+}
+
 /// Everything the sanitize pass produced, held until the gate has run.
 #[derive(Debug, Default)]
 pub struct Twins {
@@ -267,9 +296,19 @@ pub struct Twins {
     pub abandoned: Vec<(String, String)>,
     pub aliased: usize,
     pub unchecked: usize,
+    /// Every place an alias was applied — PRD FR-5. Empty for a file whose
+    /// aliasing was abandoned, which is correct: nothing was applied there.
+    pub sightings: Vec<Sighting>,
+    /// Every secret redacted on the way — SDD §4.3.
+    pub redacted: Vec<Redacted>,
 }
 
 /// Sanitize every file in the project, producing twins but writing nothing.
+///
+/// `secret_index` turns a matched secret into the one-way index the vault
+/// stores — `specshield_vault::Vault::secret_index`. It is a closure rather
+/// than a vault reference so the plaintext never outlives the line that matched
+/// it: the secret is hashed here and dropped here.
 pub fn sanitize_tree(
     project: &Path,
     index: &Index,
@@ -277,6 +316,7 @@ pub fn sanitize_tree(
     context: &ProjectContext,
     graph: &mut Graph,
     twin_of: &impl Fn(&String) -> String,
+    secret_index: &impl Fn(&str) -> String,
 ) -> Result<Twins> {
     let mut twins = Twins::default();
 
@@ -329,6 +369,30 @@ pub fn sanitize_tree(
             }
         }
 
+        // Recorded from the *original* source, because that is what the byte
+        // offsets index and what the user still has on disk. The twin has a
+        // marker where the secret was; the file they need to go clean up does
+        // not.
+        for finding in &result.secrets {
+            twins.redacted.push(Redacted {
+                path: entry.path.clone(),
+                byte_start: finding.byte_start,
+                byte_end: finding.byte_end,
+                secret_type: finding.secret_type.to_owned(),
+                match_idx: secret_index(source.get(finding.byte_start..finding.byte_end).unwrap_or_default()),
+            });
+        }
+
+        for hit in &result.applied {
+            twins.sightings.push(Sighting {
+                path: entry.path.clone(),
+                identity_uuid: hit.uuid.to_string(),
+                byte_start: hit.byte_start,
+                byte_end: hit.byte_end,
+                kind: hit.kind,
+            });
+        }
+
         twins.aliased += result.applied.len();
         twins.records.push(vault::StoredFile {
             path: entry.path.clone(),
@@ -357,6 +421,15 @@ pub struct Exported {
     /// How many vault names the gate was told to ignore — PRD FR-10. Reported
     /// because an open gate must never be silent.
     pub allowlisted: usize,
+    /// Places recorded in the vault — PRD FR-5. Larger than `aliased` never,
+    /// smaller when a file's aliasing was abandoned.
+    pub occurrences: usize,
+    /// Secrets redacted on the way out — SDD §4.3.
+    pub redacted: usize,
+    /// How many of those this vault had never seen before. The rest were in the
+    /// project at the last export too, which is the difference between "someone
+    /// just committed a credential" and "this one is still here".
+    pub redacted_new: usize,
 }
 
 impl Exported {
@@ -383,6 +456,10 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
     }
 
     let index = Index::build(project)?;
+    // What the vault thinks the project contains, read before this export
+    // changes it.
+    let recorded: Vec<String> = vault.files()?.into_iter().map(|f| f.path).collect();
+
     let mut graph = graph_from(vault)?;
     learn(project, &index, vault, &mut graph)?;
 
@@ -391,45 +468,34 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
     let twins_by_path = twin_paths(&index, &detector, &mut graph)?;
     let twin_of = |path: &String| twins_by_path.get(path).cloned().unwrap_or_else(|| path.clone());
 
-    let mut twins = sanitize_tree(project, &index, &detector, &context, &mut graph, &twin_of)?;
+    let known = vault.known_secrets()?;
+    let secret_index = |matched: &str| vault.secret_index(matched);
+
+    let mut twins = sanitize_tree(
+        project,
+        &index,
+        &detector,
+        &context,
+        &mut graph,
+        &twin_of,
+        &secret_index,
+    )?;
 
     // The graph is persisted either way: those aliases were derived, and
     // throwing them away would hand different aliases to the next run.
     persist(vault, &graph)?;
 
-    let scanner = gate(vault, &graph)?;
-    for (path, content) in &twins.staged {
-        let Payload::Text(twin) = content else { continue };
-        if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
-            twins.blocked.push((
-                path.clone(),
-                leaks
-                    .iter()
-                    .map(|l| format!("{}:{} {:?}", l.line, l.column, l.matched))
-                    .collect(),
-            ));
-        }
-    }
-
-    // The tree is part of the export. A directory named after a client leaks
-    // with no identifier in it at all, so the twin path goes through the same
-    // gate the content does.
-    for record in &twins.records {
-        if let verify::Verdict::Blocked(leaks) = scanner.scan(&record.twin_path) {
-            twins.blocked.push((
-                record.path.clone(),
-                leaks
-                    .iter()
-                    .map(|l| format!("twin path {:?} still contains {:?}", record.twin_path, l.matched))
-                    .collect(),
-            ));
-        }
-    }
+    run_gate(&gate(vault, &graph)?, &mut twins);
 
     let renamed = twins.records.iter().filter(|r| r.path != r.twin_path).count();
+    let redacted_new = twins.redacted.iter().filter(|r| !known.contains(&r.match_idx)).count();
 
     if twins.is_blocked_now() {
         vault.log("export", None, None, Some("blocked"), None)?;
+        // Nothing is recorded on a block. The `files` rows were never written
+        // either, and an occurrence row is meaningless without the file row it
+        // points at — but the deeper reason is that a blocked export is not an
+        // export: it must leave the vault describing the last one that was.
         return Ok(Exported {
             blocked: twins.blocked,
             abandoned: twins.abandoned,
@@ -439,6 +505,9 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
             unchecked: twins.unchecked,
             written: 0,
             allowlisted: allowlist(vault)?.len(),
+            occurrences: 0,
+            redacted: twins.redacted.len(),
+            redacted_new,
         });
     }
 
@@ -463,6 +532,17 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
     }
 
     vault.put_files(&twins.records)?;
+
+    // Files that have gone since the last export. Without this the vault keeps
+    // describing them: `specshield secrets` names a file that does not exist,
+    // and `specshield where` reports occurrences nobody can go and look at.
+    // `forget_files` cascades, so the side tables go with them.
+    let present: std::collections::BTreeSet<&String> = twins.records.iter().map(|r| &r.path).collect();
+    let gone: Vec<String> = recorded.into_iter().filter(|p| !present.contains(p)).collect();
+    vault.forget_files(&gone)?;
+
+    let occurrence_count = record_sides(vault, &twins)?;
+
     vault.log(
         "export",
         Some(i64::try_from(written).unwrap_or(i64::MAX)),
@@ -480,7 +560,95 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
         abandoned: twins.abandoned,
         blocked: Vec::new(),
         allowlisted: allowlist(vault)?.len(),
+        occurrences: occurrence_count,
+        redacted: twins.redacted.len(),
+        redacted_new,
     })
+}
+
+/// Run the export gate over everything staged — SDD §8.
+///
+/// Content and tree both. A directory named after a client leaks with no
+/// identifier in it at all, so a twin path goes through the same scanner the
+/// file contents do.
+fn run_gate(scanner: &verify::LeakScanner, twins: &mut Twins) {
+    for (path, content) in &twins.staged {
+        let Payload::Text(twin) = content else { continue };
+        if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
+            twins.blocked.push((
+                path.clone(),
+                leaks
+                    .iter()
+                    .map(|l| format!("{}:{} {:?}", l.line, l.column, l.matched))
+                    .collect(),
+            ));
+        }
+    }
+
+    for record in &twins.records {
+        if let verify::Verdict::Blocked(leaks) = scanner.scan(&record.twin_path) {
+            twins.blocked.push((
+                record.path.clone(),
+                leaks
+                    .iter()
+                    .map(|l| format!("twin path {:?} still contains {:?}", record.twin_path, l.matched))
+                    .collect(),
+            ));
+        }
+    }
+}
+
+/// Write the two side tables an export fills in — PRD FR-5, SDD §4.3.
+///
+/// Returns how many occurrences were recorded.
+///
+/// **Must run after `put_files`.** Both tables carry a foreign key to
+/// `files(id)`, and that id is read back from the vault rather than derived: it
+/// starts life as the path's blind index but a data-key rotation moves the index
+/// and deliberately leaves the id alone.
+fn record_sides(vault: &mut vault::Vault, twins: &Twins) -> Result<usize> {
+    let ids: HashMap<String, String> = vault
+        .files_with_ids()?
+        .into_iter()
+        .map(|(id, file)| (file.path, id))
+        .collect();
+
+    // Every file this export wrote, whether or not it turned out to hold
+    // anything. A file that no longer mentions a name has to be listed here, or
+    // the row saying it does would stand forever.
+    let touched: Vec<String> = twins.records.iter().filter_map(|r| ids.get(&r.path).cloned()).collect();
+
+    let occurrences: Vec<vault::StoredOccurrence> = twins
+        .sightings
+        .iter()
+        .filter_map(|s| {
+            Some(vault::StoredOccurrence {
+                identity_uuid: s.identity_uuid.clone(),
+                file_id: ids.get(&s.path)?.clone(),
+                byte_start: s.byte_start,
+                byte_end: s.byte_end,
+                kind: s.kind.as_str().to_owned(),
+            })
+        })
+        .collect();
+    let redactions: Vec<vault::StoredRedaction> = twins
+        .redacted
+        .iter()
+        .filter_map(|r| {
+            Some(vault::StoredRedaction {
+                file_id: ids.get(&r.path)?.clone(),
+                byte_start: r.byte_start,
+                byte_end: r.byte_end,
+                secret_type: r.secret_type.clone(),
+                match_idx: r.match_idx.clone(),
+            })
+        })
+        .collect();
+
+    let count = occurrences.len();
+    vault.replace_occurrences(&touched, &occurrences)?;
+    vault.replace_redactions(&touched, &redactions)?;
+    Ok(count)
 }
 
 impl Twins {
@@ -489,19 +657,33 @@ impl Twins {
     }
 }
 
+/// What each recorded file's twin is called, so a later walk does not throw it
+/// away.
+///
+/// `files.twin_path` is the only record of where an exported file went, and
+/// `restore_project` is the only thing that can put it back. An index or a
+/// rescan that overwrote the column with the real path would silently orphan
+/// every twin tree already produced — restore would find no mapping and leave
+/// each file sitting at its alias name. Walking the project is a read; it must
+/// not destroy the one thing an export wrote.
+fn recorded_twins(vault: &vault::Vault) -> Result<HashMap<String, String>> {
+    Ok(vault.files()?.into_iter().map(|f| (f.path, f.twin_path)).collect())
+}
+
 /// Walk the project and record what is in it — SDD §4.1.
 pub fn index_project(project: &Path, vault: &mut vault::Vault) -> Result<Index> {
     let index = Index::build(project)?;
+    let twins = recorded_twins(vault)?;
 
     let files: Vec<vault::StoredFile> = index
         .files
         .values()
         .map(|entry| vault::StoredFile {
             path: entry.path.clone(),
-            // Path aliasing has not run yet. The twin path is the real path
-            // until something renames it, and saying so is better than storing
-            // an empty column that later reads as "no twin".
-            twin_path: entry.path.clone(),
+            // A file nothing has exported yet has no twin name, and the real
+            // path is a better answer than an empty column that later reads as
+            // "no twin". One that *has* been exported keeps the name it got.
+            twin_path: twins.get(&entry.path).cloned().unwrap_or_else(|| entry.path.clone()),
             checksum: entry.checksum.clone(),
             parser: parser_for(project, entry),
         })
@@ -546,18 +728,38 @@ pub fn rescan_project(
 
     let (index, changes) = previous.rescan(project)?;
 
+    let twins = recorded_twins(vault)?;
     let updated: Vec<vault::StoredFile> = index
         .files
         .values()
         .map(|entry| vault::StoredFile {
             path: entry.path.clone(),
-            twin_path: entry.path.clone(),
+            twin_path: twins.get(&entry.path).cloned().unwrap_or_else(|| entry.path.clone()),
             checksum: entry.checksum.clone(),
             parser: parser_for(project, entry),
         })
         .collect();
     vault.put_files(&updated)?;
     vault.forget_files(&changes.removed)?;
+
+    // A modified file's recorded positions describe bytes that have moved. They
+    // are cleared rather than kept: a stale occurrence is not a slightly wrong
+    // answer to "where does this appear", it points at whatever happens to sit
+    // at that offset now. The next export records them again.
+    //
+    // Removed files need no help — `files(id)` cascades.
+    let ids: HashMap<String, String> = vault
+        .files_with_ids()?
+        .into_iter()
+        .map(|(id, file)| (file.path, id))
+        .collect();
+    let moved: Vec<String> = changes
+        .modified
+        .iter()
+        .filter_map(|path| ids.get(path).cloned())
+        .collect();
+    vault.replace_occurrences(&moved, &[])?;
+    vault.replace_redactions(&moved, &[])?;
 
     let pairs: Vec<(String, String)> = recorded.into_iter().map(|f| (f.path, f.checksum)).collect();
     let stale: Vec<String> = index.stale(&pairs).into_iter().map(str::to_owned).collect();
@@ -606,6 +808,141 @@ pub fn rekey(vault: &vault::Vault) -> Result<usize> {
     }
 
     Ok(changed)
+}
+
+/// One recorded appearance of an identity, resolved back to a real path.
+#[derive(Debug, Clone)]
+pub struct Appearance {
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub kind: String,
+}
+
+/// An identity and everywhere the last export saw it — PRD FR-5.
+#[derive(Debug, Clone)]
+pub struct Located {
+    pub real_name: String,
+    pub alias: String,
+    pub entity_type: String,
+    pub scope_path: String,
+    pub appearances: Vec<Appearance>,
+}
+
+/// Find an identity by real name or by alias, and say where it appears.
+///
+/// Both directions, because both questions are real and the vault answers them
+/// with the same table. "Where does `CustomerService` appear" is what a user
+/// asks before renaming something; "what is `SERVICE_H7K2Q3` and where did it
+/// come from" is what they ask holding a model's output.
+///
+/// Real names match case-insensitively — the caller is typing from memory.
+/// Aliases match exactly, because they are issued, not remembered, and a
+/// near-miss on an alias is a different identity rather than a typo.
+///
+/// An identity with no appearances is still returned. "This name is in the
+/// vault but the last export never saw it" is an answer, and a silent empty
+/// result would read as "no such name".
+pub fn locate(vault: &vault::Vault, needle: &str) -> Result<Vec<Located>> {
+    let paths: HashMap<String, String> = vault
+        .files_with_ids()?
+        .into_iter()
+        .map(|(id, file)| (id, file.path))
+        .collect();
+
+    let mut out = Vec::new();
+    for stored in vault.identities()? {
+        if !stored.real_name.eq_ignore_ascii_case(needle) && stored.alias != needle {
+            continue;
+        }
+        let mut appearances: Vec<Appearance> = vault
+            .occurrences_of(&stored.uuid)?
+            .into_iter()
+            .filter_map(|o| {
+                Some(Appearance {
+                    // A row whose file has since been forgotten is dropped
+                    // rather than shown with an opaque id: the cascade should
+                    // have taken it, and inventing a path for it would be worse.
+                    path: paths.get(&o.file_id)?.clone(),
+                    byte_start: o.byte_start,
+                    byte_end: o.byte_end,
+                    kind: o.kind,
+                })
+            })
+            .collect();
+        appearances.sort_by(|a, b| a.path.cmp(&b.path).then(a.byte_start.cmp(&b.byte_start)));
+
+        out.push(Located {
+            real_name: stored.real_name,
+            alias: stored.alias,
+            entity_type: stored.entity_type,
+            scope_path: stored.scope_path,
+            appearances,
+        });
+    }
+    out.sort_by(|a, b| a.scope_path.cmp(&b.scope_path).then(a.alias.cmp(&b.alias)));
+    Ok(out)
+}
+
+/// `(line, column)` for a byte offset into a project file, or `None`.
+///
+/// Both front-ends need this and neither can compute it: an occurrence is stored
+/// as a byte offset, a person reads line and column, and the webview has no
+/// filesystem access at all. Two copies of the arithmetic would be two chances
+/// for the CLI and the app to disagree about where the same recorded name is.
+///
+/// **Best-effort on purpose.** These offsets describe the file as it was at the
+/// last export; it may have been edited or deleted since. `None` where the file
+/// cannot be read or no longer covers the offset — a confidently wrong line
+/// number is worse than an absent one, because the reader has no way to tell.
+#[must_use]
+pub fn line_and_column(project: &Path, relative: &str, byte: usize) -> Option<(usize, usize)> {
+    let text = std::fs::read_to_string(project.join(relative)).ok()?;
+    if byte > text.len() || !text.is_char_boundary(byte) {
+        return None;
+    }
+    let before = &text[..byte];
+    let line = before.matches(NEWLINE).count() + 1;
+    let column = before.rsplit(NEWLINE).next().map_or(1, |l| l.chars().count() + 1);
+    Some((line, column))
+}
+
+/// A file the last export redacted secrets out of — SDD §4.3.
+#[derive(Debug, Clone)]
+pub struct SecretSite {
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub secret_type: String,
+}
+
+/// Every secret this project redacted, by file — SDD §4.3.
+///
+/// Reports a position and a rule, never a value: the vault never held one. What
+/// it is for is the sentence that follows from it — those credentials are still
+/// in the working tree, in the clear, and the twin being safe did nothing about
+/// that.
+pub fn secret_sites(vault: &vault::Vault) -> Result<Vec<SecretSite>> {
+    let paths: HashMap<String, String> = vault
+        .files_with_ids()?
+        .into_iter()
+        .map(|(id, file)| (id, file.path))
+        .collect();
+
+    let mut out: Vec<SecretSite> = vault
+        .redactions()?
+        .into_iter()
+        .filter_map(|r| {
+            Some(SecretSite {
+                path: paths.get(&r.file_id)?.clone(),
+                byte_start: r.byte_start,
+                byte_end: r.byte_end,
+                secret_type: r.secret_type,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.byte_start.cmp(&b.byte_start)));
+    Ok(out)
 }
 
 /// Replace the project key and re-derive every alias — PRD FR-11.

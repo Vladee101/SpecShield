@@ -358,6 +358,32 @@ enum Command {
         passphrase: Option<String>,
     },
 
+    /// Show where an identity appears, by real name or by alias — PRD FR-5.
+    ///
+    /// Answers both directions of the same question: where in my project is
+    /// this name, and what was this alias before it was one. Reads what the
+    /// last export recorded, so an unexported project has nothing to say.
+    Where {
+        /// A real name, matched case-insensitively, or an alias, matched
+        /// exactly.
+        name: String,
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
+    /// List the secrets this project redacted, and where they still are.
+    ///
+    /// The twin is safe; the working tree is not. Reports a position and the
+    /// rule that fired — never a value, because the vault never held one.
+    Secrets {
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+
     /// Inspect a vault that will not open — SDD §16 read-only recovery.
     ///
     /// Needs no passphrase and reveals no real name. Reports what the vault
@@ -580,6 +606,12 @@ fn main() -> Result<()> {
             confirm,
             passphrase,
         } => run_rekey(&project, confirm, passphrase.as_deref()),
+        Command::Where {
+            name,
+            project,
+            passphrase,
+        } => run_where(&project, &name, passphrase.as_deref()),
+        Command::Secrets { project, passphrase } => run_secrets(&project, passphrase.as_deref()),
         Command::Recover { project } => run_recover(&project),
         Command::Report {
             corpus,
@@ -1189,6 +1221,19 @@ fn report_export(dest: &Path, result: &project::Exported) {
         );
     }
     println!("  {} path(s) renamed in the twin tree", result.renamed);
+    println!(
+        "  {} occurrence(s) recorded — `specshield where <name>` (FR-5)",
+        result.occurrences
+    );
+    if result.redacted > 0 {
+        // Worth interrupting a success report for. The twin is clean; the files
+        // these came out of are not, and nothing in this export changed that.
+        println!(
+            "  {} secret(s) redacted, {} not seen before — they are still in your working tree",
+            result.redacted, result.redacted_new
+        );
+        println!("      `specshield secrets` lists where");
+    }
     println!("  {} file(s) had no structure to verify against", result.unchecked);
     if result.abandoned.is_empty() {
         println!("  every parsed file verified structurally (SDD §7.2)");
@@ -1785,6 +1830,78 @@ fn run_rekey(project: &Path, confirm: bool, explicit: Option<&str>) -> Result<()
 ///
 /// Reached when the vault will not open normally, which is the moment a user
 /// most needs to be told something other than "no".
+/// `specshield where` — PRD FR-5.
+fn run_where(project: &Path, name: &str, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let found = project::locate(&vault, name)?;
+
+    if found.is_empty() {
+        println!("No identity named {name:?} in this vault.");
+        println!();
+        println!("Real names match case-insensitively; aliases must match exactly.");
+        return Ok(());
+    }
+
+    for identity in &found {
+        println!("{}  {}  {}", identity.alias, identity.entity_type, identity.real_name);
+        println!("  scope: {}", identity.scope_path);
+
+        if identity.appearances.is_empty() {
+            // Not the same as "nowhere". Occurrences are recorded by `export`,
+            // so a project that has only been scanned has none, and saying so
+            // beats an empty list that reads like an answer.
+            println!("  no recorded occurrences — run `specshield export` to record them");
+            println!();
+            continue;
+        }
+
+        println!("  {} occurrence(s):", identity.appearances.len());
+        for appearance in identity.appearances.iter().take(50) {
+            let position = position(project, &appearance.path, appearance.byte_start);
+            println!("      {}{}  ({})", appearance.path, position, appearance.kind);
+        }
+        if identity.appearances.len() > 50 {
+            println!("      … and {} more", identity.appearances.len() - 50);
+        }
+        println!();
+    }
+    Ok(())
+}
+
+/// `specshield secrets` — SDD §4.3.
+fn run_secrets(project: &Path, explicit: Option<&str>) -> Result<()> {
+    let vault = open(project, explicit)?;
+    let sites = project::secret_sites(&vault)?;
+
+    if sites.is_empty() {
+        println!("No secrets recorded for this project.");
+        println!();
+        println!("Recorded by `specshield export`. A project that has not been exported has none");
+        println!("on record, which is not the same as having none.");
+        return Ok(());
+    }
+
+    println!("{} secret(s) redacted out of the twin:", sites.len());
+    println!();
+    for site in &sites {
+        let position = position(project, &site.path, site.byte_start);
+        println!("  {}{}  {}", site.path, position, site.secret_type);
+    }
+    println!();
+    println!("These are positions in your working tree, not in the twin. The twin has a marker");
+    println!("where each one was; the file on disk still has the credential. Nothing here is a");
+    println!("value — the vault keeps a one-way index and no plaintext, so it cannot show you");
+    println!("what it found, only where.");
+    Ok(())
+}
+
+/// `:line:column` for a recorded byte offset, or empty when it cannot be
+/// resolved — see `project::line_and_column`.
+fn position(project: &Path, relative: &str, byte: usize) -> String {
+    project::line_and_column(project, relative, byte)
+        .map_or_else(String::new, |(line, column)| format!(":{line}:{column}"))
+}
+
 fn run_recover(project: &Path) -> Result<()> {
     let path = vault_path(project);
     let recovery = vault::Recovery::open(&path)?;
@@ -1802,6 +1919,20 @@ fn run_recover(project: &Path) -> Result<()> {
     println!("schema version: {}", recovery.schema_version().unwrap_or(0));
     println!("identities:     {}", recovery.identity_count());
     println!("indexed files:  {}", recovery.file_count());
+    println!("occurrences:    {}", recovery.occurrence_count());
+    println!("redactions:     {}", recovery.redaction_count());
+
+    let secrets = recovery.secret_types();
+    if !secrets.is_empty() {
+        // The one number here that is about the project rather than the vault.
+        // Whatever happens to this file, those credentials are in the working
+        // tree in the clear — they were never in here to be lost with it.
+        println!();
+        println!("Secrets this project redacted (still present in your files):");
+        for (kind, count) in &secrets {
+            println!("  {kind:<26} {count}");
+        }
+    }
 
     let types = recovery.entity_types();
     if !types.is_empty() {

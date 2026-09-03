@@ -191,6 +191,51 @@ pub enum OccurrenceKind {
     Path,
 }
 
+impl OccurrenceKind {
+    /// Stored form — the `occurrences.kind` column of SDD §9.1. Frozen in the
+    /// same way alias prefixes are: rows written by an older build are read
+    /// back by a newer one.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Declaration => "declaration",
+            Self::Reference => "reference",
+            Self::Comment => "comment",
+            Self::StringLiteral => "string_literal",
+            Self::Path => "path",
+        }
+    }
+
+    pub const ALL: [Self; 5] = [
+        Self::Declaration,
+        Self::Reference,
+        Self::Comment,
+        Self::StringLiteral,
+        Self::Path,
+    ];
+}
+
+impl fmt::Display for OccurrenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Failed to parse an [`OccurrenceKind`] from its stored string form.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown occurrence kind: {0}")]
+pub struct UnknownOccurrenceKind(String);
+
+impl FromStr for OccurrenceKind {
+    type Err = UnknownOccurrenceKind;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .ok_or_else(|| UnknownOccurrenceKind(s.to_owned()))
+    }
+}
+
 /// One byte range in one file where an identity appears.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Occurrence {
@@ -201,15 +246,6 @@ pub struct Occurrence {
     pub kind: OccurrenceKind,
 }
 
-/// Edge relations — SDD §5.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Relation {
-    Uses,
-    Writes,
-    Exposes,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +254,15 @@ mod tests {
     fn entity_type_roundtrips_through_its_prefix() {
         for t in EntityType::ALL {
             assert_eq!(t.prefix().parse::<EntityType>().unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn occurrence_kind_roundtrips_through_its_stored_form() {
+        // The `occurrences` table stores this as text. A variant that does not
+        // read back is a row nobody can interpret.
+        for k in OccurrenceKind::ALL {
+            assert_eq!(k.as_str().parse::<OccurrenceKind>().unwrap(), k);
         }
     }
 

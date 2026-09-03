@@ -33,7 +33,7 @@ The bar across the top is the workflow, in order, and then the tools:
 | 3 | **Sanitize & verify** | Produce the twin, pass the gate, copy it |
 | 4 | **Restore** | Paste the model's answer back |
 | 5 | **Diff & apply** | Review the change and apply it as a git patch |
-| — | **Whole project** | Index, export a twin tree, unify concepts, check anything |
+| — | **Whole project** | Index, export a twin tree, unify concepts, find where a name is used, list secrets, check anything |
 | — | **Audit log** | What this project recorded, and CSV export |
 | — | **Vault** | Backup, escrow, re-key, recovery |
 

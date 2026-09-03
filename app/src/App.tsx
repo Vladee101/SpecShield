@@ -18,6 +18,7 @@ import {
   type AuditRow,
   type ExportSummary,
   type IndexSummary,
+  type LocatedIdentity,
   type RecoveryReport,
   type RescanSummary,
   type RestoredProject,
@@ -30,6 +31,7 @@ import {
   type RestoreResult,
   type SanitizeResult,
   type ScanResult,
+  type SecretSite,
 } from "./api";
 
 /// The workflow, in order. Numbered in the interface because they are meant to
@@ -1623,6 +1625,8 @@ function ProjectOpsPanel({ onError, onChanged }: { onError: (e: string | null) =
       <IndexSection onError={onError} />
       <ExportSection onError={onError} onChanged={onChanged} />
       <UnifySection onError={onError} onChanged={onChanged} />
+      <WhereSection onError={onError} />
+      <SecretsSection onError={onError} />
       <VerifySection onError={onError} />
     </>
   );
@@ -1836,12 +1840,193 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
             {result.abandoned.length === 0
               ? " Every parsed file verified structurally."
               : ` ${result.abandoned.length} file(s) exported UNALIASED — aliasing was abandoned.`}
+            <br />
+            {result.occurrences} occurrence(s) recorded, searchable under &ldquo;Where is
+            it&rdquo;.
           </div>
+          {result.redacted > 0 && (
+            <div className="small" style={{ marginTop: 6 }}>
+              <strong>
+                {result.redacted} secret(s) redacted, {result.redacted_new} not seen before.
+              </strong>{" "}
+              The twin is clean. Those credentials are still in your working tree &mdash;
+              this export did nothing about that. &ldquo;Secrets found&rdquo; below lists
+              where.
+            </div>
+          )}
           {result.abandoned.length > 0 && (
             <div className="mono small" style={{ marginTop: 6 }}>
               {result.abandoned.map(([path, why]) => `${path}: ${why}`).join("\n")}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function position(line: number, column: number): string {
+  // Zero means the offset could not be resolved against the file as it stands —
+  // it changed, or it is gone. Showing ":0:0" would look like a real position.
+  return line === 0 ? "" : `:${line}:${column}`;
+}
+
+function WhereSection({ onError }: { onError: (e: string | null) => void }) {
+  const [name, setName] = useState("");
+  const [found, setFound] = useState<LocatedIdentity[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const search = async () => {
+    if (name.trim() === "") return;
+    onError(null);
+    setBusy(true);
+    try {
+      setFound(await api.locateIdentity(name.trim()));
+    } catch (e) {
+      setFound(null);
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Where is it</h3>
+      <p className="muted small">
+        Both directions of the same question. Type a real name to find every place the
+        project uses it, or paste an alias out of a model&rsquo;s reply to find out what it
+        was and where it came from. Real names match ignoring case; aliases must match
+        exactly, because an alias is issued rather than remembered.
+      </p>
+
+      <div className="row">
+        <input
+          value={name}
+          placeholder="CustomerService, or SERVICE_H7K2Q3"
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void search();
+          }}
+        />
+        <button className="primary" disabled={busy || name.trim() === ""} onClick={() => void search()}>
+          {busy ? "Looking…" : "Find"}
+        </button>
+      </div>
+
+      {found !== null && found.length === 0 && (
+        <div className="banner warn" style={{ marginTop: 10 }}>
+          <strong>No identity by that name.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            Nothing in the vault matches. A name the project has never been scanned for is
+            not in here yet.
+          </div>
+        </div>
+      )}
+
+      {found?.map((identity) => (
+        <div key={identity.alias} className="banner ok" style={{ marginTop: 10 }}>
+          <strong className="mono">{identity.alias}</strong>{" "}
+          <span className="small">
+            {identity.entity_type} &middot; {identity.real_name}
+          </span>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            scope: <span className="mono">{identity.scope_path}</span>
+          </div>
+
+          {identity.appearances.length === 0 ? (
+            <div className="small" style={{ marginTop: 6 }}>
+              No recorded occurrences. They are written by an export, so a project that has
+              only been scanned has none &mdash; which is not the same as appearing nowhere.
+            </div>
+          ) : (
+            <div className="scroll" style={{ marginTop: 8 }}>
+              <table>
+                <tbody>
+                  {identity.appearances.slice(0, 200).map((a, i) => (
+                    <tr key={`${a.path}-${a.line}-${a.column}-${i}`}>
+                      <td className="mono small">
+                        {a.path}
+                        {position(a.line, a.column)}
+                      </td>
+                      <td className="small muted">{a.kind}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SecretsSection({ onError }: { onError: (e: string | null) => void }) {
+  const [sites, setSites] = useState<SecretSite[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <div className="panel">
+      <h3 style={{ marginTop: 0 }}>Secrets found</h3>
+      <p className="muted small">
+        What the last export redacted out of the twin, and where each one still sits in your
+        working tree. Positions only &mdash; the vault keeps a one-way index and no
+        plaintext, so it can tell you where it found something and never what.
+      </p>
+
+      <div className="row">
+        <button
+          disabled={busy}
+          onClick={async () => {
+            onError(null);
+            setBusy(true);
+            try {
+              setSites(await api.secretSites());
+            } catch (e) {
+              setSites(null);
+              onError(String(e));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? "Reading…" : "Show secrets"}
+        </button>
+      </div>
+
+      {sites !== null && sites.length === 0 && (
+        <div className="banner ok" style={{ marginTop: 10 }}>
+          <strong>Nothing on record.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            Recorded by an export. A project that has not been exported has none on record,
+            which is not the same as having none.
+          </div>
+        </div>
+      )}
+
+      {sites !== null && sites.length > 0 && (
+        <div className="banner warn" style={{ marginTop: 10 }}>
+          <strong>{sites.length} secret(s) redacted out of the twin.</strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            These are live credentials in your own files. Sanitizing them out of the twin
+            protected the model&rsquo;s copy and nothing else.
+          </div>
+          <div className="scroll" style={{ marginTop: 8 }}>
+            <table>
+              <tbody>
+                {sites.slice(0, 200).map((s, i) => (
+                  <tr key={`${s.path}-${s.line}-${i}`}>
+                    <td className="mono small">
+                      {s.path}
+                      {position(s.line, s.column)}
+                    </td>
+                    <td className="small">{s.secret_type}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

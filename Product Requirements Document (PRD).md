@@ -579,11 +579,10 @@ Example node:
 | Origin | detected |
 | Status | active |
 
-Relationships:
-
-- Service uses DTO
-- Service writes Table
-- API exposes Service
+Relationships (`uses`, `writes`, `exposes`) are **specified and not built** — see SDD §5.
+The `edges` table was dropped in schema v4 rather than kept empty. What *is* recorded is
+where each identity appears (FR-5), which the extractor produces as a by-product of
+aliasing it; what uses what is a separate analysis no parser performs yet.
 
 The graph guarantees consistent anonymization across documents and code: the SQL table
 `customer_subscription`, the OpenAPI schema `CustomerSubscription`, and the TypeScript DTO

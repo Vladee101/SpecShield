@@ -162,6 +162,47 @@ src/domain/customer-subscription.ts   →   src/domain/PATH_4Y1B5S.ts
 import "../domain/customer-subscription"  →  import "../domain/PATH_4Y1B5S"
 ```
 
+### After an export: two questions the vault can now answer
+
+An export records where every alias was applied, and where every secret was
+redacted. Both are read back with the real paths and line numbers of **your**
+files, not the twin's.
+
+```bash
+specshield where CustomerSubscription    # every place the project uses this name
+specshield where ExternalModel_71MCXC    # and the same question from the other end
+```
+
+Real names match ignoring case; an alias must match exactly, because an alias is
+issued rather than remembered. The second form is the useful one when a model
+hands back a reply full of aliases and you want to know what one of them was
+before you accept it.
+
+```bash
+specshield secrets
+```
+
+lists every credential the export took out of the twin:
+
+```
+src/config.ts:1:23  github_token
+```
+
+That is a position in **your working tree**. The twin has a marker where the
+token was; the file on disk still has the token. Sanitizing protected the copy
+you sent the model and did nothing else — this list is the reminder, and the
+export prints a count for the same reason.
+
+Nothing here is a value. The vault keeps a one-way keyed index of each match so
+it can tell "this one again" from "this one is new" — the export reports both
+counts — and it holds no plaintext, so it can say where it found something and
+never what.
+
+One consequence worth knowing: `specshield rotate-key` cannot recompute those
+indexes, because the plaintext they were computed over was never kept. Rotation
+clears them. Which files held secrets survives; after a rotation every secret
+reads as new.
+
 Work on the twin with your model. Then, per file:
 
 ```bash
@@ -421,6 +462,8 @@ This is not telemetry. There is none.
 | `unify` | List or confirm cross-artifact concepts |
 | `index` / `rescan` | Walk and hash the project; report what changed |
 | `export` | Sanitize the whole project into a twin tree |
+| `where` | Where an identity appears, by real name or by alias (FR-5) |
+| `secrets` | Which secrets were redacted, and where they still are |
 | `diff` | Three-way review of what AI output would change |
 | `resolve` | Name an entity the model invented |
 | `apply` / `undo` | Apply the restored change as a git patch, or reverse it |

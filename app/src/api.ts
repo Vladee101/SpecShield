@@ -183,7 +183,41 @@ export interface ExportSummary {
   blocked: [string, string[]][];
   /** Vault names the gate was told to ignore — FR-10. */
   allowlisted: number;
+  /** Places recorded in the vault — FR-5. */
+  occurrences: number;
+  /**
+   * Secrets redacted on the way out, and how many are new since the last
+   * export. Both describe the working tree, not the twin: the twin has a marker
+   * where each one was, the file on disk still has the credential.
+   */
+  redacted: number;
+  redacted_new: number;
   destination: string;
+}
+
+/** One recorded appearance of an identity — PRD FR-5. */
+export interface Appearance {
+  path: string;
+  /** 0 when the position could not be resolved against the file as it is now. */
+  line: number;
+  column: number;
+  kind: string;
+}
+
+export interface LocatedIdentity {
+  real_name: string;
+  alias: string;
+  entity_type: string;
+  scope_path: string;
+  appearances: Appearance[];
+}
+
+/** One secret this project redacted — SDD §4.3. A position, never a value. */
+export interface SecretSite {
+  path: string;
+  line: number;
+  column: number;
+  secret_type: string;
 }
 
 export interface RestoredProject {
@@ -344,6 +378,12 @@ export const api = {
   unifyConfirm: (concept: string) => invoke<[number, number]>("unify_confirm", { concept }),
 
   verifyText: (content: string) => invoke<VerifyResult>("verify_text", { content }),
+
+  /** Where an identity appears — by real name (case-insensitive) or alias (exact). */
+  locateIdentity: (name: string) => invoke<LocatedIdentity[]>("locate_identity", { name }),
+
+  /** Every secret this project redacted, and where it still is. */
+  secretSites: () => invoke<SecretSite[]>("secret_sites"),
 
   supportedFormats: () => invoke<string[]>("supported_formats"),
 };

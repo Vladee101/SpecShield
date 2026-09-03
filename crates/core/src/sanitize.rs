@@ -159,6 +159,12 @@ impl Graph {
 }
 
 /// Result of sanitizing one document.
+///
+/// **Every byte offset in here indexes `source`, the text the caller passed
+/// in** — not the twin and not the redacted intermediate the alias pass
+/// actually ran over. Those three texts have different lengths whenever a
+/// secret was found, and an offset that means "somewhere in a string nobody
+/// holds" is worse than no offset at all.
 #[derive(Debug)]
 pub struct Sanitized {
     pub twin: String,
@@ -180,6 +186,10 @@ pub struct Applied {
     pub real_name: String,
     pub byte_start: usize,
     pub byte_end: usize,
+    /// What sort of position this was — the `occurrences.kind` column of
+    /// SDD §9.1. Carried through from the candidate rather than recomputed: the
+    /// parser knew whether this was a declaration and nothing downstream does.
+    pub kind: crate::model::OccurrenceKind,
 }
 
 /// Candidates at or above this confidence are applied automatically; below it
@@ -309,7 +319,7 @@ pub fn sanitize(
     }
     candidates.sort_by_key(|c| c.byte_start);
 
-    let (confident, suggestions): (Vec<_>, Vec<_>) = candidates
+    let (confident, mut suggestions): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE);
 
@@ -340,6 +350,7 @@ pub fn sanitize(
             real_name: candidate.real_name.clone(),
             byte_start: candidate.byte_start,
             byte_end: candidate.byte_end,
+            kind: candidate.kind,
         });
     }
 
@@ -351,6 +362,19 @@ pub fn sanitize(
     //    unachievable without a type checker (SDD §4.2.2). It is: the twin
     //    parses, and its structure matches the original.
     let verification = verify_structure(parser, &redacted, &twin);
+
+    // Back into the caller's coordinates. A no-op when nothing was redacted,
+    // which is the overwhelmingly common case.
+    if !findings.is_empty() {
+        for hit in &mut applied {
+            hit.byte_start = to_source_offset(&findings, hit.byte_start);
+            hit.byte_end = to_source_offset(&findings, hit.byte_end);
+        }
+        for candidate in &mut suggestions {
+            candidate.byte_start = to_source_offset(&findings, candidate.byte_start);
+            candidate.byte_end = to_source_offset(&findings, candidate.byte_end);
+        }
+    }
 
     if verification.aliases_applied() {
         Ok(Sanitized {
@@ -376,6 +400,36 @@ pub fn sanitize(
             verification,
         })
     }
+}
+
+/// Translate an offset in the redacted text back into the original source.
+///
+/// The alias pass runs over the redacted text, so everything it reports is in
+/// that text's coordinates. A marker is rarely the same length as the secret it
+/// replaced, so past the first finding those coordinates drift — silently, and
+/// only in files that contained a secret, which is the worst way for an offset
+/// to be wrong.
+///
+/// `findings` must be sorted by `byte_start` and non-overlapping, which is what
+/// [`secrets::scan`] returns.
+fn to_source_offset(findings: &[secrets::Finding], offset: usize) -> usize {
+    let (mut source, mut redacted) = (0usize, 0usize);
+
+    for finding in findings {
+        // Text before this marker was copied through unchanged.
+        let gap = finding.byte_start.saturating_sub(source);
+        if offset < redacted + gap {
+            return offset - redacted + source;
+        }
+        source = finding.byte_end;
+        redacted += gap + finding.marker().len();
+        if offset < redacted {
+            // Inside a marker. Nothing in the source corresponds to a position
+            // *within* it, so the secret's own start is the honest answer.
+            return finding.byte_start;
+        }
+    }
+    offset - redacted + source
 }
 
 /// Compare the structure of `before` and `after` — SDD §7.2.
@@ -419,6 +473,55 @@ mod tests {
         Detector::new()
             .with_term("Vantor", EntityType::Organization)
             .with_term("Meridian Freight", EntityType::Organization)
+    }
+
+    #[test]
+    fn reported_offsets_index_the_caller_s_source_not_the_redacted_text() {
+        // The alias pass runs over text in which the secret has already been
+        // replaced by a marker of a different length. Everything after that
+        // point is displaced, so an offset taken straight from that pass points
+        // into the wrong part of the file — and only ever in files that held a
+        // secret, which is where being wrong costs the most.
+        let source = "key = ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa and then Vantor ships it.";
+        let mut g = graph();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
+
+        assert_eq!(out.secrets.len(), 1, "the token must have been found");
+        let hit = out.applied.iter().find(|a| a.real_name == "Vantor").expect("Vantor");
+        assert_eq!(
+            &source[hit.byte_start..hit.byte_end],
+            "Vantor",
+            "the reported span must slice the caller's own text"
+        );
+    }
+
+    #[test]
+    fn an_offset_before_a_secret_is_unmoved() {
+        let source = "Vantor uses key = ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa here.";
+        let mut g = graph();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
+
+        let hit = out.applied.iter().find(|a| a.real_name == "Vantor").expect("Vantor");
+        assert_eq!(hit.byte_start, 0);
+        assert_eq!(&source[hit.byte_start..hit.byte_end], "Vantor");
+    }
+
+    #[test]
+    fn offsets_survive_several_secrets_of_differing_lengths() {
+        let source = concat!(
+            "a = ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+",
+            "b = AKIAIOSFODNN7EXAMPLE
+",
+            "Vantor is last.
+",
+        );
+        let mut g = graph();
+        let out = sanitize(source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
+
+        assert_eq!(out.secrets.len(), 2, "both credentials must have been found");
+        let hit = out.applied.iter().find(|a| a.real_name == "Vantor").expect("Vantor");
+        assert_eq!(&source[hit.byte_start..hit.byte_end], "Vantor");
     }
 
     #[test]

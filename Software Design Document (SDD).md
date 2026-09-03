@@ -260,8 +260,20 @@ meaningless and dangerous.
 ### Output
 
 Each match becomes an edit replacing the span with `<<REDACTED:TYPE>>`, plus a row in the
-`redactions` table storing **only** `HMAC(project_key, match)` for idempotency across
-rescans.
+`redactions` table storing **only** `HMAC(index_key, match)` for idempotency across
+rescans — written by `export`, read by `specshield secrets` and the desktop
+“Secrets found” panel.
+
+Two properties of that index are worth stating, because both are consequences rather than
+choices. It is **keyed**, not a plain hash: the rule packs above describe exactly the shapes
+an attacker would guess, so an unkeyed digest of a credential would be confirmable by
+anyone who obtained the vault file. And it **cannot survive a data-key rotation** — the
+plaintext it was computed over was deliberately never kept, so there is nothing to
+recompute from. `rotate-key` therefore clears every `match_idx` while keeping the rows.
+Which files held secrets, of what type and where, survives; idempotency across the rotation
+does not, and afterwards every secret reads as new. That is the truth, and a stale index
+that could never match would have reported the same answer while appearing to have
+checked.
 
 High-confidence matches set a blocking flag consumed by the Verification Gate (§8).
 
@@ -339,31 +351,38 @@ The identity key is `(scopePath, type, realName)`. Name alone is insufficient:
 appears in every feature folder. Collapsing them causes over-aliasing (which breaks the
 twin) and ambiguous restoration simultaneously.
 
-## Edge
+## Edge — deferred, and the table is gone
+
+The relation graph below was specified in v1.1 and **is not built**. The `edges` table
+existed in the vault from v1 of the schema with no producer, no consumer, and no screen;
+schema v4 drops it, and `Relation` is gone from the model. An empty table is a claim the
+product does not honour, and leaving one standing is worse than saying plainly that the
+feature is not here.
 
 ```ts
-IdentityEdge {
+IdentityEdge {                              // not implemented
     from: UUID
     to: UUID
     relation: USES | WRITES | EXPOSES
 }
 ```
 
-Example:
+**What it would take.** The relation is not derivable from anything the pipeline already
+computes. Identity extraction answers *what is this name*, and every parser is written to
+that question; *what uses what* is a second analysis — resolving an import to a declaration,
+a constructor parameter to its type, a query to its table. The one place it comes close to
+free is SQL `REFERENCES`, which already names both sides (§4.2), and the natural next step
+would be a `relations` method on `ArtifactParser` that SQL implements first.
 
-```
-SERVICE_014
-    |
-    | USES
-    |
-DTO_012
+**What is lost by not having it.** Nothing in the security guarantee: an edge relates two
+identities the vault already holds and adds no information about either. What it would buy
+is a better *twin* — a model told that `SERVICE_014` writes `DB_TABLE_014` reasons about
+the alias pair as a system rather than as two opaque tokens. That is a quality argument,
+which is why it is deferred rather than dropped as an idea.
 
-SERVICE_014
-    |
-    | WRITES
-    |
-DB_TABLE_014
-```
+Occurrences, by contrast, **are** recorded — see §9.1 and PRD FR-5. Where a name appears is
+a question the extractor already answers as a by-product of aliasing it, which is exactly
+the difference.
 
 ## Cross-artifact unification
 
@@ -659,24 +678,19 @@ CREATE TABLE occurrences (
   file_id       TEXT NOT NULL,
   byte_start    INTEGER NOT NULL,
   byte_end      INTEGER NOT NULL,
-  kind          TEXT NOT NULL,              -- declaration | reference | comment | string | path
+  kind          TEXT NOT NULL,              -- declaration | reference | comment | string_literal | path
   PRIMARY KEY (file_id, byte_start)
 );
 
-CREATE TABLE edges (
-  from_uuid TEXT NOT NULL,
-  to_uuid   TEXT NOT NULL,
-  relation  TEXT NOT NULL,
-  PRIMARY KEY (from_uuid, to_uuid, relation)
-);
+-- `edges` was here. Dropped in schema v4: never had a producer. See §5.
 
 CREATE TABLE redactions (                   -- one-way; never contains plaintext
-  id          TEXT PRIMARY KEY,
+  id          TEXT PRIMARY KEY,             -- file_id:byte_start, so a rewrite lands here
   file_id     TEXT NOT NULL,
   byte_start  INTEGER NOT NULL,
   byte_end    INTEGER NOT NULL,
   secret_type TEXT NOT NULL,
-  match_hash  TEXT NOT NULL
+  match_idx   TEXT NOT NULL                 -- HMAC(index_key, match); '' after a rotation
 );
 
 CREATE TABLE allowlist (

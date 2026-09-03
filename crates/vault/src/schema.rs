@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::VaultError;
 
 /// Current schema version. Bump *and* add a migration; never edit V1 in place.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 const V1: &str = r"
 CREATE TABLE meta (
@@ -130,15 +130,40 @@ CREATE TABLE concepts (
 CREATE INDEX ix_concept ON concepts(concept_idx);
 ";
 
-/// The highest version this function can reach on its own.
+/// Drop `edges` — P3-5.
 ///
-/// v3 is not a DDL change. It re-encrypts every sealed value under a new data
-/// key, which needs the passphrase, so `Vault::open` performs it and stamps the
-/// version — see `crate::migrate_to_v3`. A vault that still reads 2 after this
-/// runs is one waiting for that step.
-const DDL_VERSION: i64 = 2;
+/// The table was written for the relation graph of SDD §5 and never gained a
+/// producer: no parser emits a relation, nothing reads one, and no screen shows
+/// one. An empty table is a claim the product does not honour, so the claim is
+/// withdrawn rather than left standing. SDD §5 and PRD §11 now say the relation
+/// graph is deferred, and what it would take to build it.
+///
+/// `IF EXISTS` because a vault created after this migration lands never had the
+/// table: V1 stays frozen, so a fresh database creates `edges` and then drops it
+/// a few statements later. Editing V1 instead would leave every existing vault
+/// with no path forward, which is the trade this module was built to avoid.
+const V4: &str = r"
+DROP TABLE IF EXISTS edges;
+";
 
-/// Create or upgrade the schema.
+/// The highest version reachable by DDL alone. Equal to [`SCHEMA_VERSION`],
+/// and still not the same thing.
+///
+/// **v3 is a content migration.** It re-encrypts every sealed value under a new
+/// data key, which needs the passphrase, so `Vault::open` performs it — see
+/// `crate::migrate_to_v3`. This function runs before any passphrase has been
+/// checked and stamps straight past 3, so `user_version` cannot be used to ask
+/// whether the content has moved yet.
+///
+/// `Vault::open` therefore asks the question directly: **does `meta` hold a
+/// `data_key` row?** That row *is* v3 — it is what the content is encrypted
+/// under — so its presence cannot drift from the truth the way a version stamp
+/// can. It also survives an open that failed, which a stamp does not: a wrong
+/// passphrase runs this function and returns, and a vault that had recorded
+/// “already migrated” on the way past would never open again.
+const DDL_VERSION: i64 = 4;
+
+/// Create or upgrade the schema. Structure only — see [`DDL_VERSION`].
 pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
@@ -154,6 +179,10 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     }
     if version < 2 {
         conn.execute_batch(V2)?;
+    }
+    // v3 is deliberately absent: it has no DDL. See DDL_VERSION.
+    if version < 4 {
+        conn.execute_batch(V4)?;
     }
     // Future DDL migrations append here, each guarded by `if version < N`.
 
@@ -200,7 +229,6 @@ mod tests {
             "audit_log",
             "concepts",
             "dictionary",
-            "edges",
             "files",
             "identities",
             "meta",
@@ -210,6 +238,10 @@ mod tests {
         ] {
             assert!(tables.contains(&expected.to_owned()), "missing {expected}: {tables:?}");
         }
+        assert!(
+            !tables.contains(&"edges".to_owned()),
+            "edges was dropped in v4 and must not come back without a producer: {tables:?}"
+        );
     }
 
     #[test]
@@ -222,15 +254,42 @@ mod tests {
     }
 
     #[test]
-    fn the_ddl_migration_stops_short_of_v3() {
-        // v3 re-encrypts every sealed value under a new data key, which needs
-        // the passphrase. `Vault::create` and `Vault::open` stamp it; this
-        // function cannot, and must not pretend to — a vault marked v3 whose
-        // content is still encrypted the old way would never open again.
-        let c = conn();
-        let version: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, DDL_VERSION);
-        assert_ne!(DDL_VERSION, SCHEMA_VERSION, "v3 is not reachable by DDL alone");
+    fn the_ddl_runner_never_claims_the_content_was_migrated() {
+        // It stamps `user_version` to 4 on a vault whose values are still
+        // encrypted the pre-v3 way, because it runs before any passphrase has
+        // been seen and cannot do otherwise. So the stamp must not be what
+        // anything reads to decide whether the content migration is owed — the
+        // `data_key` row is. See DDL_VERSION.
+        let c = Connection::open_in_memory().unwrap();
+        configure(&c).unwrap();
+        c.execute_batch(V1).unwrap();
+        c.execute_batch(V2).unwrap();
+        c.pragma_update(None, "user_version", 2).unwrap();
+
+        migrate(&c).unwrap();
+
+        let stamped: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(stamped, DDL_VERSION, "structure is up to date");
+
+        let keys: i64 = c
+            .query_row("SELECT COUNT(*) FROM meta WHERE key='data_key'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(keys, 0, "and the content demonstrably is not");
+    }
+
+    #[test]
+    fn a_v1_vault_loses_edges_on_upgrade() {
+        let c = Connection::open_in_memory().unwrap();
+        configure(&c).unwrap();
+        c.execute_batch(V1).unwrap();
+        c.pragma_update(None, "user_version", 1).unwrap();
+        assert!(c.prepare("SELECT * FROM edges").is_ok());
+
+        migrate(&c).unwrap();
+        assert!(
+            c.prepare("SELECT * FROM edges").is_err(),
+            "v4 drops edges from existing vaults, not only from new ones"
+        );
     }
 
     #[test]

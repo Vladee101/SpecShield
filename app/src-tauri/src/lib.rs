@@ -24,6 +24,8 @@
 mod clipboard;
 mod state;
 
+use std::path::Path;
+
 use serde::Serialize;
 use specshield_core::detect::Detector;
 use specshield_core::model::{EntityType, OccurrenceKind, Origin, Status};
@@ -1177,6 +1179,12 @@ struct ExportSummary {
     blocked: Vec<(String, Vec<String>)>,
     /// Vault names the gate was told to ignore — FR-10.
     allowlisted: usize,
+    /// Places recorded in the vault — FR-5.
+    occurrences: usize,
+    /// Secrets redacted on the way out, and how many are new since the last
+    /// export. Both are about the working tree, not the twin.
+    redacted: usize,
+    redacted_new: usize,
     destination: String,
 }
 
@@ -1271,6 +1279,9 @@ fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSumm
             abandoned: result.abandoned,
             blocked: result.blocked,
             allowlisted: result.allowlisted,
+            occurrences: result.occurrences,
+            redacted: result.redacted,
+            redacted_new: result.redacted_new,
             destination: destination.display().to_string(),
         })
     })
@@ -1304,6 +1315,90 @@ fn restore_project(state: State<'_, AppState>, twin: String, dest: String) -> Re
             destination: destination.display().to_string(),
         })
     })
+}
+
+#[derive(Serialize)]
+struct Appearance {
+    path: String,
+    line: usize,
+    column: usize,
+    kind: String,
+}
+
+#[derive(Serialize)]
+struct LocatedIdentity {
+    real_name: String,
+    alias: String,
+    entity_type: String,
+    scope_path: String,
+    appearances: Vec<Appearance>,
+}
+
+/// Where an identity appears, by real name or by alias — PRD FR-5.
+#[tauri::command]
+fn locate_identity(state: State<'_, AppState>, name: String) -> Result<Vec<LocatedIdentity>> {
+    state.with(|vault, root| locate_identity_in(vault, root, &name))
+}
+
+fn locate_identity_in(vault: &mut vault::Vault, root: &Path, name: &str) -> Result<Vec<LocatedIdentity>> {
+    Ok(project::locate(vault, name)?
+        .into_iter()
+        .map(|found| LocatedIdentity {
+            real_name: found.real_name,
+            alias: found.alias,
+            entity_type: found.entity_type,
+            scope_path: found.scope_path,
+            appearances: found
+                .appearances
+                .into_iter()
+                .map(|a| {
+                    // Resolved here rather than in the webview, which has no
+                    // filesystem access and could not turn an offset into a
+                    // line if it wanted to. Zero means "no position", which the
+                    // UI shows as nothing rather than as line zero.
+                    let (line, column) = project::line_and_column(root, &a.path, a.byte_start).unwrap_or((0, 0));
+                    Appearance {
+                        path: a.path,
+                        line,
+                        column,
+                        kind: a.kind,
+                    }
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+struct SecretSite {
+    path: String,
+    line: usize,
+    column: usize,
+    secret_type: String,
+}
+
+/// Every secret this project redacted, and where it still is — SDD §4.3.
+///
+/// Positions in the working tree, never values: the vault holds a one-way index
+/// and no plaintext, so it can say where it found something and nothing more.
+#[tauri::command]
+fn secret_sites(state: State<'_, AppState>) -> Result<Vec<SecretSite>> {
+    state.with(secret_sites_in)
+}
+
+fn secret_sites_in(vault: &mut vault::Vault, root: &Path) -> Result<Vec<SecretSite>> {
+    Ok(project::secret_sites(vault)?
+        .into_iter()
+        .map(|site| {
+            let (line, column) = project::line_and_column(root, &site.path, site.byte_start).unwrap_or((0, 0));
+            SecretSite {
+                path: site.path,
+                line,
+                column,
+                secret_type: site.secret_type,
+            }
+        })
+        .collect())
 }
 
 /// Cross-artifact unification proposals — SDD §5.
@@ -1688,6 +1783,8 @@ pub fn run() {
             unify_proposals,
             unify_confirm,
             verify_text,
+            locate_identity,
+            secret_sites,
             pick_file,
             pick_directory,
             save_text,

@@ -125,6 +125,37 @@ impl Recovery {
         self.count("files")
     }
 
+    /// How many places identities were recorded as appearing — PRD FR-5.
+    ///
+    /// Says how much of the project the vault had actually looked at, which
+    /// `identity_count` alone does not: a hundred identities seen once each and
+    /// a hundred seen everywhere are very different losses.
+    #[must_use]
+    pub fn occurrence_count(&self) -> usize {
+        self.count("occurrences")
+    }
+
+    /// How many secrets were redacted out of this project — SDD §4.3.
+    ///
+    /// The number that changes what a user does next. It is not about the
+    /// vault: it says those credentials are sitting in the working tree, in the
+    /// clear, and were never in here to lose. A recovery report that omitted it
+    /// would let someone close a broken vault believing the secrets went with
+    /// it.
+    #[must_use]
+    pub fn redaction_count(&self) -> usize {
+        self.count("redactions")
+    }
+
+    /// Which rules fired, and how often — SDD §4.3.
+    ///
+    /// The type is stored in the clear and holds nothing back: `github_token`
+    /// names a shape, never a value.
+    #[must_use]
+    pub fn secret_types(&self) -> Vec<(String, usize)> {
+        self.grouped("SELECT secret_type, COUNT(*) FROM redactions GROUP BY secret_type ORDER BY secret_type")
+    }
+
     /// Every alias the project ever issued.
     ///
     /// Stored in the clear because uniqueness has to be enforceable over
@@ -139,23 +170,7 @@ impl Recovery {
     /// Entity type and count, so the shape of what was lost is visible.
     #[must_use]
     pub fn entity_types(&self) -> Vec<(String, usize)> {
-        let Some(conn) = &self.conn else {
-            return Vec::new();
-        };
-        let Ok(mut stmt) =
-            conn.prepare("SELECT entity_type, COUNT(*) FROM identities GROUP BY entity_type ORDER BY entity_type")
-        else {
-            return Vec::new();
-        };
-        let Ok(rows) = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                usize::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
-            ))
-        }) else {
-            return Vec::new();
-        };
-        rows.filter_map(Result::ok).collect()
+        self.grouped("SELECT entity_type, COUNT(*) FROM identities GROUP BY entity_type ORDER BY entity_type")
     }
 
     /// The audit log — PRD FR-9. Holds no names and no content, so it survives
@@ -193,6 +208,25 @@ impl Recovery {
         // `table` is a literal from this module, never user input.
         conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0))
             .map_or(0, |n| usize::try_from(n).unwrap_or(0))
+    }
+
+    /// A `(label, count)` query. `sql` is a literal from this module.
+    fn grouped(&self, sql: &str) -> Vec<(String, usize)> {
+        let Some(conn) = &self.conn else {
+            return Vec::new();
+        };
+        let Ok(mut stmt) = conn.prepare(sql) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                usize::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+            ))
+        }) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
     }
 
     fn strings(&self, sql: &str) -> Vec<String> {

@@ -132,6 +132,23 @@ pub struct StoredOccurrence {
     pub kind: String,
 }
 
+/// One redaction — SDD §4.3. **One-way.**
+///
+/// Holds no plaintext and no route back to any: `match_idx` is a keyed hash of
+/// the matched text, so the vault can tell "this secret again" from "a new
+/// secret" and can answer nothing else. Byte offsets and the rule that fired are
+/// not secret on their own — without the file they describe nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRedaction {
+    pub file_id: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub secret_type: String,
+    /// From [`Vault::secret_index`]. Never derived by the caller: it must be
+    /// keyed by *this* vault, or it is a plain hash of a live credential.
+    pub match_idx: String,
+}
+
 /// One audit entry — PRD FR-9. Never contains names or content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEntry {
@@ -307,8 +324,18 @@ impl Vault {
 
         // A vault written before v3 has its content encrypted straight under the
         // passphrase. Bring it forward before anything reads from it.
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < 3 {
+        //
+        // The question is put to `meta`, not to `user_version`: the wrapped data
+        // key *is* v3, so it cannot fall out of step with the content the way a
+        // stamp can — and, decisively, an open that failed on a wrong passphrase
+        // has already run the DDL runner and moved that stamp. Reading it here
+        // would let one mistyped passphrase leave a pre-v3 vault permanently
+        // unopenable.
+        let migrated = conn
+            .query_row("SELECT 1 FROM meta WHERE key='data_key'", [], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        if !migrated {
             migrate_to_v3(&conn, passphrase, &salt, &kek)?;
         }
 
@@ -458,6 +485,21 @@ impl Vault {
     }
 
     pub fn files(&self) -> Result<Vec<StoredFile>, VaultError> {
+        Ok(self.files_with_ids()?.into_iter().map(|(_, file)| file).collect())
+    }
+
+    /// Every recorded file paired with its row id.
+    ///
+    /// [`Vault::files`] is this without the ids. Both exist because the id is
+    /// noise to most callers and the only way to attach an occurrence or a
+    /// redaction to a file for the one that needs it.
+    ///
+    /// The id is *not* recomputable from the path. It starts life as the path's
+    /// blind index, but a data-key rotation moves `path_idx` and deliberately
+    /// leaves `id` where it is — the id is the associated data every sealed
+    /// column in the row is bound to, and moving it would mean resealing them
+    /// all. Read the id from here; never derive it.
+    pub fn files_with_ids(&self) -> Result<Vec<(String, StoredFile)>, VaultError> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, path_enc, twin_path_enc, checksum, parser FROM files ORDER BY id")?;
@@ -474,12 +516,13 @@ impl Vault {
         let mut out = Vec::new();
         for row in rows {
             let (id, path_enc, twin_enc, checksum, parser) = row?;
-            out.push(StoredFile {
+            let file = StoredFile {
                 path: self.keys.unseal(&path_enc, &aad("files", "path", &id))?,
                 twin_path: self.keys.unseal(&twin_enc, &aad("files", "twin_path", &id))?,
                 checksum,
                 parser,
-            });
+            };
+            out.push((id, file));
         }
         Ok(out)
     }
@@ -665,6 +708,46 @@ impl Vault {
         Ok(())
     }
 
+    /// Replace what is recorded for a set of files — PRD FR-5.
+    ///
+    /// The batch form, and the only correct one for a re-export. An upsert alone
+    /// would leave the rows for a name that has since been deleted from a file
+    /// standing forever, so the files being rewritten are cleared first — every
+    /// file in `files`, including one whose new occurrence list is empty, which
+    /// is how "this file no longer mentions anything" is recorded.
+    ///
+    /// One transaction: a thousand-file export must not be a thousand of them,
+    /// and a half-written occurrence set describes a project that never existed.
+    pub fn replace_occurrences(
+        &mut self,
+        files: &[String],
+        occurrences: &[StoredOccurrence],
+    ) -> Result<(), VaultError> {
+        let tx = self.conn.transaction()?;
+        for file_id in files {
+            tx.execute("DELETE FROM occurrences WHERE file_id = ?", params![file_id])?;
+        }
+        for occurrence in occurrences {
+            tx.execute(
+                "INSERT INTO occurrences (identity_uuid, file_id, byte_start, byte_end, kind)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(file_id, byte_start) DO UPDATE SET
+                    identity_uuid = excluded.identity_uuid,
+                    byte_end = excluded.byte_end,
+                    kind = excluded.kind",
+                params![
+                    occurrence.identity_uuid,
+                    occurrence.file_id,
+                    i64::try_from(occurrence.byte_start).unwrap_or(i64::MAX),
+                    i64::try_from(occurrence.byte_end).unwrap_or(i64::MAX),
+                    occurrence.kind,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn occurrences_of(&self, identity_uuid: &str) -> Result<Vec<StoredOccurrence>, VaultError> {
         let mut stmt = self.conn.prepare(
             "SELECT identity_uuid, file_id, byte_start, byte_end, kind
@@ -679,6 +762,85 @@ impl Vault {
                 kind: r.get(4)?,
             })
         })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// The one-way index for a matched secret — SDD §4.3.
+    ///
+    /// Keyed by this vault, which is the whole security property: an unkeyed
+    /// hash of a credential is a value anyone can confirm by guessing, and the
+    /// rule packs that produce these matches describe exactly the shapes worth
+    /// guessing. Nothing else may construct a `match_idx`.
+    #[must_use]
+    pub fn secret_index(&self, matched: &str) -> String {
+        self.keys.blind_index(matched)
+    }
+
+    /// Replace what is recorded for a set of files — SDD §4.3.
+    ///
+    /// Same shape and same reasons as [`Vault::replace_occurrences`]: a secret
+    /// the user has since removed from a file must stop being reported.
+    pub fn replace_redactions(&mut self, files: &[String], redactions: &[StoredRedaction]) -> Result<(), VaultError> {
+        let tx = self.conn.transaction()?;
+        for file_id in files {
+            tx.execute("DELETE FROM redactions WHERE file_id = ?", params![file_id])?;
+        }
+        for redaction in redactions {
+            // Derived from the position, so re-recording the same redaction
+            // lands on the same row rather than accumulating duplicates. Neither
+            // component is secret: the file id is a blind index and an offset
+            // into a file nobody has describes nothing.
+            let id = format!("{}:{}", redaction.file_id, redaction.byte_start);
+            tx.execute(
+                "INSERT INTO redactions (id, file_id, byte_start, byte_end, secret_type, match_idx)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    byte_end = excluded.byte_end,
+                    secret_type = excluded.secret_type,
+                    match_idx = excluded.match_idx",
+                params![
+                    id,
+                    redaction.file_id,
+                    i64::try_from(redaction.byte_start).unwrap_or(i64::MAX),
+                    i64::try_from(redaction.byte_end).unwrap_or(i64::MAX),
+                    redaction.secret_type,
+                    redaction.match_idx,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every recorded redaction, newest file first by id.
+    pub fn redactions(&self) -> Result<Vec<StoredRedaction>, VaultError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT file_id, byte_start, byte_end, secret_type, match_idx
+             FROM redactions ORDER BY file_id, byte_start",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(StoredRedaction {
+                file_id: r.get(0)?,
+                byte_start: usize::try_from(r.get::<_, i64>(1)?).unwrap_or(0),
+                byte_end: usize::try_from(r.get::<_, i64>(2)?).unwrap_or(0),
+                secret_type: r.get(3)?,
+                match_idx: r.get(4)?,
+            })
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// The set of secrets this vault has already seen — SDD §4.3.
+    ///
+    /// The one thing `match_idx` is for. Empty entries are skipped: a data-key
+    /// rotation cannot recompute them (the plaintext is gone, by design), so
+    /// they are cleared rather than left to look like matches that can never
+    /// fire. After a rotation every secret reads as new, which is the truth.
+    pub fn known_secrets(&self) -> Result<std::collections::BTreeSet<String>, VaultError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT match_idx FROM redactions WHERE match_idx != ''")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(Result::ok).collect())
     }
 
@@ -996,7 +1158,10 @@ fn migrate_to_v3(conn: &Connection, passphrase: &str, salt: &[u8], kek: &Kek) ->
     match migrated {
         Ok(()) => {
             conn.execute_batch("COMMIT")?;
-            conn.pragma_update(None, "user_version", 3)?;
+            // `SCHEMA_VERSION`, not 3: the DDL runner has already applied every
+            // structural migration, and stamping 3 here would send the next open
+            // back through them.
+            conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION)?;
             Ok(())
         }
         Err(e) => {
@@ -1130,6 +1295,18 @@ fn migrate_rows(conn: &Connection, old: &Keys, new: &Keys) -> Result<(), VaultEr
         )?;
     }
 
+    // redactions — the one table whose index cannot be re-derived. `match_idx`
+    // is a keyed hash of a secret whose plaintext was deliberately never kept,
+    // so under a new key it becomes a value that can never match anything.
+    //
+    // Cleared rather than left standing: a stale index is not a smaller version
+    // of a working one, it is a claim that would silently answer "never seen
+    // before" to every secret while looking like it had checked. The rows stay,
+    // because *which files held secrets, of what type, and where* survives a
+    // rotation intact and is the more useful half. What is lost is idempotency
+    // across the rotation, and that loss is real.
+    conn.execute("UPDATE redactions SET match_idx = ''", [])?;
+
     Ok(())
 }
 
@@ -1252,6 +1429,10 @@ mod tests {
             scope_strategy: "module".to_owned(),
             project_key: [7; 32],
         }
+    }
+
+    fn vault(t: &TempVault) -> Vault {
+        Vault::create(t.path(), "pw", &settings()).unwrap()
     }
 
     fn identity() -> StoredIdentity {
@@ -1547,7 +1728,7 @@ mod tests {
         let v = Vault::open(t.path(), "pw").expect("a v2 vault must open");
 
         let version: i64 = v.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(version, 3, "and be stamped as migrated");
+        assert_eq!(version, schema::SCHEMA_VERSION, "and be stamped as migrated");
 
         let settings = v.settings().unwrap();
         assert_eq!(settings.project_name, "billing");
@@ -1605,6 +1786,187 @@ mod tests {
         let after = Vault::open(t.path(), "pw").unwrap();
         assert_eq!(after.identities().unwrap()[0].real_name, "Vantor");
         assert!(!before.is_empty());
+    }
+
+    #[test]
+    fn a_v2_vault_still_migrates_after_its_ddl_was_already_stamped() {
+        // The DDL runner moves `user_version` to the current schema version on
+        // its first pass, before any passphrase has been seen \u2014 a wrong
+        // passphrase is enough to trigger it. If the content migration were
+        // keyed on that stamp, that one mistake would leave the vault
+        // permanently unopenable with the *right* passphrase. This is the test
+        // that caught it.
+        let t = TempVault::new("v2-stamped");
+        write_v2_vault(t.path(), "pw");
+
+        {
+            let conn = Connection::open(t.path()).unwrap();
+            schema::migrate(&conn).unwrap();
+            let stamped: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+            assert_eq!(stamped, schema::SCHEMA_VERSION, "the DDL runner has been past");
+        }
+
+        let v = Vault::open(t.path(), "pw").expect("the content migration is still owed and must run");
+        assert_eq!(v.identities().unwrap()[0].real_name, "Vantor");
+    }
+
+    #[test]
+    fn occurrences_are_replaced_wholesale_not_accumulated() {
+        // A re-export of a file that no longer mentions a name must stop saying
+        // it does. An upsert alone would leave the old row standing forever.
+        let t = TempVault::new("occ-replace");
+        let mut v = vault(&t);
+        v.put_identity(&identity()).unwrap();
+        v.put_files(&[StoredFile {
+            path: "src/a.ts".to_owned(),
+            twin_path: "src/a.ts".to_owned(),
+            checksum: "c".to_owned(),
+            parser: "typescript".to_owned(),
+        }])
+        .unwrap();
+        let (file_id, _) = v.files_with_ids().unwrap().pop().unwrap();
+
+        let occurrence = |start: usize| StoredOccurrence {
+            identity_uuid: identity().uuid,
+            file_id: file_id.clone(),
+            byte_start: start,
+            byte_end: start + 6,
+            kind: "reference".to_owned(),
+        };
+
+        v.replace_occurrences(std::slice::from_ref(&file_id), &[occurrence(10), occurrence(40)])
+            .unwrap();
+        assert_eq!(v.occurrences_of(&identity().uuid).unwrap().len(), 2);
+
+        v.replace_occurrences(std::slice::from_ref(&file_id), &[occurrence(10)])
+            .unwrap();
+        let left = v.occurrences_of(&identity().uuid).unwrap();
+        assert_eq!(left.len(), 1, "the occurrence that went away must go away");
+        assert_eq!(left[0].byte_start, 10);
+
+        v.replace_occurrences(&[file_id], &[]).unwrap();
+        assert!(
+            v.occurrences_of(&identity().uuid).unwrap().is_empty(),
+            "a file that mentions nothing records nothing"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_file_takes_its_occurrences_and_redactions_with_it() {
+        let t = TempVault::new("occ-cascade");
+        let mut v = vault(&t);
+        v.put_identity(&identity()).unwrap();
+        v.put_files(&[StoredFile {
+            path: "src/a.ts".to_owned(),
+            twin_path: "src/a.ts".to_owned(),
+            checksum: "c".to_owned(),
+            parser: "typescript".to_owned(),
+        }])
+        .unwrap();
+        let (file_id, _) = v.files_with_ids().unwrap().pop().unwrap();
+
+        v.replace_occurrences(
+            std::slice::from_ref(&file_id),
+            &[StoredOccurrence {
+                identity_uuid: identity().uuid,
+                file_id: file_id.clone(),
+                byte_start: 0,
+                byte_end: 6,
+                kind: "declaration".to_owned(),
+            }],
+        )
+        .unwrap();
+        v.replace_redactions(
+            std::slice::from_ref(&file_id),
+            &[StoredRedaction {
+                file_id: file_id.clone(),
+                byte_start: 0,
+                byte_end: 40,
+                secret_type: "github_token".to_owned(),
+                match_idx: v.secret_index("ghp_secret"),
+            }],
+        )
+        .unwrap();
+
+        v.forget_files(&["src/a.ts".to_owned()]).unwrap();
+
+        assert!(v.occurrences_of(&identity().uuid).unwrap().is_empty());
+        assert!(v.redactions().unwrap().is_empty(), "the cascade must reach redactions");
+    }
+
+    #[test]
+    fn a_redaction_holds_no_plaintext_anywhere_in_the_file() {
+        // The whole claim of the table. The secret goes in and only a keyed
+        // hash of it comes out; the file must not contain the value in any
+        // column, or the one-way guarantee is decoration.
+        let t = TempVault::new("redaction-plaintext");
+        let secret = "ghp_thisisaverysecrettokenvalue00";
+        {
+            let mut v = vault(&t);
+            v.put_files(&[StoredFile {
+                path: "src/a.ts".to_owned(),
+                twin_path: "src/a.ts".to_owned(),
+                checksum: "c".to_owned(),
+                parser: "typescript".to_owned(),
+            }])
+            .unwrap();
+            let (file_id, _) = v.files_with_ids().unwrap().pop().unwrap();
+            v.replace_redactions(
+                std::slice::from_ref(&file_id),
+                &[StoredRedaction {
+                    file_id: file_id.clone(),
+                    byte_start: 6,
+                    byte_end: 6 + secret.len(),
+                    secret_type: "github_token".to_owned(),
+                    match_idx: v.secret_index(secret),
+                }],
+            )
+            .unwrap();
+        }
+
+        let bytes = std::fs::read(t.path()).unwrap();
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "the secret itself must never reach the vault file"
+        );
+    }
+
+    #[test]
+    fn rotating_the_data_key_clears_every_match_index() {
+        // `match_idx` is keyed by the data key over a plaintext that was
+        // deliberately never kept, so a rotation cannot recompute it. Left
+        // standing it would answer "never seen before" to every secret while
+        // looking like it had checked. The rows survive; the index does not.
+        let t = TempVault::new("redaction-rotate");
+        let mut v = vault(&t);
+        v.put_files(&[StoredFile {
+            path: "src/a.ts".to_owned(),
+            twin_path: "src/a.ts".to_owned(),
+            checksum: "c".to_owned(),
+            parser: "typescript".to_owned(),
+        }])
+        .unwrap();
+        let (file_id, _) = v.files_with_ids().unwrap().pop().unwrap();
+        v.replace_redactions(
+            std::slice::from_ref(&file_id),
+            &[StoredRedaction {
+                file_id: file_id.clone(),
+                byte_start: 0,
+                byte_end: 40,
+                secret_type: "github_token".to_owned(),
+                match_idx: v.secret_index("ghp_secret"),
+            }],
+        )
+        .unwrap();
+        assert_eq!(v.known_secrets().unwrap().len(), 1);
+
+        v.rotate_data_key("pw").unwrap();
+
+        assert_eq!(v.redactions().unwrap().len(), 1, "which files held secrets survives");
+        assert!(
+            v.known_secrets().unwrap().is_empty(),
+            "an index that can never match must not be reported as one that could"
+        );
     }
 
     #[test]
