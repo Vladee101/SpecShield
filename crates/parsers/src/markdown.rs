@@ -92,6 +92,10 @@ impl ArtifactParser for MarkdownParser {
     /// Prose word counts are deliberately *not* compared. A multi-word entity
     /// like `Meridian Freight` legitimately becomes one token, so counting
     /// words would reject every correct sanitize of a document containing one.
+    fn fingerprints(&self) -> bool {
+        true
+    }
+
     fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
         let outline = outline(source);
         let mut counts = StructuralCounts::new()

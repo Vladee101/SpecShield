@@ -60,12 +60,58 @@ const PROPERTY_SCOPE: &str = "ts::property";
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TypeScriptParser;
 
-fn parse_tree(source: &str) -> Option<Tree> {
+/// Parse under one of the two grammars `tree-sitter-typescript` ships.
+///
+/// They are genuinely different languages, not a superset and a subset. `<T>x`
+/// is a type assertion in TypeScript and the start of a JSX element in TSX;
+/// neither grammar accepts both readings, which is why `tsc` picks by file
+/// extension and why there are two grammars at all.
+fn parse_with(source: &str, jsx: bool) -> Option<Tree> {
+    let language = if jsx {
+        tree_sitter_typescript::LANGUAGE_TSX
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+    };
     let mut parser = TsParser::new();
-    parser
-        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-        .ok()?;
+    parser.set_language(&language.into()).ok()?;
     parser.parse(source, None)
+}
+
+/// Parse as TypeScript, and fall back to TSX when that fails.
+///
+/// **This is the P3-4 defect.** Only the TypeScript grammar was ever used, and
+/// it cannot read JSX: one `return <div>{x}</div>` was enough to make the tree
+/// error, which made `structural_candidates_in` return nothing and
+/// `structural_counts` return `None`. Every `.tsx` file in a React project
+/// therefore went to the model **completely unaliased**, and — because a `None`
+/// fingerprint was read as "this parser has no structure to compare" rather
+/// than "this parser could not read your file" — was reported as *verified
+/// clean*. Found by running the pipeline over a real Vite/React repository, in
+/// which 15 of 20 TypeScript files were `.tsx`.
+///
+/// Order matters and is not arbitrary. TypeScript first, because `<T>x` parses
+/// cleanly there and is an error under TSX, so a `.ts` file using type
+/// assertions must not be handed to the JSX grammar. A file that parses cleanly
+/// as TypeScript contains no JSX by definition, so the two grammars agree on it
+/// and the fallback never fires.
+///
+/// Trying rather than switching on the extension is deliberate: `EXTENSIONS`
+/// already claims `.js`, and JSX in a `.js` file is ordinary in React projects.
+/// An extension is a hint about a file; whether the grammar accepts it is a
+/// fact about the file.
+fn parse_tree(source: &str) -> Option<Tree> {
+    let typescript = parse_with(source, false);
+    if typescript.as_ref().is_some_and(|t| !t.root_node().has_error()) {
+        return typescript;
+    }
+    let tsx = parse_with(source, true);
+    if tsx.as_ref().is_some_and(|t| !t.root_node().has_error()) {
+        return tsx;
+    }
+    // Neither grammar is happy. Hand back the TypeScript tree so the callers'
+    // existing `has_error` guards see a genuinely broken file and leave it
+    // alone, rather than seeing nothing at all.
+    typescript.or(tsx)
 }
 
 impl ArtifactParser for TypeScriptParser {
@@ -158,6 +204,10 @@ impl ArtifactParser for TypeScriptParser {
     /// identifiers a file has. It catches catastrophic breakage, not subtle
     /// wrongness — an alias substituted for the wrong symbol keeps the count.
     /// The verification gate is what protects the export; this protects the file.
+    fn fingerprints(&self) -> bool {
+        true
+    }
+
     fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
         let tree = parse_tree(source)?;
         if tree.root_node().has_error() {
@@ -282,7 +332,23 @@ impl Collector<'_> {
     /// Pass 1: every declaration, so references can be resolved against them.
     fn walk_declarations(&mut self, node: Node<'_>) {
         match node.kind() {
-            "class_declaration" | "abstract_class_declaration" => {
+            // Classes and functions alike: a named unit of behaviour. The
+            // suffix rule in `declare` refines it — a `SubscriptionCreated`
+            // function is an Event exactly as the class would be.
+            //
+            // Functions were missed until P3-4 pointed the parser at a real
+            // React project, where the components *are* functions: 63 of them
+            // went unaliased while the vault learned their names from the
+            // filenames and the imports, blocking every export. The corpus
+            // generator only ever emitted classes and interfaces.
+            //
+            // `function_signature` is the ambient form (`declare function f():
+            // void`) that a `.d.ts` file is made of.
+            "class_declaration"
+            | "abstract_class_declaration"
+            | "function_declaration"
+            | "generator_function_declaration"
+            | "function_signature" => {
                 self.declare(node, EntityType::Service);
             }
             "interface_declaration" => {
@@ -789,6 +855,85 @@ const subscription = 1;
                 pair[1].real_name
             );
         }
+    }
+
+    #[test]
+    fn jsx_is_parsed_rather_than_silently_skipped() {
+        // The P3-4 defect. Only the TypeScript grammar was ever used and it
+        // cannot read JSX, so one `return <div>...</div>` made the tree error,
+        // `structural_candidates_in` return nothing, and `structural_counts`
+        // return `None` — which the caller read as "this parser has no
+        // structure to compare". Every `.tsx` file in a React project went to
+        // the model unaliased under the words "verified clean".
+        let source = concat!(
+            "export interface Stage {
+",
+            "  name: string;
+",
+            "}
+",
+            "export function JourneyMap({ stage }: { stage: Stage }) {
+",
+            "  return <div className=\"row\">{stage.name}</div>;
+",
+            "}
+",
+        );
+
+        let found = TypeScriptParser.structural_candidates(source, "src/journey.tsx");
+        let names: Vec<&str> = found.iter().map(|c| c.real_name.as_str()).collect();
+        assert!(names.contains(&"Stage"), "the interface must be seen: {names:?}");
+        assert!(names.contains(&"JourneyMap"), "and the component: {names:?}");
+
+        assert!(
+            TypeScriptParser.structural_counts(source).is_some(),
+            "a file the parser can read must have a fingerprint, or §7.2 cannot check it"
+        );
+    }
+
+    #[test]
+    fn a_type_assertion_still_parses_as_typescript() {
+        // The other half of the same decision. `<T>x` is a type assertion in
+        // TypeScript and an unclosed JSX tag in TSX, so the TypeScript grammar
+        // has to be tried first — trying TSX first would break every `.ts` file
+        // that uses the older assertion syntax.
+        let source = "export interface Stage { name: string }
+const s = <Stage>value;
+";
+        assert!(
+            TypeScriptParser.structural_counts(source).is_some(),
+            "a type assertion is valid TypeScript and must not need the JSX grammar"
+        );
+    }
+
+    #[test]
+    fn a_function_declaration_is_an_entity() {
+        // In a React codebase the components are functions, not classes. The
+        // corpus generator only emitted classes and interfaces, so this went
+        // unnoticed until the parser met a real project.
+        let found = TypeScriptParser.structural_candidates(
+            "export function submitOrder(id: string): void {}
+",
+            "src/orders.ts",
+        );
+        assert!(
+            found.iter().any(|c| c.real_name == "submitOrder"),
+            "an exported function is the user's name as much as a class is"
+        );
+    }
+
+    #[test]
+    fn an_ambient_declaration_is_an_entity() {
+        // `.d.ts` files are made of these, and P3-4 named them as untested.
+        let found = TypeScriptParser.structural_candidates(
+            "declare function trackEvent(name: string): void;
+",
+            "src/globals.d.ts",
+        );
+        assert!(
+            found.iter().any(|c| c.real_name == "trackEvent"),
+            "an ambient function signature declares a name too"
+        );
     }
 
     #[test]

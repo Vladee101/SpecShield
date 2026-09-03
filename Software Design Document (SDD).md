@@ -582,6 +582,26 @@ After generating a candidate twin the system re-parses it and compares node coun
 mismatch the transformation for that file is **rejected**; the file is emitted unaliased
 and reported to the user. No broken artifact is ever produced.
 
+### Four outcomes, and why they are four
+
+`Verification` distinguishes them because collapsing any two of them makes a report lie.
+
+| Outcome | Meaning | Twin |
+|---|---|---|
+| `Passed` | shape compared and matched | aliased |
+| `Unsupported` | this parser has no fingerprint (plain text) | aliased, unchecked |
+| `NotAttempted` | caller supplied no parser | aliased, unchecked |
+| `TwinDidNotParse` / `StructureChanged` | the check ran and failed | **unaliased**, reported |
+| `OriginalDidNotParse` | the parser claimed the file and could not read it | **untouched**, reported |
+
+The last one is the one that was missing, and P3-4 found out how it fails. A parser that
+cannot parse the original produces no structural candidates either, so the file goes out
+essentially as it came in — and it passes the gate trivially, because a file nothing could
+read has contributed no names to the vault *yet*. Folded into `Unsupported`, that reads as
+"nothing to check here" and the user is told their untouched source is verified clean. The
+two are told apart by `ArtifactParser::fingerprints()`: a parser that has a fingerprint and
+produced none could not read what it claimed.
+
 ---
 
 # 8. Export Verification Gate
@@ -947,6 +967,7 @@ Exportable as CSV so a security team can review what left the machine and when.
 | Parser failure | Preserve original file; exclude from twin; report |
 | SQL syntax error | Skip transformation for that file |
 | Twin verification failure (§7.2) | Reject transformation; emit file unaliased; report |
+| Parser claimed a file it cannot read (§7.2) | Emit untouched; report prominently; never "verified clean" |
 | Leak gate hit (§8) | **Hard block on export**; no partial copy |
 | High-confidence secret in twin | **Hard block on export** until acknowledged |
 | Duplicate identity | Reuse existing UUID |

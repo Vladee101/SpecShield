@@ -103,6 +103,10 @@ impl ArtifactParser for OpenApiParser {
         out
     }
 
+    fn fingerprints(&self) -> bool {
+        true
+    }
+
     fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
         let nodes = nodes(source)?;
         let base = crate::yaml::YamlParser.structural_counts(source)?;

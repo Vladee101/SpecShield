@@ -217,6 +217,16 @@ pub enum Verification {
     /// and the caller deserves to know that "verified" did not happen here.
     Unsupported { parser: &'static str },
 
+    /// The parser claimed this file and could not read it.
+    ///
+    /// Distinct from [`Self::Unsupported`], and much worse. A parser that
+    /// cannot parse the original produced no structural candidates either, so
+    /// the twin is the original with at most a few prose substitutions — and
+    /// nothing checked it. Folded into `Unsupported`, as it was until P3-4,
+    /// this reads as "nothing to check here" and a user is told their untouched
+    /// source is verified clean.
+    OriginalDidNotParse { parser: &'static str },
+
     /// No parser was supplied. The caller chose not to verify.
     NotAttempted,
 
@@ -234,8 +244,16 @@ pub enum Verification {
 impl Verification {
     /// Did aliasing survive? False means the returned twin is the unaliased
     /// (but still secret-redacted) original.
+    ///
+    /// `OriginalDidNotParse` is true here on purpose: there is nothing to
+    /// abandon. The parser contributed no candidates, so whatever was applied
+    /// came from the prose scan and discarding it would make the twin *less*
+    /// sanitized. What that case needs is to be reported, not reverted.
     pub const fn aliases_applied(&self) -> bool {
-        matches!(self, Self::Passed | Self::Unsupported { .. } | Self::NotAttempted)
+        matches!(
+            self,
+            Self::Passed | Self::Unsupported { .. } | Self::NotAttempted | Self::OriginalDidNotParse { .. }
+        )
     }
 
     /// Did a structural check actually run and succeed?
@@ -367,12 +385,12 @@ pub fn sanitize(
     // which is the overwhelmingly common case.
     if !findings.is_empty() {
         for hit in &mut applied {
-            hit.byte_start = to_source_offset(&findings, hit.byte_start);
-            hit.byte_end = to_source_offset(&findings, hit.byte_end);
+            hit.byte_start = secrets::source_offset(&findings, hit.byte_start);
+            hit.byte_end = secrets::source_offset(&findings, hit.byte_end);
         }
         for candidate in &mut suggestions {
-            candidate.byte_start = to_source_offset(&findings, candidate.byte_start);
-            candidate.byte_end = to_source_offset(&findings, candidate.byte_end);
+            candidate.byte_start = secrets::source_offset(&findings, candidate.byte_start);
+            candidate.byte_end = secrets::source_offset(&findings, candidate.byte_end);
         }
     }
 
@@ -402,36 +420,6 @@ pub fn sanitize(
     }
 }
 
-/// Translate an offset in the redacted text back into the original source.
-///
-/// The alias pass runs over the redacted text, so everything it reports is in
-/// that text's coordinates. A marker is rarely the same length as the secret it
-/// replaced, so past the first finding those coordinates drift — silently, and
-/// only in files that contained a secret, which is the worst way for an offset
-/// to be wrong.
-///
-/// `findings` must be sorted by `byte_start` and non-overlapping, which is what
-/// [`secrets::scan`] returns.
-fn to_source_offset(findings: &[secrets::Finding], offset: usize) -> usize {
-    let (mut source, mut redacted) = (0usize, 0usize);
-
-    for finding in findings {
-        // Text before this marker was copied through unchanged.
-        let gap = finding.byte_start.saturating_sub(source);
-        if offset < redacted + gap {
-            return offset - redacted + source;
-        }
-        source = finding.byte_end;
-        redacted += gap + finding.marker().len();
-        if offset < redacted {
-            // Inside a marker. Nothing in the source corresponds to a position
-            // *within* it, so the secret's own start is the honest answer.
-            return finding.byte_start;
-        }
-    }
-    offset - redacted + source
-}
-
 /// Compare the structure of `before` and `after` — SDD §7.2.
 fn verify_structure(parser: Option<&dyn ArtifactParser>, before: &str, after: &str) -> Verification {
     let Some(parser) = parser else {
@@ -440,7 +428,14 @@ fn verify_structure(parser: Option<&dyn ArtifactParser>, before: &str, after: &s
     let name = parser.name();
 
     let Some(original) = parser.structural_counts(before) else {
-        return Verification::Unsupported { parser: name };
+        // A parser with no fingerprint has nothing to say about shape. One that
+        // has a fingerprint and produced none could not read the file it
+        // claimed, which is a different thing entirely.
+        return if parser.fingerprints() {
+            Verification::OriginalDidNotParse { parser: name }
+        } else {
+            Verification::Unsupported { parser: name }
+        };
     };
     // `None` here means the twin no longer parses, while the original did.
     let Some(twin) = parser.structural_counts(after) else {
@@ -522,6 +517,60 @@ mod tests {
         assert_eq!(out.secrets.len(), 2, "both credentials must have been found");
         let hit = out.applied.iter().find(|a| a.real_name == "Vantor").expect("Vantor");
         assert_eq!(&source[hit.byte_start..hit.byte_end], "Vantor");
+    }
+
+    #[test]
+    fn a_parser_that_cannot_read_the_file_is_not_reported_as_unsupported() {
+        // The difference between "plain text has no shape to compare" and "I
+        // claimed this file and could not read it". Folding the second into the
+        // first tells a user their untouched source was verified clean, which
+        // is exactly how every `.tsx` file in a React project could have been
+        // sent to a model in the clear.
+        struct Broken;
+        impl crate::parser::ArtifactParser for Broken {
+            fn name(&self) -> &'static str {
+                "broken"
+            }
+            fn can_handle(&self, _: &std::path::Path, _: &str) -> bool {
+                true
+            }
+            fn parse<'a>(
+                &self,
+                _: &'a crate::parser::Document,
+            ) -> Result<crate::parser::Parsed<'a>, crate::parser::ParseError> {
+                unreachable!("not exercised")
+            }
+            fn extract(&self, _: &crate::parser::Parsed<'_>) -> Vec<Candidate> {
+                Vec::new()
+            }
+            fn plan_edits(&self, _: &crate::parser::Parsed<'_>, _: &crate::parser::AliasMap) -> Vec<Edit> {
+                Vec::new()
+            }
+            fn structural_candidates(&self, _: &str, _: &str) -> Vec<Candidate> {
+                Vec::new()
+            }
+            // Claims a fingerprint and never produces one: a parser that cannot
+            // read what it claimed.
+            fn fingerprints(&self) -> bool {
+                true
+            }
+        }
+
+        let mut g = graph();
+        let out = sanitize(
+            "anything",
+            "project",
+            &detector(),
+            &mut g,
+            Some(&Broken),
+            &ProjectContext::default(),
+        )
+        .unwrap();
+        assert_eq!(out.verification, Verification::OriginalDidNotParse { parser: "broken" });
+        assert!(
+            !out.verification.structurally_verified(),
+            "nothing was verified and nothing may claim it was"
+        );
     }
 
     #[test]

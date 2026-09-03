@@ -134,6 +134,22 @@ pub trait ArtifactParser: Send + Sync {
         let _ = source;
         None
     }
+
+    /// Does this parser have a fingerprint at all?
+    ///
+    /// Without this, `None` from [`ArtifactParser::structural_counts`] means
+    /// two very different things at once: *plain text has no shape worth
+    /// comparing*, and *I claimed this file and could not read it*. The first
+    /// is fine. The second means the file went through with no structural
+    /// candidates and no check, and reporting it as the first tells a user
+    /// their unaliased source was **verified clean** — which is how a whole
+    /// React codebase went to a model in the clear before P3-4 caught it.
+    ///
+    /// Defaults to `false`, matching the default `structural_counts` above. Any
+    /// parser that overrides one must override the other.
+    fn fingerprints(&self) -> bool {
+        false
+    }
 }
 
 /// What the project already knows, for parsers that cannot resolve everything

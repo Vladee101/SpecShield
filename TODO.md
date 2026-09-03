@@ -96,7 +96,7 @@ Vault schema is at **v4**. v3 (wrapped data key) is a *content* migration and is
 not keyed on `user_version` — see `crates/vault/src/schema.rs` `DDL_VERSION`, and
 read it before adding a migration of either kind.
 
-Corpus, current: all six projects gated, 98.6% recall / 96.3% precision;
+Corpus, current: all six projects gated, 99.1% recall / 95.9% precision;
 secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
 excluded from the verdict — see `crates/cli/src/report.rs`.
 
@@ -413,12 +413,75 @@ cargo run -p spike-alias-roundtrip -- --emit-prompts spikes/alias-roundtrip/prom
 12 prompts, 6 formats × envelope/no-envelope. Billable API calls — a human
 should trigger this deliberately.
 
-**P3-4. Re-run the Tree-sitter spike against a *real* service.** Still open, and
-now more pointed: the M4 parser has been exercised on the six-file corpus service
-and on a 1,000-file synthetic repo, but a synthetic repo only contains the shapes
-its generator knew to emit. Decorators, generics with constraints, barrel
-re-exports, and ambient `.d.ts` remain untested, and they are where heuristic
-scoping is most likely to break.
+**P3-4. Re-run the Tree-sitter spike against a *real* service. — RUN, and it
+failed.** Full write-up in `spikes/M4-typescript-real-repo.md`. Subject: a
+Vite + React + TypeScript + Express + Tauri app, 158 files, 52 TypeScript of
+which 15 of 20 tracked were `.tsx`.
+
+Four defects, three fixed:
+
+1. **The parser could not read JSX.** `parse_tree` only ever used
+   `LANGUAGE_TYPESCRIPT`; `tree-sitter-typescript` ships a separate
+   `LANGUAGE_TSX`, and they are different languages (`<T>x` is a type assertion
+   in one and a JSX element in the other). One `return <div>{x}</div>` was enough
+   to make the tree error — so **every `.tsx` file went to the model completely
+   unaliased, reported as “verified clean”**, because a `None` fingerprint read
+   as *no structure to compare* rather than *could not read your file*. Fixed on
+   both sides: TypeScript-then-TSX in `parse_tree`, and a new
+   `Verification::OriginalDidNotParse` keyed on `ArtifactParser::fingerprints()`
+   that the CLI, the export summary and the desktop banner all report loudly.
+2. **Function declarations were not entities.** In React the components *are*
+   functions — 63 of them here against 4 arrow consts. They were interned from
+   filenames and imports and left in place at their declaration sites, blocking
+   the export by construction. `function_declaration`,
+   `generator_function_declaration` and `function_signature` (the ambient `.d.ts`
+   form) now declare alongside classes. Ground truth was extended for `submit`
+   and `render` in `corpus/adversarial` — flagged, since I write both the
+   detector and the grader.
+3. **The corpus grader compared redacted-text offsets with source ground
+   truth.** A `<<REDACTED:...>>` marker is not the length of the secret, so every
+   offset after the first secret in a file was displaced — 12 bytes in
+   `secret-beside-dto.ts`, scoring one correct detection as a miss *and* a false
+   positive, in CI, since the fixture was written. `secrets::source_offset` now
+   owns the map and `sanitize`, `scan` and the grader all use it. Corpus went
+   98.6% / 96.3% on 211 entities to **99.1% / 95.9% on 213**.
+4. **`specshield scan` never asked the parser** — it ran the prose scan alone and
+   reported a pipeline nobody runs, promising five entities on a component where
+   `sanitize` applied none. It now calls `sanitize::sanitize` against a throwaway
+   graph.
+
+Plus: **allowing a name did not clear the gate.** The scanner matches
+case-insensitively and the allowlist exempted with `==`, so `specshield allow
+API` could not clear an identity stored as `api` — and nothing shows a user which
+case the vault holds. Both sides are case-insensitive now.
+
+**What remains is not a bug and is a decision for a human — see P3-6.**
+
+**P3-6. The gate has no notion of where a name is meaningful.** With everything
+above fixed, the real repository is *still* blocked, by 124 distinct names across
+78 files. `Node` is a real `interface Node`; `Screen` and `Choice` are real
+interfaces. All correctly detected and aliased. The gate then blocks **every
+occurrence of the word `node` in the project** — 1,879 of them, mostly in
+`package-lock.json`, plus `.gitignore` and the CI workflow.
+
+That is SDD §8 working as specified: every vault name, every file, case-blind,
+hard block. Invisible on a corpus of `CustomerSubscription` and `PlanTier`;
+crippling on a real domain model of `Node`, `Screen`, `Choice`, `Status`, `Key`,
+`Error`, `Type`, `Data`. **A team could not adopt this today without allowlisting
+around a hundred names.** Narrowing the product's central safety control is not a
+call to make while implementing a parser, so it has not been made. Three options
+in `spikes/M4-typescript-real-repo.md`; the cheapest by far is to have
+`walk_declarations` consult `STOP_LIST`, which already contains `Node` and
+`React` and which only the *detector* reads today.
+
+Interim: a blocked export now lists the blocking names by frequency with the
+`specshield allow` command to run. Unblocking used to mean guessing at what the
+five-per-file truncation was hiding.
+
+**Still untested:** decorators, generics with constraints, and barrel re-exports
+— all absent from this codebase. Arrow-function consts are the remaining
+declaration gap (`export const useScenarioStore = create(...)` leaks at its own
+declaration site). A NestJS or Angular service would close out the first three.
 
 **P3-5. Unused vault tables. — DONE.** Two wired up, one dropped.
 
@@ -471,6 +534,11 @@ than showing an empty list.
 - **The corpus `labels.json` files are generated.** Edit `spec.json` and run
   `python corpus/tools/build_labels.py`. A CI job fails if they drift. Never
   hand-edit byte offsets.
+- **Detection runs on the *redacted* text, not the source.** A
+  `<<REDACTED:...>>` marker is almost never the length of the secret it replaced,
+  so every offset after the first secret in a file is displaced. Anything that
+  shows an offset to a person, or compares one with the original, must go through
+  `secrets::source_offset`. It has been wrong in three places already — see P3-4.
 - **`clippy.toml` allowlists proper nouns** (`SpecShield`, `OpenAPI`, …) for the
   `doc_markdown` lint. Add new ones there rather than backticking prose.
 - **The repo lives in OneDrive.** `crates/vault::cloud_sync_root` detects this

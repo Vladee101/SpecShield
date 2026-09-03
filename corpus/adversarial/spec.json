@@ -1,5 +1,5 @@
 {
-  "description": "Deliberately hostile inputs (SDD \u00a719). Each fixture targets a specific way the pipeline can silently produce a wrong result rather than an error \u2014 silence is the failure mode that matters in a security tool.",
+  "description": "Deliberately hostile inputs (SDD §19). Each fixture targets a specific way the pipeline can silently produce a wrong result rather than an error — silence is the failure mode that matters in a security tool.",
   "entities": [
     {
       "real_name": "Status",
@@ -156,7 +156,7 @@
       ]
     },
     {
-      "real_name": "V\u0430ntor",
+      "real_name": "Vаntor",
       "entity_type": "organization",
       "scope_path": "project",
       "files": [
@@ -540,6 +540,24 @@
         57,
         62
       ]
+    },
+    {
+      "real_name": "submit",
+      "entity_type": "service",
+      "scope_path": "secret-beside-dto.ts::submit",
+      "files": [
+        "secret-beside-dto.ts"
+      ],
+      "note": "P3-4: an exported function declaration. Labelled after a real React project showed the parser saw classes and interfaces and not the functions that, in that codebase, were every component. A twin that aliases the DTO and leaves the function taking it is inconsistent, and blocks the moment another file calls it."
+    },
+    {
+      "real_name": "render",
+      "entity_type": "service",
+      "scope_path": "shadowed.ts::render",
+      "files": [
+        "shadowed.ts"
+      ],
+      "note": "P3-4: the same, and deliberately a generic word. Aliasing it costs twin readability; the allowlist (FR-10) is the escape hatch, exactly as for a table called `invoice`."
     }
   ],
   "secrets": [
@@ -587,7 +605,7 @@
   "negative_files": [
     "aliases-in-text.ts"
   ],
-  "negative_note": "Files where zero detections are expected. Every detection here is a false positive and counts against the PRD \u00a75 precision target: alias-shaped tokens inside strings and comments are not identities, and SCREAMING_SNAKE constants are not aliases.",
+  "negative_note": "Files where zero detections are expected. Every detection here is a false positive and counts against the PRD §5 precision target: alias-shaped tokens inside strings and comments are not identities, and SCREAMING_SNAKE constants are not aliases.",
   "requires": [
     "typescript",
     "sql",

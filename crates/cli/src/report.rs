@@ -327,7 +327,8 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
         // merge as the pipeline: the parser's structural candidates first, then
         // the prose scan for whatever they did not claim. Scoring with only the
         // prose scan would measure a pipeline nobody runs.
-        let redacted = secrets::redact(&text, &secrets::scan(&text));
+        let findings = secrets::scan(&text);
+        let redacted = secrets::redact(&text, &findings);
         let parser = specshield_parsers::for_document(&path, &text);
         let mut candidates = parser
             .as_ref()
@@ -346,6 +347,16 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             if !overlaps && in_prose {
                 candidates.push(candidate);
             }
+        }
+
+        // Back into the file's own coordinates before anything is compared with
+        // ground truth. A marker is a different length from the secret it
+        // replaced, so a fixture with a name after a secret was scored against
+        // offsets 12 bytes out of place — counting one correct detection as a
+        // miss *and* a false positive at once. See `secrets::source_offset`.
+        for candidate in &mut candidates {
+            candidate.byte_start = secrets::source_offset(&findings, candidate.byte_start);
+            candidate.byte_end = secrets::source_offset(&findings, candidate.byte_end);
         }
 
         let mut hit: HashSet<(String, usize, usize)> = HashSet::new();

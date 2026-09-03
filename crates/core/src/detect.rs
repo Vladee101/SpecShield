@@ -293,8 +293,13 @@ impl Detector {
         self
     }
 
+    /// Case-insensitively, matching the export gate — see
+    /// [`crate::verify::LeakScanner::with_allowlist`]. The two have to agree:
+    /// a term the gate exempts but the detector still aliases is only a
+    /// cosmetic waste, but a term the detector leaves alone and the gate still
+    /// blocks is a deadlock with no way out.
     fn is_allowed(&self, term: &str) -> bool {
-        self.allowlist.contains(term) || STOP_LIST.contains(&term)
+        STOP_LIST.contains(&term) || self.allowlist.iter().any(|a| a.eq_ignore_ascii_case(term))
     }
 
     /// Detect entities in plain prose or a comment body.

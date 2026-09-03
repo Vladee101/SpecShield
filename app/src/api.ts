@@ -70,6 +70,13 @@ export interface Leak {
 
 export interface SanitizeResult {
   verified: boolean;
+  /**
+   * The parser claimed this file and could not read it: the gate passed and
+   * nothing was aliased. Separate from `verified` because the two say different
+   * things, and a file nothing could read has no vault names in it yet, so it
+   * sails through the gate looking clean.
+   */
+  unreadable: boolean;
   /** Null whenever the gate blocked — there is no unverified twin to show. */
   twin: string | null;
   envelope: string;
@@ -183,6 +190,11 @@ export interface ExportSummary {
   blocked: [string, string[]][];
   /** Vault names the gate was told to ignore — FR-10. */
   allowlisted: number;
+  /**
+   * Files a parser claimed and could not read. They went out with no structural
+   * aliasing and no check — not the same as "nothing to check here".
+   */
+  unreadable: [string, string][];
   /** Places recorded in the vault — FR-5. */
   occurrences: number;
   /**

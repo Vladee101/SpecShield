@@ -129,6 +129,10 @@ impl ArtifactParser for SqlParser {
     /// Renaming identifiers must not add or remove a table, a column, or a
     /// statement. If it does, the alias pass has rewritten something it should
     /// not have and the twin is abandoned.
+    fn fingerprints(&self) -> bool {
+        true
+    }
+
     fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
         let statements = statements(source).ok()?;
         let mut tables = 0;

@@ -301,6 +301,10 @@ pub struct Twins {
     pub sightings: Vec<Sighting>,
     /// Every secret redacted on the way — SDD §4.3.
     pub redacted: Vec<Redacted>,
+    /// Files a parser claimed and could not read. Reported separately from
+    /// `abandoned` and from `unchecked`, because nothing was abandoned and
+    /// nothing was skipped: the file simply went through untouched.
+    pub unreadable: Vec<(String, String)>,
 }
 
 /// Sanitize every file in the project, producing twins but writing nothing.
@@ -364,6 +368,15 @@ pub fn sanitize_tree(
                     .abandoned
                     .push((entry.path.clone(), format!("{parser} structure changed")));
             }
+            // Not "unchecked": the parser claimed this file and could not read
+            // it, so it contributed no candidates either. The file goes to the
+            // model essentially untouched, and counting it alongside plain text
+            // that genuinely has no shape would bury that.
+            sanitize::Verification::OriginalDidNotParse { parser } => {
+                twins
+                    .unreadable
+                    .push((entry.path.clone(), format!("the {parser} parser could not read it")));
+            }
             sanitize::Verification::Unsupported { .. } | sanitize::Verification::NotAttempted => {
                 twins.unchecked += 1;
             }
@@ -421,6 +434,9 @@ pub struct Exported {
     /// How many vault names the gate was told to ignore — PRD FR-10. Reported
     /// because an open gate must never be silent.
     pub allowlisted: usize,
+    /// Files a parser claimed and could not read — see [`Twins::unreadable`].
+    /// These went to the model with no structural aliasing and no check.
+    pub unreadable: Vec<(String, String)>,
     /// Places recorded in the vault — PRD FR-5. Larger than `aliased` never,
     /// smaller when a file's aliasing was abandoned.
     pub occurrences: usize,
@@ -505,6 +521,7 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
             unchecked: twins.unchecked,
             written: 0,
             allowlisted: allowlist(vault)?.len(),
+            unreadable: twins.unreadable,
             occurrences: 0,
             redacted: twins.redacted.len(),
             redacted_new,
@@ -560,6 +577,7 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
         abandoned: twins.abandoned,
         blocked: Vec::new(),
         allowlisted: allowlist(vault)?.len(),
+        unreadable: twins.unreadable,
         occurrences: occurrence_count,
         redacted: twins.redacted.len(),
         redacted_new,

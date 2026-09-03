@@ -141,6 +141,15 @@ pub struct Leak {
 #[derive(Debug, Serialize)]
 pub struct SanitizeResult {
     pub verified: bool,
+    /// The parser claimed this file and could not read it.
+    ///
+    /// Reported alongside `verified` rather than folded into it, because the
+    /// two say different things and the difference is the whole point: the gate
+    /// passed, and nothing was aliased. A file no parser could read has no vault
+    /// names in it *yet*, so it sails through the gate looking clean. The UI
+    /// must say so — this is how an entire React codebase could have been
+    /// copied to a model under a green banner.
+    pub unreadable: bool,
     pub twin: Option<String>,
     pub envelope: String,
     pub applied: usize,
@@ -363,6 +372,7 @@ fn sanitize_text_in(state: &AppState, filename: &str, content: &str) -> Result<S
 
         Ok(SanitizeResult {
             verified,
+            unreadable: matches!(result.verification, sanitize::Verification::OriginalDidNotParse { .. }),
             twin: verified.then(|| result.twin.clone()),
             envelope: prompt_envelope(),
             applied: result.applied.len(),
@@ -1179,6 +1189,9 @@ struct ExportSummary {
     blocked: Vec<(String, Vec<String>)>,
     /// Vault names the gate was told to ignore — FR-10.
     allowlisted: usize,
+    /// Files a parser claimed and could not read. They went out with no
+    /// structural aliasing and no check — see `SanitizeResult::unreadable`.
+    unreadable: Vec<(String, String)>,
     /// Places recorded in the vault — FR-5.
     occurrences: usize,
     /// Secrets redacted on the way out, and how many are new since the last
@@ -1279,6 +1292,7 @@ fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSumm
             abandoned: result.abandoned,
             blocked: result.blocked,
             allowlisted: result.allowlisted,
+            unreadable: result.unreadable,
             occurrences: result.occurrences,
             redacted: result.redacted,
             redacted_new: result.redacted_new,

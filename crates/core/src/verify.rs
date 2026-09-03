@@ -90,7 +90,14 @@ impl LeakScanner {
                 // and are not identifying on their own.
                 continue;
             }
-            if allowed.contains(name) {
+            // Case-insensitively, because that is how this scanner *matches*.
+            // The automaton below is built `ascii_case_insensitive`, so an
+            // identity stored as `api` blocks the word `API` anywhere in a
+            // twin — and an exemption compared with `==` could not clear it.
+            // A user who types `specshield allow API` sees the block persist
+            // with no explanation, and cannot fix it, because the vault never
+            // shows them which case it holds. Found on a real repository.
+            if allowed.iter().any(|a| a.eq_ignore_ascii_case(name)) {
                 continue;
             }
             for variant in case_variants(name) {
@@ -360,6 +367,20 @@ mod tests {
             !scanner.scan("The Vantor invoice table.").is_clean(),
             "allowlisting one name must not open the gate for the others"
         );
+    }
+
+    #[test]
+    fn the_allowlist_matches_case_the_way_the_gate_does() {
+        // The gate blocks every case variant of a vault name. An exemption that
+        // only cleared the exact spelling left a user unable to unblock an
+        // export at all: they can see `API` in the leak report and cannot see
+        // that the vault holds `api`.
+        let names = vec!["api".to_owned()];
+        let allowed: std::collections::BTreeSet<String> = ["API".to_owned()].into_iter().collect();
+        let scanner = LeakScanner::with_allowlist(names, &allowed);
+
+        assert!(matches!(scanner.scan("the API is here"), Verdict::Clean));
+        assert!(matches!(scanner.scan("the api is here"), Verdict::Clean));
     }
 
     #[test]

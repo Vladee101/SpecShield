@@ -631,12 +631,27 @@ function SanitizePanel({
 
       {result?.verified && result.twin && (
         <div className="panel">
-          <div className="banner ok">
-            <strong>Verified clean.</strong>{" "}
-            <span className="small">
-              {result.applied} identities aliased, {result.secrets_redacted} secrets redacted,{" "}
-              {result.patterns_checked} patterns checked against the vault.
-            </span>
+          <div className={`banner ${result.unreadable ? "warn" : "ok"}`}>
+            {result.unreadable ? (
+              <>
+                <strong>Gate passed &mdash; but nothing was aliased.</strong>{" "}
+                <span className="small">
+                  The parser claimed this file and could not read it, so no structural
+                  aliasing was applied and no check was possible. What is below is your own
+                  source with at most a few prose substitutions. It passed the gate because a
+                  file nothing could read contains no vault names <em>yet</em> &mdash; not
+                  because it is safe to send.
+                </span>
+              </>
+            ) : (
+              <>
+                <strong>Verified clean.</strong>{" "}
+                <span className="small">
+                  {result.applied} identities aliased, {result.secrets_redacted} secrets
+                  redacted, {result.patterns_checked} patterns checked against the vault.
+                </span>
+              </>
+            )}
           </div>
 
           <div className="row" style={{ marginBottom: 10 }}>
@@ -1844,6 +1859,17 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
             {result.occurrences} occurrence(s) recorded, searchable under &ldquo;Where is
             it&rdquo;.
           </div>
+          {result.unreadable.length > 0 && (
+            <div className="small" style={{ marginTop: 6 }}>
+              <strong>
+                {result.unreadable.length} file(s) went out UNALIASED &mdash; a parser
+                claimed them and could not read them.
+              </strong>
+              <div className="mono small" style={{ marginTop: 6 }}>
+                {result.unreadable.map(([path, why]) => path + ": " + why).join("\n")}
+              </div>
+            </div>
+          )}
           {result.redacted > 0 && (
             <div className="small" style={{ marginTop: 6 }}>
               <strong>

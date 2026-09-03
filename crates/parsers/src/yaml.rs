@@ -301,6 +301,10 @@ macro_rules! impl_parser {
             /// Aliasing replaces text inside scalars; it must never add a key,
             /// drop a sequence entry, or change the nesting. An alias
             /// containing `: ` or a newline would do all three.
+            fn fingerprints(&self) -> bool {
+                true
+            }
+
             fn structural_counts(&self, source: &str) -> Option<StructuralCounts> {
                 counts_for(source)
             }

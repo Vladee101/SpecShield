@@ -885,36 +885,67 @@ fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
     let parser = require_parser(file, &source)?;
 
     let detector = detector_from(&vault)?;
-    let findings = secrets::scan(&source);
-    let redacted = secrets::redact(&source, &findings);
-    let candidates = detector.scan_text(
-        &redacted,
-        &file.to_string_lossy().replace('\\', "/"),
-        specshield_core::model::OccurrenceKind::Reference,
-    );
+    let context = context_from(&vault)?;
 
-    let (confident, suggestions): (Vec<_>, Vec<_>) = candidates
-        .into_iter()
-        .partition(|c| c.confidence >= sanitize::AUTO_APPLY_CONFIDENCE);
+    // The real pipeline, not an approximation of it. This used to call
+    // `detector.scan_text` alone — the prose scan — and never ask the parser at
+    // all, so it answered a question nobody had asked: on a React component it
+    // promised five entities where `sanitize` applied none, and not one of the
+    // five was something `sanitize` would have found. A command whose whole job
+    // is "tell me what would happen" has to run what happens.
+    //
+    // The graph is local and thrown away. Reporting must not grow the vault.
+    let mut graph = graph_from(&vault)?;
+    let scope = relative_to_project(project, file);
+    let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()), &context)?;
 
-    println!("{} ({})\n", file.display(), parser.name());
-    println!("{} entit(ies) would be aliased:", confident.len());
-    for c in &confident {
-        println!("  {:>5}  {:<10} {}", c.byte_start, c.entity_type.prefix(), c.real_name);
+    println!("{} ({})", file.display(), parser.name());
+    println!();
+
+    match &result.verification {
+        sanitize::Verification::OriginalDidNotParse { parser } => {
+            println!("The {parser} parser CLAIMED THIS FILE AND COULD NOT READ IT.");
+            println!("Nothing below came from its structure — only from the prose scan.");
+            println!();
+        }
+        sanitize::Verification::StructureChanged { .. } | sanitize::Verification::TwinDidNotParse { .. } => {
+            println!("Aliasing would be ABANDONED here: the twin does not survive the §7.2 check,");
+            println!("so the file would go out unaliased however much is listed below.");
+            println!();
+        }
+        _ => {}
     }
-    if !suggestions.is_empty() {
+
+    println!("{} entit(ies) would be aliased:", result.applied.len());
+    for applied in &result.applied {
         println!(
-            "\n{} suggestion(s) NOT applied — confirm with `term`:",
-            suggestions.len()
+            "  {:>5}  {:<12} {}",
+            applied.byte_start, applied.kind, applied.real_name
         );
-        for c in &suggestions {
-            println!("  {:>5}  {:.2}       {}", c.byte_start, c.confidence, c.real_name);
+    }
+
+    if !result.suggestions.is_empty() {
+        println!();
+        println!(
+            "{} suggestion(s) NOT applied — confirm with `term`:",
+            result.suggestions.len()
+        );
+        for candidate in &result.suggestions {
+            println!(
+                "  {:>5}  {:.2}         {}",
+                candidate.byte_start, candidate.confidence, candidate.real_name
+            );
         }
     }
-    if !findings.is_empty() {
-        println!("\n{} secret(s) would be redacted one-way:", findings.len());
-        for f in &findings {
-            println!("  line {:<4} {:?}  {}", f.line, f.confidence, f.secret_type);
+
+    if !result.secrets.is_empty() {
+        println!();
+        println!("{} secret(s) would be redacted one-way:", result.secrets.len());
+        for finding in &result.secrets {
+            println!(
+                "  line {:<4} {:?}  {}",
+                finding.line, finding.confidence, finding.secret_type
+            );
         }
     }
     Ok(())
@@ -969,8 +1000,18 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
     }
 
     eprintln!();
+    // "clean" is a claim about the gate: no vault name survived. It is not a
+    // claim that anything was aliased, and a file the parser could not read
+    // passes the gate trivially by having nothing in the vault yet. Saying
+    // "verified clean" over an untouched file is how a whole React codebase
+    // could have gone to a model in the clear.
+    let headline = if matches!(result.verification, sanitize::Verification::OriginalDidNotParse { .. }) {
+        "gate passed, but NOTHING WAS ALIASED"
+    } else {
+        "verified clean"
+    };
     eprintln!(
-        "verified clean: {} identities applied, {} patterns checked",
+        "{headline}: {} identities applied, {} patterns checked",
         result.applied.len(),
         scanner.pattern_count()
     );
@@ -985,6 +1026,12 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
         }
         sanitize::Verification::NotAttempted => {
             eprintln!("  structure NOT checked: no parser supplied");
+        }
+        sanitize::Verification::OriginalDidNotParse { parser } => {
+            eprintln!("  the {parser} parser CLAIMED THIS FILE AND COULD NOT READ IT.");
+            eprintln!("  No structural aliasing was applied and no check was possible — what is");
+            eprintln!("  above is your own source with at most a few prose substitutions. Do not");
+            eprintln!("  send it to a model believing it was sanitized.");
         }
         sanitize::Verification::TwinDidNotParse { parser } => {
             eprintln!("  aliasing ABANDONED: the twin no longer parses as {parser}");
@@ -1235,6 +1282,21 @@ fn report_export(dest: &Path, result: &project::Exported) {
         println!("      `specshield secrets` lists where");
     }
     println!("  {} file(s) had no structure to verify against", result.unchecked);
+    if !result.unreadable.is_empty() {
+        // Louder than "unchecked", because it is a different thing: a parser
+        // claimed these and could not read them, so they went out essentially
+        // as they came in.
+        println!(
+            "  {} file(s) went out UNALIASED — a parser claimed them and could not read them:",
+            result.unreadable.len()
+        );
+        for (path, why) in result.unreadable.iter().take(20) {
+            println!("      {path}: {why}");
+        }
+        if result.unreadable.len() > 20 {
+            println!("      … and {} more", result.unreadable.len() - 20);
+        }
+    }
     if result.abandoned.is_empty() {
         println!("  every parsed file verified structurally (SDD §7.2)");
     } else {
@@ -1248,6 +1310,31 @@ fn report_export(dest: &Path, result: &project::Exported) {
     }
 }
 
+/// Why a blocked export was blocked, where the answer is known.
+///
+/// A file a parser could not read goes out unaliased; the vault then learns its
+/// names from files that *did* parse, and the gate blocks on them. The leak list
+/// alone makes that look like a detection failure, so the cause is printed
+/// first.
+fn report_unreadable(unreadable: &[(String, String)]) {
+    if unreadable.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{} file(s) went through UNALIASED — a parser claimed them and could not read them.",
+        unreadable.len()
+    );
+    eprintln!("This is very likely why the export is blocked: the vault knows these names from");
+    eprintln!("elsewhere, and they survived into these twins untouched.");
+    for (path, why) in unreadable.iter().take(20) {
+        eprintln!("      {path}: {why}");
+    }
+    if unreadable.len() > 20 {
+        eprintln!("      … and {} more", unreadable.len() - 20);
+    }
+    eprintln!();
+}
+
 fn report_blocked(blocked: &[(String, Vec<String>)]) {
     eprintln!("EXPORT BLOCKED — {} file(s) did not verify:", blocked.len());
     for (path, leaks) in blocked.iter().take(20) {
@@ -1256,6 +1343,63 @@ fn report_blocked(blocked: &[(String, Vec<String>)]) {
             eprintln!("      {leak}");
         }
     }
+    if blocked.len() > 20 {
+        eprintln!("  … and {} more file(s)", blocked.len() - 20);
+    }
+    report_blocking_names(blocked);
+}
+
+/// The distinct names doing the blocking, most frequent first.
+///
+/// The per-file list above is the evidence; on a real repository it is also
+/// eighty files of it, truncated at five leaks each, and the *same handful of
+/// names* the whole way down. Without this a user unblocks an export by
+/// guessing: allow a few names, re-run, watch the truncation reveal a few more,
+/// repeat. Four rounds of that on a 160-file React project is what prompted it.
+///
+/// Nearly all of them are common words and vendor names — `data`, `status`,
+/// `React` — which the detector aliases on purpose (an over-eager detector is
+/// the safe direction) and which PRD FR-10's allowlist exists to hand back.
+fn report_blocking_names(blocked: &[(String, Vec<String>)]) {
+    // Leaks are formatted `line:col "name"` by `project::export`. Read the
+    // quoted name back out rather than restructuring the type: this is a
+    // presentation concern and the engine should not grow a field for it.
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (_, leaks) in blocked {
+        for leak in leaks {
+            let Some(open) = leak.find('"') else { continue };
+            let Some(close) = leak.rfind('"') else { continue };
+            if close > open + 1 {
+                *counts.entry(&leak[open + 1..close]).or_default() += 1;
+            }
+        }
+    }
+    if counts.is_empty() {
+        return;
+    }
+
+    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+
+    eprintln!();
+    eprintln!("{} distinct name(s) are doing the blocking:", ranked.len());
+    for (name, count) in ranked.iter().take(40) {
+        eprintln!("  {count:>4}  {name}");
+    }
+    if ranked.len() > 40 {
+        eprintln!("  … and {} more", ranked.len() - 40);
+    }
+
+    eprintln!();
+    eprintln!("Each one is a name the vault knows and the twin still contains. Either the");
+    eprintln!("detector should have aliased it there and did not, or it is a common word or a");
+    eprintln!("vendor name that should never have been an identity at all. For the second kind:");
+    eprintln!();
+    eprintln!("  specshield allow \"<name>\" --reason \"framework name\"");
+    eprintln!();
+    eprintln!("Case does not matter — allowing `API` clears an identity stored as `api`, because");
+    eprintln!("the gate treats them as one name. Every allowed name is reported on each export:");
+    eprintln!("this is the one control that opens the gate, and it is never silent.");
 }
 
 fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
@@ -1263,6 +1407,7 @@ fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()>
     let result = project::export(project, dest, &mut vault)?;
 
     if result.is_blocked() {
+        report_unreadable(&result.unreadable);
         report_blocked(&result.blocked);
         bail!("nothing was written: a partially clean twin project is not clean");
     }

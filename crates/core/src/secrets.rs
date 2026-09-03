@@ -172,6 +172,44 @@ pub fn redact(text: &str, findings: &[Finding]) -> String {
     crate::edit::apply(text, &mut edits).unwrap_or_else(|_| text.to_owned())
 }
 
+/// Translate an offset in redacted text back into the original source.
+///
+/// Everything downstream of [`redact`] works in the redacted text's
+/// coordinates, and a marker is almost never the same length as the secret it
+/// replaced — so past the first finding those coordinates drift. Silently, and
+/// only in files that contained a secret, which is the worst way for an offset
+/// to be wrong: it looks right everywhere it is tested.
+///
+/// It has been wrong in three places. `sanitize` reported alias positions that
+/// sliced a string existing nowhere on disk; `specshield scan` printed them;
+/// and the corpus grader scored against them, counting a correct detection as
+/// both a miss and a false positive whenever a fixture put a name after a
+/// secret. Anything that reads an offset out of the redacted text and shows it
+/// to a person, or compares it with the original, must come through here.
+///
+/// `findings` must be sorted by `byte_start` and non-overlapping, which is what
+/// [`scan`] returns.
+#[must_use]
+pub fn source_offset(findings: &[Finding], offset: usize) -> usize {
+    let (mut source, mut redacted) = (0usize, 0usize);
+
+    for finding in findings {
+        // Text before this marker was copied through unchanged.
+        let gap = finding.byte_start.saturating_sub(source);
+        if offset < redacted + gap {
+            return offset - redacted + source;
+        }
+        source = finding.byte_end;
+        redacted += gap + finding.marker().len();
+        if offset < redacted {
+            // Inside a marker. Nothing in the source corresponds to a position
+            // *within* it, so the secret's own start is the honest answer.
+            return finding.byte_start;
+        }
+    }
+    offset - redacted + source
+}
+
 /// Does this scan contain anything that must block export? — SDD §8 step 3.
 pub fn blocks_export(findings: &[Finding]) -> bool {
     findings.iter().any(|f| f.confidence == Confidence::High)
