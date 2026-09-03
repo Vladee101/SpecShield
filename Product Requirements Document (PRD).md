@@ -157,8 +157,9 @@ SDD §18.
 
 | Metric | Definition | Target |
 |---|---|---|
-| Detection recall | Labelled entities correctly detected ÷ total labelled entities | ≥ 0.95 |
+| Detection recall | Labelled **identifying** entities detected ÷ total labelled identifying entities | ≥ 0.95 |
 | Detection precision | Correct detections ÷ total detections | ≥ 0.90 |
+| Ordinary-word entities | Labelled names that are one common word, left in the twin on purpose | reported, not gated |
 | Restoration correctness | `restore(sanitize(x)) == x` byte-for-byte, all corpus files | 100% |
 | Silent restore failures | Aliases neither restored nor reported as unresolved | 0 |
 | Leak gate | Vault real-names present in a verified twin | 0 |
@@ -167,6 +168,12 @@ SDD §18.
 | Sanitize a 100-page PRD | ~40k words, cold | < 10 s |
 | Restore an AI response | ~2k lines pasted | < 3 s |
 | Offline functionality | Outbound connections observed under egress block | 0 |
+
+**Recall is measured over identifying names**, which is a narrower set than it was. A name
+made of a single ordinary word — `node`, `status`, `invoice`, `account` — is no longer an
+entity unless the user names it; see §4.4. Those labels stay in the corpus and the report
+prints how many of them reach the model, so the cost of that decision is a number rather
+than a claim. It is 17 occurrences of 213 today.
 
 Precision is a first-class target, not a nicety: false positives make the twin unreadable
 and measurably degrade the quality of AI output generated from it.
@@ -249,6 +256,35 @@ The product performs two transformations that must never be confused:
 |---|---|---|---|
 | **Pseudonymization** | two-way | identifiers — service, DTO, table, column, enum, event, endpoint | replaced back with the real name |
 | **Redaction** | **one-way** | secrets — API keys, tokens, passwords, connection strings, private keys, JWTs, PII | **never** restored; the marker remains |
+
+### 4.4 What counts as an identifying name
+
+SpecShield strips the names that say **who you are and what you built**. It is not a
+redaction engine for every token in a repository, and the difference decides whether the
+tool is usable at all.
+
+- A **compound** name is identifying. `CustomerSubscription`, `plan_tier`,
+  `subscription-service`. The combination is yours whatever the parts are, and this is
+  where almost all proprietary naming lives.
+- A **single word nobody else uses** is identifying. `Vantor`, `Paylane`, `Meridian`.
+- A **single ordinary word is not**. `node`, `status`, `data`, `screen`, `invoice`,
+  `account`. On its own it says nothing about who wrote it, and aliasing it makes the twin
+  unreadable, degrades the model's output, and buries the export report in noise. A real
+  React repository produced 124 such names, `node` alone accounting for 1,879 gate hits —
+  nearly all of them inside `package-lock.json`, where the word is npm's.
+- **A name the user confirms overrides all of this.** `specshield term account
+  --entity-type table` says *this ordinary word is mine*, and it is aliased from then on.
+  It is the mirror of FR-10's allowlist: one says "this generic word is mine", the other
+  says "this name of mine is generic".
+
+**This is a deliberate reduction in coverage and it has a cost.** A table called `invoice`
+in a proprietary billing schema is proprietary, and SpecShield now leaves it in the twin.
+The corpus measures exactly how much: see §5. The judgement behind it is that SpecShield is
+a tool for getting work done with a model, not a compliance control — and a tool that
+refuses to produce anything protects nothing, because it does not get used.
+
+The word list lives in `crates/core/src/words.rs`, is finite, and is meant to be extended
+when it is wrong.
 
 Restoring a live API key into AI-generated code would be both nonsensical and dangerous.
 Secrets are therefore never stored as identities and never enter the mapping vault as

@@ -112,14 +112,30 @@ leak, since it would reveal that the three are related.
 
 ### 5.2 The export gate — A1
 
-Before any twin is emitted, an Aho–Corasick automaton built from **every real
-name the vault knows** — plus case and separator variants — scans the twin. One
-hit blocks the export outright. There is no partial copy and no override that
-emits anyway.
+Before any twin is emitted, an Aho–Corasick automaton built from **every
+identifying name the vault knows** — plus case and separator variants — scans the
+twin, and **reports every hit**.
+
+**It does not refuse.** Read that plainly: a twin containing a name the vault
+knows is still produced, and it is the user's decision whether to send it. That
+changed after the gate met a real repository, blocked 78 of 107 files on 124
+distinct names — `Node`, `Screen`, `data` — and wrote nothing at all. A control
+that stops the product working does not protect anybody, because it gets turned
+off or the product gets abandoned. `--strict` restores the refusal for a CI job,
+and `specshield verify` has always been the per-file form.
+
+**A high-confidence secret still refuses, in both modes.** That asymmetry is the
+whole design: a leaked name costs a competitor a guess, a leaked credential is
+usable immediately by anyone who reads the conversation, and no re-keying takes
+it back.
+
+"Identifying" is narrower than it was, too. A name that is a single ordinary word
+— `node`, `status`, `invoice` — is neither aliased nor scanned for (PRD §4.4),
+unless the user names it with `specshield term`. A vault holding a type called
+`Node` used to make every `node_modules` in a lockfile a leak.
 
 `_` and `-` are word boundaries for this scan, so `old_vantor_id` is caught. The
-gate runs on the Rust side in both the CLI and the desktop app; the frontend is
-never handed unverified content.
+gate runs on the Rust side in both the CLI and the desktop app.
 
 This is the defence that matters most, because it does not depend on the
 detector being right. If detection misses a name, the gate catches it in the
@@ -295,9 +311,10 @@ the model, by design:
 
 | # | Path | Outcome |
 |---|---|---|
-| P1 | Detector misses a name; twin is exported | **Blocked.** The gate scans for every vault name in the output, independently of detection. |
-| P2 | A name appears only inside a compound (`old_vantor_id`) | **Blocked.** `_` and `-` are word boundaries for the gate. |
-| P3 | A name leaks through a file path rather than file contents | **Blocked.** Twin paths go through the same gate as content. |
+| P1 | Detector misses a name; twin is exported | **Reported, not blocked.** The gate scans the output independently of detection and names every hit; the user decides. `--strict` refuses. |
+| P2 | A name appears only inside a compound (`old_vantor_id`) | **Reported.** `_` and `-` are word boundaries for the gate. |
+| P3 | A name leaks through a file path rather than file contents | **Reported.** Twin paths go through the same gate as content. |
+| P1b | A name that is a single ordinary word is shared | **Accepted.** `node`, `status`, `invoice` are neither aliased nor scanned for unless named — PRD §4.4. This is a deliberate reduction in coverage. |
 | P4 | Attacker copies the vault file | **Mitigated.** Every sensitive column is AEAD-sealed under an Argon2id-derived key; the file alone yields aliases and counts, no names. |
 | P5 | Attacker copies the vault and knows the passphrase | **Not defended.** This is equivalent to having the project. |
 | P6 | Model returns a token that looks like an alias but is invented | **Blocked.** Unresolved identity; left standing; blocks patching until named by a human. |

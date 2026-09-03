@@ -34,16 +34,28 @@ command accepts a path from the frontend to read.
 
 ## The control that actually protects you
 
-Not the detector — **the gate**. Before any twin is emitted, an Aho–Corasick
-automaton built from every real name the vault knows, plus case and separator
-variants, scans the output. One hit blocks the export. No partial copy, no
-override. `_` and `-` are word boundaries, so `old_vantor_id` is caught.
+Two controls with different weights, and a reviewer should know which is which.
 
-This is why a detection miss is a quality problem rather than a breach: the gate
-checks the *output*, independently of whether detection was right.
+**Secrets are the hard stop.** An API key is redacted one-way, never aliased and
+never restored, and a high-confidence finding **refuses the export outright** —
+in the CLI, in the app, and in `--strict` alike. There is no override.
 
-Secrets are separate and one-way. An API key is redacted, never aliased, and
-never restored — a high-confidence finding blocks the export.
+**Names are advisory.** An Aho–Corasick automaton built from every identifying
+name the vault knows, plus case and separator variants, scans the output and
+**reports** every hit. The twin is produced anyway. `_` and `-` are word
+boundaries, so `old_vantor_id` is caught and named.
+
+That is a deliberate position, not an oversight. The gate used to hard-block; on
+a real repository it stopped 78 of 107 files over 124 ordinary words and produced
+nothing, and a control that stops the product working protects nobody. `--strict`
+(export, sanitize) and `specshield verify` restore the refusal for CI.
+
+Two further reductions a reviewer should weigh:
+
+- A name that is a single ordinary word — `node`, `status`, `invoice` — is
+  neither aliased nor scanned for unless the user names it (PRD §4.4).
+- The gate checks the *output* independently of detection, so a detection miss is
+  still caught and named — but naming it is now where the guarantee ends.
 
 ## Where the mapping lives
 

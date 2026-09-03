@@ -166,10 +166,12 @@ since.
 > gate, so that is aliased content — but on a machine with an aggressive
 > clipboard tool, assume it was logged.
 
-### It is blocked
+### Names survived into it
 
 ```
-Export blocked. The twin still contains content that must not leave this machine.
+The gate found vault names in the twin. **You still get the twin** — the banner is
+amber, lists what it found, and leaves the decision to you. An unredacted secret
+is different: that banner is red and there is no twin at all, in either mode.
 ```
 
 **You get no twin at all.** It is not shown and cannot be copied — there is no
@@ -338,7 +340,7 @@ import "../domain/customer-subscription"  →  import "../domain/PATH_4Y1B5S"
 ```
 
 **Nothing is written unless every file passes the gate.** A directory that is
-clean apart from one leak is not clean, so a blocked export leaves no partial
+clean apart from one secret is not clean, so a refused export leaves no partial
 tree behind.
 
 **Restore a twin project** is the inverse: every file back at its real path. It

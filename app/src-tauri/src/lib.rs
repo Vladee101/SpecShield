@@ -338,8 +338,8 @@ fn sanitize_text_in(state: &AppState, filename: &str, content: &str) -> Result<S
 
         persist(vault, &graph)?;
 
-        // SDD §8 — the gate runs here, on the Rust side. The frontend is never
-        // handed unverified content.
+        // SDD §8 — the gate runs here, on the Rust side. It reports what reached
+        // the twin; only an unredacted secret withholds it.
         let scanner = project::gate(vault, &graph)?;
         let verdict = scanner.scan(&result.twin);
         let twin_secrets = secrets::scan(&result.twin);
@@ -361,7 +361,13 @@ fn sanitize_text_in(state: &AppState, filename: &str, content: &str) -> Result<S
                 .collect(),
         };
 
-        let verified = leaks.is_empty() && blocking.is_empty();
+        // `verified` is now about the *secret* check, which is the one that
+        // still refuses. Names that reached the twin are reported in `leaks`
+        // and the twin is handed over anyway: the user is the one who can say
+        // whether `Node` matters in their project, and they cannot say it if
+        // they never see the twin. `has_leaks` on the wire keeps the two
+        // distinguishable in the UI.
+        let verified = blocking.is_empty();
         vault.log(
             "sanitize",
             Some(1),
@@ -1185,8 +1191,13 @@ struct ExportSummary {
     renamed: usize,
     unchecked: usize,
     abandoned: Vec<(String, String)>,
-    /// Non-empty means nothing was written at all.
-    blocked: Vec<(String, Vec<String>)>,
+    /// Vault names that reached a twin. Reported; the twin was still written
+    /// unless `refused` — SDD §8.
+    leaks: Vec<(String, Vec<String>)>,
+    /// Files whose twin still holds a secret. Always fatal.
+    unredacted: Vec<String>,
+    /// Nothing was written.
+    refused: bool,
     /// Vault names the gate was told to ignore — FR-10.
     allowlisted: usize,
     /// Files a parser claimed and could not read. They went out with no
@@ -1278,10 +1289,10 @@ fn rescan_project(session: State<'_, AppState>) -> Result<RescanSummary> {
 /// Nothing is written unless every file passes the gate: a directory that is
 /// clean apart from one leak is not clean.
 #[tauri::command]
-fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSummary> {
+fn export_project(state: State<'_, AppState>, dest: String, strict: bool) -> Result<ExportSummary> {
     state.with(|vault, root| {
         let destination = resolve(root, &dest);
-        let result = project::export(root, &destination, vault)?;
+        let result = project::export(root, &destination, vault, strict)?;
 
         Ok(ExportSummary {
             written: result.written,
@@ -1290,7 +1301,9 @@ fn export_project(state: State<'_, AppState>, dest: String) -> Result<ExportSumm
             renamed: result.renamed,
             unchecked: result.unchecked,
             abandoned: result.abandoned,
-            blocked: result.blocked,
+            leaks: result.leaks,
+            unredacted: result.unredacted,
+            refused: result.refused,
             allowlisted: result.allowlisted,
             unreadable: result.unreadable,
             occurrences: result.occurrences,

@@ -65,7 +65,7 @@ impl Fixture {
         ));
         let _ = std::fs::remove_dir_all(&dest);
         let mut vault = self.vault();
-        project::export(&self.root, &dest, &mut vault).unwrap()
+        project::export(&self.root, &dest, &mut vault, false).unwrap()
     }
 }
 
@@ -97,7 +97,7 @@ fn a_recorded_occurrence_slices_the_user_s_own_file() {
     let f = Fixture::new("slices");
     f.write(
         "src/config.ts",
-        &format!("const TOKEN = \"{TOKEN}\";\nexport interface Invoice {{ id: string }}\n"),
+        &format!("const TOKEN = \"{TOKEN}\";\nexport interface CustomerInvoice {{ id: string }}\n"),
     );
 
     let exported = f.export(0);
@@ -105,13 +105,13 @@ fn a_recorded_occurrence_slices_the_user_s_own_file() {
     assert!(exported.occurrences > 0, "something must have been recorded");
 
     let vault = f.vault();
-    let found = project::locate(&vault, "Invoice").unwrap();
-    let invoice = found.first().expect("Invoice is in the vault");
+    let found = project::locate(&vault, "CustomerInvoice").unwrap();
+    let invoice = found.first().expect("CustomerInvoice is in the vault");
     let first = invoice.appearances.first().expect("and was seen somewhere");
 
     assert_eq!(
         slice(&f.root, &first.path, first.byte_start, first.byte_end),
-        "Invoice",
+        "CustomerInvoice",
         "the recorded span must slice the real file, past a redacted secret"
     );
 }
@@ -121,17 +121,17 @@ fn locate_answers_to_the_alias_as_well_as_the_name() {
     // The direction that matters when a model hands back a reply full of
     // aliases: what was this, and where did it come from.
     let f = Fixture::new("alias");
-    f.write("src/domain.ts", "export interface Invoice { id: string }\n");
+    f.write("src/domain.ts", "export interface CustomerInvoice { id: string }\n");
     f.export(0);
 
     let vault = f.vault();
-    let by_name = project::locate(&vault, "invoice").unwrap();
+    let by_name = project::locate(&vault, "customerinvoice").unwrap();
     assert_eq!(by_name.len(), 1, "real names match ignoring case");
 
     let alias = by_name[0].alias.clone();
     let by_alias = project::locate(&vault, &alias).unwrap();
     assert_eq!(by_alias.len(), 1);
-    assert_eq!(by_alias[0].real_name, "Invoice");
+    assert_eq!(by_alias[0].real_name, "CustomerInvoice");
 
     assert!(
         project::locate(&vault, &alias.to_lowercase()).unwrap().is_empty(),
@@ -147,20 +147,20 @@ fn a_name_a_file_stopped_using_stops_being_reported() {
     let f = Fixture::new("stale");
     f.write(
         "src/domain.ts",
-        "export interface Invoice { id: string }\nexport const other: Invoice = { id: \"1\" };\n",
+        "export interface CustomerInvoice { id: string }\nexport const other: CustomerInvoice = { id: \"1\" };\n",
     );
     f.export(0);
 
     let vault = f.vault();
-    let before = project::locate(&vault, "Invoice").unwrap()[0].appearances.len();
+    let before = project::locate(&vault, "CustomerInvoice").unwrap()[0].appearances.len();
     assert!(before >= 2);
     drop(vault);
 
-    f.write("src/domain.ts", "export interface Invoice { id: string }\n");
+    f.write("src/domain.ts", "export interface CustomerInvoice { id: string }\n");
     f.export(1);
 
     let vault = f.vault();
-    let after = project::locate(&vault, "Invoice").unwrap()[0].appearances.len();
+    let after = project::locate(&vault, "CustomerInvoice").unwrap()[0].appearances.len();
     assert!(after < before, "{after} occurrences must be fewer than {before}");
 }
 
@@ -194,7 +194,7 @@ fn deleting_a_file_stops_the_vault_describing_it() {
     // with no line number, because there was no longer a file to count lines in.
     let f = Fixture::new("deleted");
     f.write("src/config.ts", &format!("const TOKEN = \"{TOKEN}\";\n"));
-    f.write("src/domain.ts", "export interface Invoice { id: string }\n");
+    f.write("src/domain.ts", "export interface CustomerInvoice { id: string }\n");
 
     f.export(0);
     assert_eq!(project::secret_sites(&f.vault()).unwrap().len(), 1);
@@ -260,7 +260,7 @@ fn a_position_is_none_rather_than_wrong_when_the_file_has_moved_on() {
     // a confidently wrong line number is worse than an absent one: the reader
     // has no way to tell which they got.
     let f = Fixture::new("position");
-    f.write("src/domain.ts", "export interface Invoice { id: string }\n");
+    f.write("src/domain.ts", "export interface CustomerInvoice { id: string }\n");
 
     assert_eq!(
         project::line_and_column(&f.root, "src/domain.ts", 17),

@@ -606,8 +606,29 @@ produced none could not read what it claimed.
 
 # 8. Export Verification Gate
 
-No content leaves the application — clipboard, file export, or patch — without passing this
-gate. It is not advisory and cannot be globally skipped.
+Everything the application is about to emit — clipboard, file export, or patch — goes
+through this gate. **It reports; it does not refuse**, with one exception.
+
+That is a change, and a deliberate one. The gate used to hard-block: one vault name
+anywhere in a twin and nothing was written. On synthetic corpora that is invisible. On a
+real React repository it produced 124 blocking names across 78 files and never wrote a
+single file, so the product did nothing at all. A tool that refuses to produce anything
+protects nothing, because nobody uses it.
+
+So the gate now hands back what it found and the twin with it. Whether `Node` matters in a
+particular project is a judgement its author can make and the scanner cannot, and they
+cannot make it from a refusal that shows them nothing. `--strict` (`export`, `sanitize`)
+restores the refusal for a CI job, and `specshield verify` has always been the per-file
+form of the same check and still exits non-zero.
+
+**The exception is a secret, and it refuses in both modes.** A name that gets through costs
+a competitor a guess. A credential that gets through is usable immediately by anyone who
+reads the conversation, and unlike an alias it cannot be taken back by re-keying. That
+asymmetry is why redaction is one-way (§4.3) and why it is the one finding that is not the
+user's call.
+
+The gate also no longer scans for names that are a single ordinary word — PRD §4.4. A vault
+holding a type called `Node` used to make every `node_modules` in a lockfile a leak.
 
 ## Algorithm
 
@@ -968,8 +989,8 @@ Exportable as CSV so a security team can review what left the machine and when.
 | SQL syntax error | Skip transformation for that file |
 | Twin verification failure (§7.2) | Reject transformation; emit file unaliased; report |
 | Parser claimed a file it cannot read (§7.2) | Emit untouched; report prominently; never "verified clean" |
-| Leak gate hit (§8) | **Hard block on export**; no partial copy |
-| High-confidence secret in twin | **Hard block on export** until acknowledged |
+| Leak gate hit (§8) | Report and continue; refuse only under `--strict` |
+| High-confidence secret in twin | **Hard block on export**, both modes, until acknowledged |
 | Duplicate identity | Reuse existing UUID |
 | Alias collision | Deterministic `_2` suffix |
 | Stale twin at restore | Block patch application; require rescan |

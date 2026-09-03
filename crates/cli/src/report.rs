@@ -91,6 +91,16 @@ struct Score {
     unexpected: Vec<(String, String, usize)>,
     /// Labelled occurrences nothing detected — the leaks, in other words.
     missed: Vec<(String, String, usize)>,
+    /// Labelled occurrences of names that are a single ordinary word, which the
+    /// detector now leaves alone on purpose — PRD §4 and `core::words`.
+    ///
+    /// Counted apart from `expected` rather than deleted from the corpus. They
+    /// *are* the user's names: a table called `invoice` in a proprietary billing
+    /// schema is proprietary, and the product no longer hides it. Scoring them
+    /// as misses would make the headline number meaningless; dropping the labels
+    /// would hide what the relaxation cost. So they are reported beside it.
+    ordinary: usize,
+    ordinary_detected: usize,
 }
 
 impl Score {
@@ -204,6 +214,8 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
             gated.expected += dict.expected;
             gated.detected += dict.detected;
             gated.false_positives += dict.false_positives;
+            gated.ordinary += dict.ordinary;
+            gated.ordinary_detected += dict.ordinary_detected;
         }
     }
 
@@ -215,6 +227,22 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
         gated.precision() * 100.0
     );
     println!();
+    if gated.ordinary > 0 {
+        // The cost of PRD §4, stated rather than assumed. These are labelled
+        // names the detector now leaves in the twin on purpose, because one
+        // ordinary word says nothing about who wrote it. A user who disagrees
+        // about any of them runs `specshield term` and gets it back.
+        println!(
+            "**{} labelled occurrence(s) are single ordinary words** and are left in the twin",
+            gated.ordinary
+        );
+        println!(
+            "deliberately (PRD §4) — `invoice`, `status`, `account`. {} of them were aliased",
+            gated.ordinary_detected
+        );
+        println!("anyway, because something else in the project confirmed the name.");
+        println!();
+    }
     println!("Ungated projects are reported for visibility but excluded from the");
     println!("verdict: their formats have no parser in this build, so their numbers");
     println!("measure the missing milestone rather than detection quality.");
@@ -296,7 +324,16 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             expected_spans.insert((occ.file.clone(), occ.byte_start, occ.byte_end));
         }
     }
-    score.expected = expected_spans.len();
+    // Recall is measured over the names the product still claims to catch:
+    // compounds, and single words nobody else uses. Single ordinary words are
+    // counted separately in `ordinary` — see `Score`.
+    score.expected = labels
+        .entities
+        .iter()
+        .filter(|e| specshield_core::words::is_identifying(&e.real_name))
+        .flat_map(|e| e.occurrences.iter().map(|o| (o.file.clone(), o.byte_start, o.byte_end)))
+        .collect::<HashSet<_>>()
+        .len();
 
     // The project's known members, as the vault would supply them after a scan.
     // Without this the TypeScript parser sees each file in isolation and misses
@@ -364,6 +401,12 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             if candidate.confidence < specshield_core::sanitize::AUTO_APPLY_CONFIDENCE {
                 continue; // suggestions are not detections
             }
+            // The same second bar `sanitize` applies — without it this scores a
+            // pipeline nobody runs, which is how the offset bug survived in CI
+            // for as long as it did.
+            if !detector.is_worth_aliasing(&candidate.real_name) {
+                continue;
+            }
             let key = (file.to_owned(), candidate.byte_start, candidate.byte_end);
             if expected_spans.contains(&key) {
                 score.detected += 1;
@@ -376,20 +419,42 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             }
         }
 
-        // Everything labelled in this file that nothing detected. Each is a name
-        // that would reach the model.
+        tally_labels(labels, file, &hit, &mut score);
+    }
+
+    score
+}
+
+/// Everything labelled in one file, against what was actually found.
+///
+/// A miss is a name that reaches the model. An *ordinary* name is one the
+/// detector leaves alone on purpose (PRD §4) — it also reaches the model, and is
+/// counted apart so the headline number measures what the product claims rather
+/// than what it has stopped claiming.
+fn tally_labels(labels: &Labels, file: &str, hit: &HashSet<(String, usize, usize)>, score: &mut Score) {
+    {
         for entity in &labels.entities {
             for occ in &entity.occurrences {
-                if occ.file == file && !hit.contains(&(file.to_owned(), occ.byte_start, occ.byte_end)) {
-                    score
-                        .missed
-                        .push((file.to_owned(), entity.real_name.clone(), occ.byte_start));
+                if occ.file != file {
+                    continue;
+                }
+                let found = hit.contains(&(file.to_owned(), occ.byte_start, occ.byte_end));
+                if specshield_core::words::is_identifying(&entity.real_name) {
+                    if !found {
+                        score
+                            .missed
+                            .push((file.to_owned(), entity.real_name.clone(), occ.byte_start));
+                    }
+                } else {
+                    // A single ordinary word. Deliberately not aliased, so it is
+                    // not a miss — but it is a name that reaches the model, and
+                    // the report says how many.
+                    score.ordinary += 1;
+                    score.ordinary_detected += usize::from(found);
                 }
             }
         }
     }
-
-    score
 }
 
 fn score_secrets(projects: &[(PathBuf, Labels)]) -> (usize, usize, usize) {

@@ -90,6 +90,15 @@ impl LeakScanner {
                 // and are not identifying on their own.
                 continue;
             }
+            if !crate::words::is_identifying(name) {
+                // An ordinary word is not a disclosure. Scanning for it turned
+                // a real repository into 124 blocking names, 1,879 of them the
+                // word `node` inside `package-lock.json` — where it is npm's
+                // word, not the user's. A name a person confirmed never reaches
+                // here as a bare common word, because it is in the vault as an
+                // identity and the caller passes the allowlist separately.
+                continue;
+            }
             // Case-insensitively, because that is how this scanner *matches*.
             // The automaton below is built `ascii_case_insensitive`, so an
             // identity stored as `api` blocks the word `API` anywhere in a
@@ -304,8 +313,27 @@ mod tests {
 
     #[test]
     fn plural_forms_are_blocked() {
-        let scanner = LeakScanner::new(["Subscription"]);
-        assert!(!scanner.scan("returns all subscriptions").is_clean());
+        let scanner = LeakScanner::new(["CustomerSubscription"]);
+        assert!(!scanner.scan("returns all CustomerSubscriptions").is_clean());
+    }
+
+    #[test]
+    fn an_ordinary_word_is_not_scanned_for() {
+        // The relaxation, at the gate. A vault holding a type called `Node`
+        // used to make every `node_modules` in a lockfile a leak — 1,879 of
+        // them in one real repository. The word is npm's, not the user's.
+        let scanner = LeakScanner::new(["node", "data", "Status"]);
+        assert!(matches!(scanner.scan("node_modules holds the data"), Verdict::Clean));
+        assert_eq!(scanner.pattern_count(), 0, "and nothing was compiled for them");
+    }
+
+    #[test]
+    fn a_compound_of_ordinary_words_is_still_scanned_for() {
+        // The line has to fall between them, or the rule above would let every
+        // real name through: each half of `customer_subscription` is ordinary
+        // and the combination is not.
+        let scanner = LeakScanner::new(["customer_subscription"]);
+        assert!(!scanner.scan("select * from customer_subscription").is_clean());
     }
 
     #[test]
@@ -387,7 +415,10 @@ mod tests {
     fn the_allowlist_is_the_only_way_the_gate_opens() {
         // Every other name in the vault still blocks. The hole is exactly as
         // wide as what the user typed, and no wider.
-        let scanner = LeakScanner::with_allowlist(vec!["invoice".to_owned()], &std::collections::BTreeSet::new());
-        assert!(!scanner.scan("The invoice table.").is_clean());
+        let scanner = LeakScanner::with_allowlist(
+            vec!["customer_subscription".to_owned()],
+            &std::collections::BTreeSet::new(),
+        );
+        assert!(!scanner.scan("The customer_subscription table.").is_clean());
     }
 }

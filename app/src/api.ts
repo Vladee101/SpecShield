@@ -186,8 +186,15 @@ export interface ExportSummary {
   renamed: number;
   unchecked: number;
   abandoned: [string, string][];
-  /** Non-empty means nothing was written at all. */
-  blocked: [string, string[]][];
+  /**
+   * Vault names that reached a twin. Reported; the twin was still written
+   * unless `refused` — the gate advises now, it does not refuse.
+   */
+  leaks: [string, string[]][];
+  /** Files whose twin still holds a secret. Always fatal. */
+  unredacted: string[];
+  /** Nothing was written. */
+  refused: boolean;
   /** Vault names the gate was told to ignore — FR-10. */
   allowlisted: number;
   /**
@@ -379,7 +386,8 @@ export const api = {
 
   rescanProject: () => invoke<RescanSummary>("rescan_project"),
 
-  exportProject: (dest: string) => invoke<ExportSummary>("export_project", { dest }),
+  exportProject: (dest: string, strict = false) =>
+    invoke<ExportSummary>("export_project", { dest, strict }),
 
   restoreProject: (twin: string, dest: string) =>
     invoke<RestoredProject>("restore_project", { twin, dest }),

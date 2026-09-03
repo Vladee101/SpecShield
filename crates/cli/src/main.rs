@@ -99,6 +99,9 @@ enum Command {
 
     /// Generate the semantic twin for a file, verify it, and print it.
     Sanitize {
+        /// Refuse to emit the twin if any vault name survived into it.
+        #[arg(long)]
+        strict: bool,
         #[arg(long, default_value = ".")]
         project: PathBuf,
         file: PathBuf,
@@ -176,9 +179,13 @@ enum Command {
 
     /// Sanitize every parseable file in the project into a twin directory.
     ///
-    /// The gate runs per file. One blocked file blocks the export: a directory
-    /// that is clean apart from one leak is not clean.
+    /// The gate reports what reached the twin and the export is written anyway.
+    /// Pass `--strict` to refuse instead, which is what a CI job wants. An
+    /// unredacted secret refuses either way.
     Export {
+        /// Refuse to write anything if any vault name reached a twin.
+        #[arg(long)]
+        strict: bool,
         #[arg(long, default_value = ".")]
         project: PathBuf,
         /// Directory to write the twin project into. Must not already exist.
@@ -498,8 +505,9 @@ fn main() -> Result<()> {
             file,
             out,
             envelope,
+            strict,
             passphrase,
-        } => run_sanitize(&project, &file, out.as_deref(), envelope, passphrase.as_deref()),
+        } => run_sanitize(&project, &file, out.as_deref(), envelope, strict, passphrase.as_deref()),
         Command::Verify {
             project,
             file,
@@ -521,8 +529,9 @@ fn main() -> Result<()> {
         Command::Export {
             project,
             dest,
+            strict,
             passphrase,
-        } => run_export(&project, &dest, passphrase.as_deref()),
+        } => run_export(&project, &dest, strict, passphrase.as_deref()),
         Command::Diff {
             project,
             file,
@@ -951,7 +960,77 @@ fn run_scan(project: &Path, file: &Path, explicit: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool, explicit: Option<&str>) -> Result<()> {
+/// What the gate found, and whether that stops the export — SDD §8.
+///
+/// Two findings with very different weights. An unredacted secret refuses in
+/// both modes: a live credential in a model's context window is usable by
+/// anyone who reads it, and no amount of re-keying takes it back. A vault name
+/// that survived is reported and the twin is handed over, because whether
+/// `Node` matters in a particular project is the user's call and they cannot
+/// make it from a refusal.
+fn report_gate(
+    file: &Path,
+    verdict: &verify::Verdict,
+    secret_findings: &[secrets::Finding],
+    strict: bool,
+    vault: &mut vault::Vault,
+) -> Result<()> {
+    // A credential in a twin refuses in both modes. It is the one finding that
+    // is not a judgement call: a name costs a competitor a guess, a live token
+    // costs you the account, and no re-key takes it back.
+    if secrets::blocks_export(secret_findings) {
+        vault.log("sanitize", Some(1), None, Some("blocked"), None)?;
+        eprintln!("REFUSED — unredacted secret(s) in the twin:");
+        for finding in secret_findings
+            .iter()
+            .filter(|f| f.confidence == secrets::Confidence::High)
+        {
+            eprintln!("  line {}: {}", finding.line, finding.secret_type);
+        }
+        bail!("a credential in a twin is not a judgement call");
+    }
+
+    if let verify::Verdict::Blocked(leaks) = verdict {
+        vault.log(
+            "sanitize",
+            Some(1),
+            None,
+            Some(if strict { "blocked" } else { "leaks-reported" }),
+            None,
+        )?;
+        if strict {
+            eprintln!(
+                "REFUSED (--strict) — {} real name(s) survived into the twin:",
+                leaks.len()
+            );
+        } else {
+            eprintln!("{} vault name(s) survived into this twin:", leaks.len());
+        }
+        for leak in leaks.iter().take(40) {
+            eprintln!("  {}:{}:{}  {:?}", file.display(), leak.line, leak.column, leak.matched);
+        }
+        if leaks.len() > 40 {
+            eprintln!("  … and {} more", leaks.len() - 40);
+        }
+        if strict {
+            bail!("verification gate refused the export");
+        }
+        eprintln!("Worth a look before you send it. `specshield allow \"<name>\"` if one of them");
+        eprintln!("is a framework name; --strict to refuse instead of reporting.");
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+fn run_sanitize(
+    project: &Path,
+    file: &Path,
+    out: Option<&Path>,
+    envelope: bool,
+    strict: bool,
+    explicit: Option<&str>,
+) -> Result<()> {
     let mut vault = open(project, explicit)?;
     let source = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let parser = require_parser(file, &source)?;
@@ -963,31 +1042,14 @@ fn run_sanitize(project: &Path, file: &Path, out: Option<&Path>, envelope: bool,
     let context = context_from(&vault)?;
     let result = sanitize::sanitize(&source, &scope, &detector, &mut graph, Some(parser.as_ref()), &context)?;
 
-    // SDD §8 — nothing is emitted before the gate passes.
+    // SDD §8. The gate reports; only a secret refuses.
     let scanner = project::gate(&vault, &graph)?;
     let verdict = scanner.scan(&result.twin);
     let secret_findings = secrets::scan(&result.twin);
 
     persist(&mut vault, &graph)?;
 
-    if let verify::Verdict::Blocked(leaks) = &verdict {
-        vault.log("sanitize", Some(1), None, Some("blocked"), None)?;
-        eprintln!("EXPORT BLOCKED — {} real name(s) survived into the twin:", leaks.len());
-        for leak in leaks {
-            eprintln!("  {}:{}:{}  {:?}", file.display(), leak.line, leak.column, leak.matched);
-        }
-        bail!("verification gate refused the export");
-    }
-    if secrets::blocks_export(&secret_findings) {
-        eprintln!("EXPORT BLOCKED — unredacted secret(s) in the twin:");
-        for finding in secret_findings
-            .iter()
-            .filter(|f| f.confidence == secrets::Confidence::High)
-        {
-            eprintln!("  line {}: {}", finding.line, finding.secret_type);
-        }
-        bail!("verification gate refused the export");
-    }
+    report_gate(file, &verdict, &secret_findings, strict, &mut vault)?;
 
     if let Some(path) = out {
         std::fs::write(path, &result.twin)?;
@@ -1260,7 +1322,14 @@ fn report_export(dest: &Path, result: &project::Exported) {
         "  {} alias applications, {} identities in the vault",
         result.aliased, result.identities
     );
-    println!("  every file passed the gate (SDD §8), paths included");
+    if result.has_leaks() {
+        println!(
+            "  the gate found vault names in {} file(s) — listed above (SDD §8)",
+            result.leaks.len()
+        );
+    } else {
+        println!("  every file passed the gate (SDD §8), paths included");
+    }
     if result.allowlisted > 0 {
         println!(
             "  {} name(s) the gate was told to ignore — `specshield allow` (FR-10)",
@@ -1335,8 +1404,18 @@ fn report_unreadable(unreadable: &[(String, String)]) {
     eprintln!();
 }
 
-fn report_blocked(blocked: &[(String, Vec<String>)]) {
-    eprintln!("EXPORT BLOCKED — {} file(s) did not verify:", blocked.len());
+fn report_blocked(blocked: &[(String, Vec<String>)], strict: bool) {
+    if strict {
+        eprintln!(
+            "EXPORT REFUSED (--strict) — {} file(s) still name something:",
+            blocked.len()
+        );
+    } else {
+        // Not "blocked": the twin was written. This is what the gate found, so
+        // the user can decide whether any of it matters — which they could not
+        // do when the answer was to refuse and show them nothing.
+        eprintln!("The gate found vault names in {} file(s) of the twin:", blocked.len());
+    }
     for (path, leaks) in blocked.iter().take(20) {
         eprintln!("  {path}");
         for leak in leaks.iter().take(5) {
@@ -1346,7 +1425,7 @@ fn report_blocked(blocked: &[(String, Vec<String>)]) {
     if blocked.len() > 20 {
         eprintln!("  … and {} more file(s)", blocked.len() - 20);
     }
-    report_blocking_names(blocked);
+    report_blocking_names(blocked, strict);
 }
 
 /// The distinct names doing the blocking, most frequent first.
@@ -1360,7 +1439,7 @@ fn report_blocked(blocked: &[(String, Vec<String>)]) {
 /// Nearly all of them are common words and vendor names — `data`, `status`,
 /// `React` — which the detector aliases on purpose (an over-eager detector is
 /// the safe direction) and which PRD FR-10's allowlist exists to hand back.
-fn report_blocking_names(blocked: &[(String, Vec<String>)]) {
+fn report_blocking_names(blocked: &[(String, Vec<String>)], strict: bool) {
     // Leaks are formatted `line:col "name"` by `project::export`. Read the
     // quoted name back out rather than restructuring the type: this is a
     // presentation concern and the engine should not grow a field for it.
@@ -1382,7 +1461,11 @@ fn report_blocking_names(blocked: &[(String, Vec<String>)]) {
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
 
     eprintln!();
-    eprintln!("{} distinct name(s) are doing the blocking:", ranked.len());
+    eprintln!(
+        "{} distinct name(s) reached the twin{}:",
+        ranked.len(),
+        if strict { " and stopped the export" } else { "" }
+    );
     for (name, count) in ranked.iter().take(40) {
         eprintln!("  {count:>4}  {name}");
     }
@@ -1391,25 +1474,43 @@ fn report_blocking_names(blocked: &[(String, Vec<String>)]) {
     }
 
     eprintln!();
-    eprintln!("Each one is a name the vault knows and the twin still contains. Either the");
-    eprintln!("detector should have aliased it there and did not, or it is a common word or a");
-    eprintln!("vendor name that should never have been an identity at all. For the second kind:");
+    eprintln!("Each one is a name the vault knows and the twin still contains. That is worth");
+    eprintln!("a look and is not automatically wrong: the detector may have missed an");
+    eprintln!("occurrence, or the name may be one you do not mind sharing. To stop a name");
+    eprintln!("being an identity at all:");
     eprintln!();
     eprintln!("  specshield allow \"<name>\" --reason \"framework name\"");
     eprintln!();
-    eprintln!("Case does not matter — allowing `API` clears an identity stored as `api`, because");
-    eprintln!("the gate treats them as one name. Every allowed name is reported on each export:");
-    eprintln!("this is the one control that opens the gate, and it is never silent.");
+    eprintln!("Case does not matter — allowing `API` clears an identity stored as `api`.");
+    eprintln!("Every allowed name is counted on each export, so an open gate is never silent.");
+    if !strict {
+        eprintln!();
+        eprintln!("The twin was written. Run with --strict to refuse instead, which is what a CI");
+        eprintln!("job wants; `specshield verify` is the same check for one file.");
+    }
 }
 
-fn run_export(project: &Path, dest: &Path, explicit: Option<&str>) -> Result<()> {
+fn run_export(project: &Path, dest: &Path, strict: bool, explicit: Option<&str>) -> Result<()> {
     let mut vault = open(project, explicit)?;
-    let result = project::export(project, dest, &mut vault)?;
+    let result = project::export(project, dest, &mut vault, strict)?;
 
+    if !result.unredacted.is_empty() {
+        eprintln!(
+            "EXPORT REFUSED — {} file(s) still hold a secret after redaction:",
+            result.unredacted.len()
+        );
+        for path in result.unredacted.iter().take(20) {
+            eprintln!("  {path}");
+        }
+        bail!("nothing was written: a credential in a twin is not a judgement call");
+    }
+
+    report_unreadable(&result.unreadable);
+    if result.has_leaks() {
+        report_blocked(&result.leaks, strict);
+    }
     if result.is_blocked() {
-        report_unreadable(&result.unreadable);
-        report_blocked(&result.blocked);
-        bail!("nothing was written: a partially clean twin project is not clean");
+        bail!("--strict: nothing was written");
     }
 
     report_export(dest, &result);

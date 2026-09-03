@@ -123,7 +123,7 @@ specshield sanitize docs/PRD.md --out /tmp/PRD.twin.md --envelope
 `--envelope` prints a short instruction telling the model to preserve alias
 tokens exactly. Include it with your prompt; it measurably reduces drift.
 
-If the export is **blocked**, you get no twin at all — see §9.
+If names survive into the twin, you are told and **you still get the twin** — see §9.
 
 ### Bring the answer back
 
@@ -367,15 +367,16 @@ anything you produce from now on.
 
 ---
 
-## 9. When an export is blocked
+## 9. When names survive into the twin
 
 ```
-EXPORT BLOCKED — 2 real name(s) survived into the twin:
+2 vault name(s) survived into this twin:
   src/billing.ts:22:11  "Vantor"
 ```
 
-You get **no twin**. This is the tool working: something the vault knows to be a
-real name was still present in the output.
+**You get the twin.** The gate reports what it found and hands it over; deciding
+whether `Vantor` matters in this particular file is your call, and you cannot
+make it from a refusal that shows you nothing.
 
 Usually one of:
 
@@ -383,21 +384,56 @@ Usually one of:
   gate caught it in the output, which is exactly its job.
 - **A name inside a compound**, like `old_vantor_id`. `_` and `-` are word
   boundaries for this scan.
-- **A common word that is also one of your table names.** If `invoice` is a table,
-  the word "invoice" in a sentence is flagged. If that is wrong for you:
+- **A framework or vendor name** you never wanted aliased. Retire it:
 
   ```bash
-  specshield allow invoice
+  specshield allow ReactDOM --reason "framework name"
   ```
 
-  That stops it being aliased **and** stops the gate looking for it — both
-  halves, or the name would survive into the twin and block every export from
-  then on. It is the only way the gate opens, so it is worth being deliberate
-  about: a name on the allowlist can leave in a twin.
+  That stops it being aliased *and* stops the gate looking for it. Case does not
+  matter — allowing `API` clears an identity stored as `api`. Every allowed name
+  is counted on each export, so an open gate is never silent.
 
-There is no override that emits the twin anyway.
+An export lists the distinct names by frequency with the command to run, so a
+project with a lot of them takes one pass rather than several.
 
----
+### When it really does refuse
+
+Two things stop an export dead:
+
+```bash
+specshield export ../twin --strict     # refuse if any name survived
+```
+
+`--strict` is what a CI job wants, and `specshield verify <file>` is the same
+check for one file (exit 1 on a leak, 2 if nothing could be checked).
+
+**A secret refuses in both modes, always.** No flag turns it off:
+
+```
+REFUSED — unredacted secret(s) in the twin:
+  line 12: github_token
+```
+
+That asymmetry is deliberate. A name that gets through costs a competitor a
+guess. A credential that gets through is usable by anyone who reads the
+conversation, immediately, and no amount of re-keying takes it back.
+
+### What is deliberately not aliased
+
+A name made of a single ordinary word — `node`, `status`, `data`, `invoice`,
+`account` — is left in the twin. On its own it says nothing about who you are,
+and aliasing it makes the twin unreadable and the report useless.
+
+If one of them really is yours, say so once:
+
+```bash
+specshield term account --entity-type table
+```
+
+From then on it is aliased everywhere, like any other name. This is the mirror of
+`specshield allow`: one says *this generic word is mine*, the other says *this
+name of mine is generic*.
 
 ## 10. Using `verify` as a CI gate
 
@@ -461,7 +497,7 @@ This is not telemetry. There is none.
 | `restore` | Rewrite AI output back into real names |
 | `unify` | List or confirm cross-artifact concepts |
 | `index` / `rescan` | Walk and hash the project; report what changed |
-| `export` | Sanitize the whole project into a twin tree |
+| `export` | Sanitize the whole project into a twin tree (`--strict` to refuse on a leak) |
 | `where` | Where an identity appears, by real name or by alias (FR-5) |
 | `secrets` | Which secrets were redacted, and where they still are |
 | `diff` | Three-way review of what AI output would change |

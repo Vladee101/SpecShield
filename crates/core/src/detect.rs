@@ -203,6 +203,13 @@ pub struct Detector {
     dictionary: Vec<(String, EntityType)>,
     /// Terms that must never be aliased, beyond [`STOP_LIST`].
     allowlist: HashSet<String>,
+    /// Terms the user has named with `specshield term` — PRD FR-10.
+    ///
+    /// Separate from the dictionary, which is also seeded from every identity
+    /// already in the vault. Only the ones a person typed override
+    /// [`crate::words::is_identifying`]: `account` is an ordinary word until
+    /// someone says it is their table, and then it is theirs forever.
+    confirmed: HashSet<String>,
     /// One automaton over the whole dictionary, built on first use.
     ///
     /// The dictionary is not a handful of user terms any more: it is seeded
@@ -291,6 +298,36 @@ impl Detector {
     pub fn with_allowed(mut self, term: impl Into<String>) -> Self {
         self.allowlist.insert(term.into());
         self
+    }
+
+    /// Record a term as user-confirmed as well as adding it — PRD FR-10.
+    ///
+    /// The difference from [`Detector::with_term`] is authority, not matching.
+    /// Both find the name; only this one says a person chose it, which is what
+    /// lets an ordinary word like `account` be aliased when it really is the
+    /// name of a table.
+    #[must_use]
+    pub fn with_confirmed_term(mut self, term: impl Into<String>, entity_type: EntityType) -> Self {
+        let term = term.into();
+        self.confirmed.insert(term.clone());
+        self.with_term(term, entity_type)
+    }
+
+    /// Did a person name this? Case-insensitive, matching the allowlist and the
+    /// gate.
+    #[must_use]
+    pub fn is_confirmed(&self, term: &str) -> bool {
+        self.confirmed.iter().any(|c| c.eq_ignore_ascii_case(term))
+    }
+
+    /// Should this name be aliased at all? — PRD §4.
+    ///
+    /// A name a person confirmed always is. Otherwise it has to be identifying
+    /// on its own: see [`crate::words::is_identifying`] for why one ordinary
+    /// word is not.
+    #[must_use]
+    pub fn is_worth_aliasing(&self, name: &str) -> bool {
+        self.is_confirmed(name) || crate::words::is_identifying(name)
     }
 
     /// Case-insensitively, matching the export gate — see

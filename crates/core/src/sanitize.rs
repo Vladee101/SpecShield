@@ -337,9 +337,16 @@ pub fn sanitize(
     }
     candidates.sort_by_key(|c| c.byte_start);
 
+    // Two bars, and the second one is why a real project is usable at all.
+    // Confidence says the detector is sure *what* this is; `is_worth_aliasing`
+    // says it is worth hiding. `Node`, `data` and `status` fail the second no
+    // matter how certain the parser was — PRD §4 and `crate::words`.
+    //
+    // They become suggestions rather than disappearing, so `specshield scan`
+    // still shows them and `specshield term` is one command away.
     let (confident, mut suggestions): (Vec<_>, Vec<_>) = candidates
         .into_iter()
-        .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE);
+        .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE && detector.is_worth_aliasing(&c.real_name));
 
     // 3-4. Intern each identity and plan an edit for it.
     let mut edits: Vec<Edit> = Vec::with_capacity(confident.len());
@@ -623,12 +630,61 @@ mod tests {
     #[test]
     fn distinct_scopes_get_distinct_aliases() {
         let mut g = graph();
-        let d = Detector::new().with_term("Status", EntityType::Enum);
+        // Confirmed, because `Status` is an ordinary word and is not aliased
+        // otherwise (PRD §4). Naming it is exactly how a user says "this one is
+        // mine" — and the B1 property under test is about scope, not about
+        // which names qualify.
+        let d = Detector::new().with_confirmed_term("Status", EntityType::Enum);
         let a = sanitize("Status", "mod/a", &d, &mut g, None, &ProjectContext::default()).unwrap();
         let b = sanitize("Status", "mod/b", &d, &mut g, None, &ProjectContext::default()).unwrap();
 
         assert_ne!(a.applied[0].alias, b.applied[0].alias, "Design Review B1");
         assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn an_ordinary_word_is_a_suggestion_rather_than_an_alias() {
+        // The relaxation. `status` is a real declaration and the detector is
+        // certain of it — and aliasing it makes the twin worse for no gain,
+        // because the word says nothing about who wrote it.
+        let mut g = graph();
+        let d = Detector::new().with_term("status", EntityType::Column);
+        let out = sanitize(
+            "the status field",
+            "mod/a",
+            &d,
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
+
+        assert!(out.applied.is_empty(), "an ordinary word is not aliased");
+        assert!(
+            out.suggestions.iter().any(|c| c.real_name == "status"),
+            "but it is still surfaced, so `specshield term` is one command away"
+        );
+        assert_eq!(out.twin, "the status field");
+    }
+
+    #[test]
+    fn naming_an_ordinary_word_makes_it_an_identity() {
+        // The other half: the escape hatch has to actually work, or the rule
+        // above is a wall rather than a default.
+        let mut g = graph();
+        let d = Detector::new().with_confirmed_term("status", EntityType::Column);
+        let out = sanitize(
+            "the status field",
+            "mod/a",
+            &d,
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
+
+        assert_eq!(out.applied.len(), 1, "a name the user typed is theirs");
+        assert_ne!(out.twin, "the status field");
     }
 
     #[test]

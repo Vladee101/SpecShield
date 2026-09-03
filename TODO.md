@@ -57,10 +57,16 @@ All five pass on `main`. If one fails after your change, that is your change.
 1. **`restore(sanitize(x)) == x`, byte-for-byte.** Property-tested in
    `crates/core/tests/roundtrip.rs`. Anything that rewrites text must go through
    `crates/core/src/edit.rs` byte-range edits — never re-serialize a parsed tree.
-2. **Nothing leaves without passing the gate.** `crates/core/src/verify.rs`
-   scans candidate output for every vault real-name plus case variants. In the
-   app, a blocked sanitize returns `twin: None` — the frontend never receives
-   unverified content.
+2. **Everything goes through the gate; only a secret is stopped by it.**
+   `crates/core/src/verify.rs` scans candidate output for every *identifying*
+   vault name plus case variants, and reports what it finds. The twin is
+   produced anyway — `--strict` refuses instead, and `specshield verify` is the
+   per-file CI form. **A high-confidence secret in a twin refuses in both
+   modes**, in the CLI and the app alike: a name costs a competitor a guess, a
+   live credential costs you the account and no re-key takes it back.
+
+   This was a hard block until the tool met a real repository and wrote nothing
+   at all. See SDD §8 for the reasoning, and do not quietly restore it.
 3. **Secrets are one-way.** `crates/core/src/secrets.rs` redacts; nothing
    restores a redaction marker. Secrets never enter the identity graph.
 4. **Identity is `(scope_path, entity_type, real_name)`**, never name alone.
@@ -75,6 +81,12 @@ All five pass on `main`. If one fails after your change, that is your change.
 8. **Detection precision matters as much as recall.** A detector that flags
    everything makes the twin unreadable and degrades AI output. Both are gated
    in CI.
+9. **A single ordinary word is not an identity.** `crates/core/src/words.rs`,
+   PRD §4.4. `node`, `status`, `invoice` say nothing about who wrote them, and
+   aliasing them is what made a real repository unexportable. A compound is
+   always identifying; so is a single word nobody else uses (`Vantor`). A name
+   the user confirms with `specshield term` overrides the rule — that is the
+   escape hatch, and it has to keep working.
 
 ---
 
@@ -96,7 +108,9 @@ Vault schema is at **v4**. v3 (wrapped data key) is a *content* migration and is
 not keyed on `user_version` — see `crates/vault/src/schema.rs` `DDL_VERSION`, and
 read it before adding a migration of either kind.
 
-Corpus, current: all six projects gated, 99.1% recall / 95.9% precision;
+Corpus, current: all six projects gated, 99.5% recall / 95.6% precision over
+196 identifying occurrences, with 17 single-word occurrences left in the twin on
+purpose (PRD §4.4);
 secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
 excluded from the verdict — see `crates/cli/src/report.rs`.
 

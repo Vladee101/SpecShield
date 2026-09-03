@@ -172,11 +172,15 @@ pub fn detector_from(vault: &vault::Vault) -> Result<Detector> {
             detector = detector.with_term(identity.real_name, entity_type);
         }
     }
+    // `with_confirmed_term`, not `with_term`: these are the ones a person
+    // typed, and only those override the ordinary-word rule. Vault identities
+    // above go in as plain terms — an identity that was interned before this
+    // rule existed must not grandfather itself past it.
     for (name, type_name) in vault.dictionary()? {
         let entity_type: EntityType = type_name
             .parse()
             .map_err(|_| ProjectError::UnknownEntityType(type_name.clone()))?;
-        detector = detector.with_term(name, entity_type);
+        detector = detector.with_confirmed_term(name, entity_type);
     }
     for term in vault.allowlist()? {
         detector = detector.with_allowed(term);
@@ -292,7 +296,16 @@ pub struct Redacted {
 pub struct Twins {
     pub staged: Vec<(String, Payload)>,
     pub records: Vec<vault::StoredFile>,
-    pub blocked: Vec<(String, Vec<String>)>,
+    /// Names that reached a twin — SDD §8. **Advisory.** Reported, and written
+    /// anyway unless the caller asked for `strict`.
+    pub leaks: Vec<(String, Vec<String>)>,
+    /// Files whose twin still holds a high-confidence secret. **Fatal, always.**
+    ///
+    /// The one thing that did not relax. A leaked type name costs a competitor
+    /// a guess; a leaked credential is usable, immediately, by anyone who reads
+    /// the conversation — and unlike a name it cannot be taken back by rotating
+    /// an alias. Redaction is one-way for the same reason.
+    pub unredacted: Vec<String>,
     pub abandoned: Vec<(String, String)>,
     pub aliased: usize,
     pub unchecked: usize,
@@ -346,9 +359,7 @@ pub fn sanitize_tree(
         let result = sanitize::sanitize(&source, &entry.path, detector, graph, parser.as_deref(), context)?;
 
         if secrets::blocks_export(&secrets::scan(&result.twin)) {
-            twins
-                .blocked
-                .push((entry.path.clone(), vec!["unredacted secret".to_owned()]));
+            twins.unredacted.push(entry.path.clone());
             continue;
         }
 
@@ -428,9 +439,13 @@ pub struct Exported {
     pub renamed: usize,
     pub unchecked: usize,
     pub abandoned: Vec<(String, String)>,
-    /// Non-empty means nothing was written. A partially clean twin project is
-    /// not clean.
-    pub blocked: Vec<(String, Vec<String>)>,
+    /// Names that reached a twin — SDD §8. Reported; not fatal on its own.
+    pub leaks: Vec<(String, Vec<String>)>,
+    /// Files whose twin still holds a high-confidence secret. Always fatal.
+    pub unredacted: Vec<String>,
+    /// Nothing was written. True for an unredacted secret, or for a leak when
+    /// the caller asked for `strict`.
+    pub refused: bool,
     /// How many vault names the gate was told to ignore — PRD FR-10. Reported
     /// because an open gate must never be silent.
     pub allowlisted: usize,
@@ -449,9 +464,16 @@ pub struct Exported {
 }
 
 impl Exported {
+    /// Did this export refuse to write anything?
     #[must_use]
-    pub fn is_blocked(&self) -> bool {
-        !self.blocked.is_empty()
+    pub const fn is_blocked(&self) -> bool {
+        self.refused
+    }
+
+    /// Did anything reach a twin that the vault knows? Not the same question.
+    #[must_use]
+    pub fn has_leaks(&self) -> bool {
+        !self.leaks.is_empty()
     }
 }
 
@@ -463,10 +485,21 @@ impl Exported {
 /// against file 3's twin — which a per-file scan would have passed — and the
 /// automaton is built once instead of a thousand times.
 ///
-/// Nothing reaches the disk until every file has passed. Writing as we went and
-/// deleting the directory on a block would make "nothing was written" depend on
-/// a cleanup succeeding.
-pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<Exported> {
+/// **The gate reports; it does not refuse.** That changed deliberately. Blocking
+/// a whole project because one twin still contains the word the vault happens to
+/// know made the tool unusable on real code — a React repository produced 124
+/// such names and never wrote a file. SpecShield strips the names that identify
+/// you; deciding whether a particular one still matters is the user's call, and
+/// they cannot make it if they never see a twin. Pass `strict` for the old
+/// behaviour, which is what a CI job wants.
+///
+/// **An unredacted secret still refuses, always, in both modes.** A leaked type
+/// name costs a competitor a guess. A leaked credential is usable by anyone who
+/// reads the conversation, and no amount of re-keying takes it back.
+///
+/// Nothing reaches the disk until every file has been through, so "nothing was
+/// written" never depends on a cleanup succeeding.
+pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault, strict: bool) -> Result<Exported> {
     if dest.exists() {
         return Err(ProjectError::DestinationExists(dest.to_path_buf()));
     }
@@ -506,14 +539,16 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
     let renamed = twins.records.iter().filter(|r| r.path != r.twin_path).count();
     let redacted_new = twins.redacted.iter().filter(|r| !known.contains(&r.match_idx)).count();
 
-    if twins.is_blocked_now() {
+    if twins.must_refuse(strict) {
         vault.log("export", None, None, Some("blocked"), None)?;
         // Nothing is recorded on a block. The `files` rows were never written
         // either, and an occurrence row is meaningless without the file row it
         // points at — but the deeper reason is that a blocked export is not an
         // export: it must leave the vault describing the last one that was.
         return Ok(Exported {
-            blocked: twins.blocked,
+            leaks: twins.leaks,
+            unredacted: twins.unredacted,
+            refused: true,
             abandoned: twins.abandoned,
             aliased: twins.aliased,
             identities: graph.len(),
@@ -564,7 +599,14 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
         "export",
         Some(i64::try_from(written).unwrap_or(i64::MAX)),
         Some(i64::try_from(graph.len()).unwrap_or(i64::MAX)),
-        Some("clean"),
+        // An audit row that says "clean" over an export the gate had something
+        // to say about would be the log lying about the one thing it exists to
+        // record.
+        Some(if twins.leaks.is_empty() {
+            "clean"
+        } else {
+            "leaks-reported"
+        }),
         Some(&dest.to_string_lossy()),
     )?;
 
@@ -575,7 +617,9 @@ pub fn export(project: &Path, dest: &Path, vault: &mut vault::Vault) -> Result<E
         renamed,
         unchecked: twins.unchecked,
         abandoned: twins.abandoned,
-        blocked: Vec::new(),
+        leaks: twins.leaks,
+        unredacted: Vec::new(),
+        refused: false,
         allowlisted: allowlist(vault)?.len(),
         unreadable: twins.unreadable,
         occurrences: occurrence_count,
@@ -593,7 +637,7 @@ fn run_gate(scanner: &verify::LeakScanner, twins: &mut Twins) {
     for (path, content) in &twins.staged {
         let Payload::Text(twin) = content else { continue };
         if let verify::Verdict::Blocked(leaks) = scanner.scan(twin) {
-            twins.blocked.push((
+            twins.leaks.push((
                 path.clone(),
                 leaks
                     .iter()
@@ -605,7 +649,7 @@ fn run_gate(scanner: &verify::LeakScanner, twins: &mut Twins) {
 
     for record in &twins.records {
         if let verify::Verdict::Blocked(leaks) = scanner.scan(&record.twin_path) {
-            twins.blocked.push((
+            twins.leaks.push((
                 record.path.clone(),
                 leaks
                     .iter()
@@ -670,8 +714,12 @@ fn record_sides(vault: &mut vault::Vault, twins: &Twins) -> Result<usize> {
 }
 
 impl Twins {
-    fn is_blocked_now(&self) -> bool {
-        !self.blocked.is_empty()
+    /// Must this export refuse to write? — SDD §8.
+    ///
+    /// An unredacted secret always. Names only when the caller asked, because
+    /// the gate is advisory now: see [`export`].
+    fn must_refuse(&self, strict: bool) -> bool {
+        !self.unredacted.is_empty() || (strict && !self.leaks.is_empty())
     }
 }
 
@@ -1096,4 +1144,38 @@ pub fn parser_for(project: &Path, entry: &specshield_index::Entry) -> String {
     let path = project.join(&entry.path);
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     specshield_parsers::for_document(&path, &content).map_or(String::new(), |p| p.name().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The relaxation, stated as a rule rather than as prose \u2014 SDD §8.
+    ///
+    /// This is a policy test on purpose. The unredacted path is a backstop: it
+    /// fires only when a secret survives `secrets::redact`, which the redactor
+    /// is built not to allow, so there is no honest end-to-end way to trigger
+    /// it. What can be pinned is the decision it feeds.
+    #[test]
+    fn only_a_secret_refuses_unless_the_caller_asked_for_strict() {
+        let clean = Twins::default();
+        assert!(!clean.must_refuse(false));
+        assert!(!clean.must_refuse(true), "nothing found, nothing to refuse");
+
+        let mut leaking = Twins::default();
+        leaking.leaks.push(("src/a.ts".to_owned(), vec!["Vantor".to_owned()]));
+        assert!(
+            !leaking.must_refuse(false),
+            "a name that got through is reported, and the twin is still written"
+        );
+        assert!(leaking.must_refuse(true), "--strict is what a CI job asks for");
+
+        let mut secret = Twins::default();
+        secret.unredacted.push("src/config.ts".to_owned());
+        assert!(
+            secret.must_refuse(false),
+            "a credential in a twin is not the user's call to make"
+        );
+        assert!(secret.must_refuse(true));
+    }
 }

@@ -1775,19 +1775,40 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
         </button>
       </div>
 
-      {result && result.blocked.length > 0 && (
+      {result && result.unredacted.length > 0 && (
         <div className="banner block" style={{ marginTop: 10 }}>
-          <strong>Export blocked — nothing was written.</strong>
+          <strong>Refused &mdash; nothing was written.</strong>
           <div className="small" style={{ marginTop: 4 }}>
-            {result.blocked.length} file(s) did not verify.
+            {result.unredacted.length} file(s) still hold a credential after redaction. This
+            one is not a judgement call: a live token in a model&rsquo;s context is usable by
+            anyone who reads it, and no re-key takes it back.
+          </div>
+          <div className="mono small" style={{ marginTop: 6 }}>
+            {result.unredacted.slice(0, 20).join("\n")}
+          </div>
+        </div>
+      )}
+
+      {result && result.leaks.length > 0 && (
+        <div className={`banner ${result.refused ? "block" : "warn"}`} style={{ marginTop: 10 }}>
+          <strong>
+            {result.refused
+              ? "Refused \u2014 nothing was written."
+              : "The gate found vault names in the twin."}
+          </strong>
+          <div className="small" style={{ marginTop: 4 }}>
+            {result.leaks.length} file(s) still contain a name the vault knows.{" "}
+            {result.refused
+              ? "Strict mode refuses on this."
+              : "The twin was written anyway \u2014 worth a look before you send it. A name you do not mind sharing can be retired with \u201cNever alias\u201d."}
           </div>
           <div className="scroll" style={{ marginTop: 8 }}>
             <table>
               <tbody>
-                {result.blocked.map(([path, leaks]) => (
+                {result.leaks.slice(0, 50).map(([path, found]) => (
                   <tr key={path}>
                     <td className="mono small">{path}</td>
-                    <td className="small error">{leaks.slice(0, 3).join("; ")}</td>
+                    <td className="small">{found.slice(0, 3).join("; ")}</td>
                   </tr>
                 ))}
               </tbody>
@@ -1842,7 +1863,7 @@ function ExportSection({ onError, onChanged }: { onError: (e: string | null) => 
         </div>
       )}
 
-      {result && result.blocked.length === 0 && (
+      {result && result.written > 0 && (
         <div className="banner ok" style={{ marginTop: 10 }}>
           <strong>{result.written} file(s) written to {result.destination}.</strong>
           <div className="small" style={{ marginTop: 4 }}>

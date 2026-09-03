@@ -33,6 +33,7 @@ pub mod sanitize;
 pub mod secrets;
 pub mod unify;
 pub mod verify;
+pub mod words;
 
 pub use alias::{AliasStyle, ProjectKey};
 pub use edit::{Edit, EditError};
