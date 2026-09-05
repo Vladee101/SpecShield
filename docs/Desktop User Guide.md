@@ -59,14 +59,6 @@ created inside it at `.specshield\vault.bin`.
   every twin you have produced becomes unrestorable, permanently.
 - Make a backup and an escrow today, on the **Vault** tab (§11).
 
-**Alias style** is fixed at creation:
-
-| Style | Looks like | Trade |
-|---|---|---|
-| Opaque | `SERVICE_H7K2Q3` | Strongest. Hardest for a model to reason about. |
-| Typed *(default)* | `PrimaryService_H7K2Q3` | Keeps a generic category, hides the subject. Recommended. |
-| Pseudonymous | `AuroraService` | Most readable. Weakest protection. |
-
 Press **Create new** for a new project, **Open** for an existing one.
 
 ### The cloud-sync banner
@@ -78,7 +70,7 @@ Take it seriously. A vault in a synced folder is uploaded to a third party, and
 the vault is the mapping from every alias back to every real name — the single
 most sensitive artifact the tool produces. Move the project somewhere local.
 
-The header also shows the project name, the alias style, and how many identities
+The header also shows the project name and how many identities
 the vault holds. **Close** locks the vault and drops the keys from memory.
 
 ---

@@ -27,8 +27,12 @@ CORPUS = Path(__file__).resolve().parent.parent
 # here so a typo in a spec fails loudly rather than producing an unmatchable
 # label.
 ENTITY_TYPES = {
-    "organization", "service", "api", "endpoint", "table", "column", "dto",
-    "interface", "enum", "event", "index", "env_var", "host", "path_segment",
+    # Identity — aliased by default (PRD §7, "Neutralize Identity").
+    "organization", "product", "brand", "partner", "payment_provider",
+    "person", "tenant", "environment", "domain",
+    # Structure — left readable unless the user names it.
+    "service", "api", "endpoint", "table", "column", "dto",
+    "interface", "enum", "event", "index", "env_var", "path_segment",
 }
 
 

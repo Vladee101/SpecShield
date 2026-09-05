@@ -7,7 +7,7 @@
 //!
 //! Ordered exactly as §16 orders them, so the two can be read side by side.
 
-use specshield_core::alias::{AliasStyle, ProjectKey, derive};
+use specshield_core::alias;
 use specshield_core::detect::Detector;
 use specshield_core::model::{EntityType, IdentityKey, OccurrenceKind, Origin, Status};
 use specshield_core::parser::ProjectContext;
@@ -17,7 +17,7 @@ use specshield_core::{restore, sanitize, secrets, verify};
 use std::path::{Path, PathBuf};
 
 fn graph() -> Graph {
-    Graph::new(ProjectKey::from_bytes([9; 32]), AliasStyle::Opaque)
+    Graph::new()
 }
 
 fn key(scope: &str, entity_type: EntityType, name: &str) -> IdentityKey {
@@ -236,32 +236,26 @@ fn interning_the_same_identity_twice_reuses_the_uuid() {
 // "Deterministic `_2` suffix"
 
 #[test]
-fn a_taken_alias_forces_a_deterministic_suffix() {
-    // A real HMAC collision is not reachable in a test, so the alias is taken
-    // out from under the identity that would derive it. That exercises the same
-    // branch, which is the one that has to be right when it does happen.
-    let project_key = ProjectKey::from_bytes([9; 32]);
+fn a_taken_alias_is_never_issued_twice() {
+    // Numbers are allocated, so a collision is not reachable by derivation any
+    // more — but a vault can still hand the graph a number the counter has not
+    // reached, and the loaded rows are what the counter is rebuilt from. Squat
+    // on `ORG_001` and the next allocation has to step over it.
     let mut g = graph();
 
-    let wanted = key("mod/a", EntityType::Service, "CustomerService");
-    let derived = derive(&project_key, &wanted, AliasStyle::Opaque, None);
-
-    let squatter = key("mod/b", EntityType::Service, "SomethingElse");
+    let squatter = key("mod/b", EntityType::Organization, "SomethingElse");
     assert!(g.restore_node(
         &squatter,
         &uuid::Uuid::new_v4().to_string(),
-        &derived,
+        "ORG_001",
         Origin::Detected,
         Status::Active,
     ));
 
+    let wanted = key("mod/a", EntityType::Organization, "Vantor");
     let node = g.intern(&wanted, Origin::Detected);
-    assert_ne!(node.alias, derived, "two identities may never share an alias");
-    assert_eq!(
-        node.alias,
-        derive(&project_key, &wanted, AliasStyle::Opaque, Some(2)),
-        "and the fallback is derived, not invented"
-    );
+    assert_eq!(node.alias, "ORG_002", "the counter resumes past what was loaded");
+    assert!(alias::parse(&node.alias).is_some());
 }
 
 // --- Row 10: stale twin at restore ----------------------------------------
@@ -316,9 +310,7 @@ fn recovery_mode_has_no_way_to_write() {
     let settings = specshield_vault::Settings {
         project_name: "t".to_owned(),
         root_path: project.path().display().to_string(),
-        alias_style: "opaque".to_owned(),
         scope_strategy: "module".to_owned(),
-        project_key: [5; 32],
     };
     specshield_vault::Vault::create(&path, "pw", &settings).expect("create");
 
@@ -343,9 +335,7 @@ fn recovery_mode_is_not_a_way_around_the_passphrase() {
     let settings = specshield_vault::Settings {
         project_name: "t".to_owned(),
         root_path: project.path().display().to_string(),
-        alias_style: "opaque".to_owned(),
         scope_strategy: "module".to_owned(),
-        project_key: [5; 32],
     };
     let vault = specshield_vault::Vault::create(&path, "pw", &settings).expect("create");
     vault
@@ -377,9 +367,7 @@ fn a_wrong_passphrase_fails_rather_than_creating_a_new_vault() {
     let settings = specshield_vault::Settings {
         project_name: "t".to_owned(),
         root_path: project.path().display().to_string(),
-        alias_style: "opaque".to_owned(),
         scope_strategy: "module".to_owned(),
-        project_key: [3; 32],
     };
     specshield_vault::Vault::create(&path, "right", &settings).expect("create");
 
@@ -389,7 +377,11 @@ fn a_wrong_passphrase_fails_rather_than_creating_a_new_vault() {
     // And the vault is still openable with the real one — nothing was
     // regenerated or reset by the failed attempt.
     let reopened = specshield_vault::Vault::open(&path, "right").expect("still there");
-    assert_eq!(reopened.settings().expect("settings").project_key, [3; 32]);
+    assert_eq!(
+        reopened.settings().expect("settings").project_name,
+        "t",
+        "and it still holds what it held"
+    );
 }
 
 #[test]

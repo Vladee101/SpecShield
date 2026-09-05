@@ -257,9 +257,7 @@ mod tests {
         Settings {
             project_name: "t".to_owned(),
             root_path: "/tmp/t".to_owned(),
-            alias_style: "opaque".to_owned(),
             scope_strategy: "module".to_owned(),
-            project_key: [11; 32],
         }
     }
 
@@ -293,7 +291,6 @@ mod tests {
         let identities = reopened.identities().unwrap();
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].real_name, "CustomerService");
-        assert_eq!(reopened.settings().unwrap().project_key, [11; 32]);
     }
 
     #[test]

@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use specshield_core::alias::AliasStyle;
 use specshield_core::model::EntityType;
 use specshield_core::restore::Vocabulary;
 use specshield_core::sanitize::Graph;
@@ -46,9 +45,6 @@ enum Command {
     Init {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Alias readability, traded against protection (SDD §6.2).
-        #[arg(long, value_enum, default_value_t = AliasStyleArg::Typed)]
-        alias_style: AliasStyleArg,
         /// Vault passphrase. Prefer `SPECSHIELD_PASSPHRASE` over this flag:
         /// arguments are visible in the process list.
         #[arg(long)]
@@ -414,26 +410,23 @@ enum Command {
     },
 }
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
-enum AliasStyleArg {
-    Opaque,
-    Typed,
-    Pseudonymous,
-}
-
-impl From<AliasStyleArg> for AliasStyle {
-    fn from(value: AliasStyleArg) -> Self {
-        match value {
-            AliasStyleArg::Opaque => Self::Opaque,
-            AliasStyleArg::Typed => Self::Typed,
-            AliasStyleArg::Pseudonymous => Self::Pseudonymous,
-        }
-    }
-}
-
+/// The identity and structure categories a user can name — PRD §3, §13.
+///
+/// Kept in step with `EntityType` by a test: a type the engine knows and the
+/// command line cannot name is a type nobody can use.
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 enum EntityTypeArg {
+    // Identity — aliased by default.
     Organization,
+    Product,
+    Brand,
+    Partner,
+    PaymentProvider,
+    Person,
+    Tenant,
+    Environment,
+    Domain,
+    // Structure — left readable unless named here.
     Service,
     Api,
     Endpoint,
@@ -445,7 +438,6 @@ enum EntityTypeArg {
     Event,
     Index,
     EnvVar,
-    Host,
     PathSegment,
 }
 
@@ -453,6 +445,14 @@ impl From<EntityTypeArg> for EntityType {
     fn from(value: EntityTypeArg) -> Self {
         match value {
             EntityTypeArg::Organization => Self::Organization,
+            EntityTypeArg::Product => Self::Product,
+            EntityTypeArg::Brand => Self::Brand,
+            EntityTypeArg::Partner => Self::Partner,
+            EntityTypeArg::PaymentProvider => Self::PaymentProvider,
+            EntityTypeArg::Person => Self::Person,
+            EntityTypeArg::Tenant => Self::Tenant,
+            EntityTypeArg::Environment => Self::Environment,
+            EntityTypeArg::Domain => Self::Domain,
             EntityTypeArg::Service => Self::Service,
             EntityTypeArg::Api => Self::Api,
             EntityTypeArg::Endpoint => Self::Endpoint,
@@ -464,7 +464,6 @@ impl From<EntityTypeArg> for EntityType {
             EntityTypeArg::Event => Self::Event,
             EntityTypeArg::Index => Self::Index,
             EntityTypeArg::EnvVar => Self::EnvVar,
-            EntityTypeArg::Host => Self::Host,
             EntityTypeArg::PathSegment => Self::PathSegment,
         }
     }
@@ -478,11 +477,7 @@ impl From<EntityTypeArg> for EntityType {
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::Init {
-            path,
-            alias_style,
-            passphrase,
-        } => init(&path, alias_style.into(), passphrase.as_deref()),
+        Command::Init { path, passphrase } => init(&path, passphrase.as_deref()),
         Command::Term {
             project,
             name,
@@ -797,7 +792,7 @@ fn open(project: &Path, explicit: Option<&str>) -> Result<vault::Vault> {
 // Commands
 // ---------------------------------------------------------------------------
 
-fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()> {
+fn init(project: &Path, explicit: Option<&str>) -> Result<()> {
     let path = vault_path(project);
     if path.exists() {
         bail!("vault already exists at {}", path.display());
@@ -814,8 +809,6 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
     }
 
     let pw = new_passphrase(explicit)?;
-    let mut project_key = [0u8; 32];
-    getrandom::fill(&mut project_key).map_err(|e| anyhow::anyhow!("entropy unavailable: {e}"))?;
 
     let settings = vault::Settings {
         project_name: project
@@ -824,16 +817,11 @@ fn init(project: &Path, style: AliasStyle, explicit: Option<&str>) -> Result<()>
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "project".to_owned()),
         root_path: project.display().to_string(),
-        alias_style: format!("{style:?}").to_lowercase(),
         scope_strategy: "module".to_owned(),
-        project_key,
     };
-    // The vault owns the key now; clear our copy off the stack.
-    project_key.zeroize();
     vault::Vault::create(&path, &pw, &settings)?;
 
     println!("Initialized vault at {}", path.display());
-    println!("Alias style: {style:?}");
     println!();
     println!("Next: add the terms only you can name, then sanitize.");
     println!("  specshield term \"Your Company\" --entity-type organization");

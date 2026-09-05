@@ -4,7 +4,6 @@
 //! cover the cases we thought of; this covers the ones we did not.
 
 use proptest::prelude::*;
-use specshield_core::alias::{AliasStyle, ProjectKey};
 use specshield_core::detect::Detector;
 use specshield_core::model::EntityType;
 use specshield_core::parser::ProjectContext;
@@ -12,8 +11,8 @@ use specshield_core::restore::{Vocabulary, restore};
 use specshield_core::sanitize::{Graph, sanitize};
 use specshield_core::verify::LeakScanner;
 
-fn graph(style: AliasStyle) -> Graph {
-    Graph::new(ProjectKey::from_bytes([13; 32]), style)
+fn graph() -> Graph {
+    Graph::new()
 }
 
 fn detector() -> Detector {
@@ -61,11 +60,11 @@ proptest! {
     /// The invariant.
     #[test]
     fn restore_undoes_sanitize(source in document()) {
-        for style in [AliasStyle::Opaque, AliasStyle::Typed, AliasStyle::Pseudonymous] {
-            let mut g = graph(style);
+        {
+            let mut g = graph();
             let out = sanitize(&source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
             let back = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
-            prop_assert_eq!(&back.text, &source, "style {:?}", style);
+            prop_assert_eq!(&back.text, &source);
         }
     }
 
@@ -73,7 +72,7 @@ proptest! {
     /// promise the product is built on (SDD §8).
     #[test]
     fn the_twin_never_contains_a_known_real_name(source in document()) {
-        let mut g = graph(AliasStyle::Opaque);
+        let mut g = graph();
         let out = sanitize(&source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         let scanner = LeakScanner::new(g.real_names());
         prop_assert!(scanner.scan(&out.twin).is_clean(), "leaked: {:?}", out.twin);
@@ -83,7 +82,7 @@ proptest! {
     /// not names, and must leave them alone.
     #[test]
     fn sanitize_is_idempotent(source in document()) {
-        let mut g = graph(AliasStyle::Opaque);
+        let mut g = graph();
         let once = sanitize(&source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         let twice = sanitize(&once.twin, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         prop_assert_eq!(&twice.twin, &once.twin);
@@ -92,7 +91,7 @@ proptest! {
     /// Restoring text with no aliases in it changes nothing.
     #[test]
     fn restore_is_a_no_op_without_aliases(source in document()) {
-        let g = graph(AliasStyle::Opaque);
+        let g = graph();
         let out = restore(&source, &Vocabulary::new(g.vocabulary()));
         prop_assert_eq!(&out.text, &source);
     }
@@ -101,7 +100,7 @@ proptest! {
     /// a silent data-loss bug — PRD §5 allows zero of them.
     #[test]
     fn every_applied_alias_resolves(source in document()) {
-        let mut g = graph(AliasStyle::Opaque);
+        let mut g = graph();
         let out = sanitize(&source, "project", &detector(), &mut g, None, &ProjectContext::default()).unwrap();
         let back = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
         prop_assert!(

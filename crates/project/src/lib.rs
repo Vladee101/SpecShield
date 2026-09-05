@@ -22,7 +22,7 @@ use specshield_core::detect::Detector;
 use specshield_core::model::{EntityType, IdentityKey, Origin, Status};
 use specshield_core::parser::ProjectContext;
 use specshield_core::sanitize::{self, Graph};
-use specshield_core::{alias, paths, secrets, verify};
+use specshield_core::{paths, secrets, verify};
 use specshield_index::Index;
 use specshield_vault as vault;
 
@@ -59,23 +59,10 @@ type Result<T> = std::result::Result<T, ProjectError>;
 /// Written out so the escape cannot be mangled by a source rewrite.
 const NEWLINE: char = '\n';
 
-/// The stored style name to the enum. One place, because three call sites had
-/// their own copy and a fourth would have been a coin toss.
-#[must_use]
-pub fn alias_style(stored: &str) -> alias::AliasStyle {
-    match stored {
-        "opaque" => alias::AliasStyle::Opaque,
-        "pseudonymous" => alias::AliasStyle::Pseudonymous,
-        _ => alias::AliasStyle::Typed,
-    }
-}
-
 /// Rebuild the in-memory graph from stored identities, so aliases stay stable
 /// across invocations — SDD §6.5.
 pub fn graph_from(vault: &vault::Vault) -> Result<Graph> {
-    let mut settings = vault.settings()?;
-    let style = alias_style(&settings.alias_style);
-    let mut graph = Graph::new(alias::ProjectKey::take_bytes(&mut settings.project_key), style);
+    let mut graph = Graph::new();
 
     let concepts: HashMap<String, String> = vault.concepts()?.into_iter().collect();
     for stored in vault.identities()? {
@@ -840,9 +827,6 @@ pub fn rescan_project(
 /// unchanged keeps exactly the alias it had; only members of a newly confirmed
 /// concept move. Under a *new* key, everything does.
 pub fn rekey(vault: &vault::Vault) -> Result<usize> {
-    let settings = vault.settings()?;
-    let style = alias_style(&settings.alias_style);
-    let key = alias::ProjectKey::from_bytes(settings.project_key);
     let concepts: HashMap<String, String> = vault.concepts()?.into_iter().collect();
 
     let stored = vault.identities()?;
@@ -859,7 +843,7 @@ pub fn rekey(vault: &vault::Vault) -> Result<usize> {
         })
         .collect();
 
-    let changed = specshield_core::rekey::rederive(&key, style, &mut identities);
+    let changed = specshield_core::rekey::rederive(&mut identities);
 
     let by_uuid: HashMap<&str, &specshield_core::rekey::Rekeyed> =
         identities.iter().map(|i| (i.uuid.as_str(), i)).collect();

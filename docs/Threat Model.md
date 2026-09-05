@@ -90,9 +90,16 @@ never allowed to name an identity by itself (§5.6).
 
 ### 5.1 Alias derivation — A1, A4
 
-Aliases are `HMAC-SHA256(project_key, scope ‖ type ‖ name)`, rendered in Crockford
-base32, with a frozen grammar (`PREFIX_SUFFIX`, six-character suffix carrying at
-least one digit). Three styles trade readability against protection.
+Aliases are allocated numbers — `ORG_001`, `PRODUCT_001` — handed out per type in
+first-seen order and stored in the vault (PRD §13, SDD §6.1). They carry **no information
+about the name they replace**: not a hash of it, not a length, not a category beyond the
+type prefix the twin needs in order to read naturally.
+
+That is a change from v1.1, which derived them by HMAC from a project key. The reason was
+cross-machine agreement for shared vaults, which PRD §15 now puts outside the MVP; the cost
+was a twin nobody could read. A reviewer should note the consequence: aliases are no longer
+reproducible from a key, so two vaults over the same project will disagree about which
+company is `ORG_001`.
 
 Two properties matter to a reviewer:
 

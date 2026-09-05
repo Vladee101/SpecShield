@@ -15,7 +15,7 @@ Version: 1.1 (MVP)
 | Change | Origin |
 |---|---|
 | Identity key is now the triple `(scope_path, entity_type, real_name)` | Review B1 |
-| Aliases are HMAC-derived from a project key, not sequence-allocated | Review A6 |
+| Aliases are sequence-allocated per type (`ORG_001`) — reverses Review A6, which the MVP scopes out | PRD v2.0 §13 |
 | Formal alias grammar + canonical-form normalizer for LLM drift | Review B3 |
 | Sanitize is AST-first; **restore is lexical** — the asymmetry is now explicit | Review B2 |
 | "The twin must compile" replaced with the verifiable "must parse, counts must match" | Review C1 |
@@ -408,9 +408,9 @@ What is implemented instead:
 
 | Artifact | Real name | Alias |
 |---|---|---|
-| SQL | `customer_subscription` | `DB_TABLE_H7K2Q3` |
-| OpenAPI | `CustomerSubscription` | `DTO_H7K2Q3` |
-| TypeScript | `CustomerSubscription` | `DTO_H7K2Q3` |
+| SQL | `customer_subscription` | `DB_TABLE_001` |
+| OpenAPI | `CustomerSubscription` | `DTO_001` |
+| TypeScript | `CustomerSubscription` | `DTO_001` |
 
 Members of a confirmed concept derive their alias suffix from the concept rather than from
 their own identity key. The shared suffix carries the relationship — a model reading the
@@ -445,39 +445,53 @@ exporting rather than after.
 
 Aliases are deterministic and machine-independent.
 
-## 6.1 Derivation
+## 6.1 Allocation
 
 ```
-h     = HMAC-SHA256(project_key, scope_path || ":" || type || ":" || real_name)
-suffix = base32(h)[0..6]                       // Crockford base32, no ambiguous chars
-alias  = <prefix> + "_" + suffix                // e.g. SERVICE_H7K2QX
+number = next unused for this type, in first-seen order
+alias  = <prefix> + "_" + zero-padded(number, 3)     // e.g. ORG_001
 ```
 
-Collisions are checked against the vault's UNIQUE alias index and resolved by appending
-`_2`, `_3`, … deterministically.
+Numbers are per type, so `ORG_001` and `PRODUCT_001` coexist — PRD §13. They are
+allocated on first sight and stored, so an identity keeps its alias for the life of the
+project however often it is rescanned and whatever order files are walked in. There is no
+counter column: every number a project has issued is already in the aliases it has issued,
+so the allocator is rebuilt from `identities` on load and cannot drift from it.
 
-A sequence-counter mode (`SERVICE_014`) remains available for solo users who prefer
-readability, selected at project creation.
+Collisions cannot arise from allocation. The uniqueness index still exists, and the
+allocator steps over any number a loaded row already holds.
 
-**Why not a counter by default:** sequence allocation requires a central allocator. Two
-developers on the same repository would produce different aliases for the same entity —
-divergent twins, non-comparable prompts, and cross-machine restore failure. HMAC derivation
-needs only a shared project key.
+### Why this replaced HMAC derivation, and what it cost
 
-## 6.2 Alias styles
+v1.1 derived aliases as `HMAC-SHA256(project_key, scope || type || name)` rendered in
+Crockford base32 — `SERVICE_H7K2Q3`. Review A6 chose that specifically to avoid a central
+allocator: two developers on the same repository derive identical aliases with no
+coordination, whereas counters diverge the moment two people scan independently, and a twin
+one produced then restores to the wrong names in the other's vault.
 
-| Mode | Pattern | Example |
-|---|---|---|
-| Opaque | `TYPE_SUFFIX` | `SERVICE_H7K2QX` |
-| **Typed** *(default)* | `CategoryType_SUFFIX` | `PaymentService_H7K2QX` |
-| Pseudonymous | `WordType` | `AuroraService` |
+**That concern is real and is now out of scope rather than solved.** PRD §15 puts team
+collaboration outside the MVP and §16 excludes multi-user projects. What the counter buys is
+what §13 asks for and A6 cost: a twin a person can read. `ORG_001 offers PRODUCT_001` is a
+sentence; `ORG_H7K2Q3 offers DTO_8WFF40` is a puzzle, and a model reads it as one too.
 
-Style is fixed at project creation. Changing it requires a re-key (§9.5).
+If shared vaults return, this decision returns with them.
+
+## 6.2 One format
+
+There are no alias styles. v1.1 offered opaque, typed, and pseudonymous
+(`AuroraService`); PRD §13 specifies one pattern and a pseudonymous alias is not it. The
+`project.alias_style` column survives as legacy — see §9.1.
+
+Schema v5 renumbers every alias in an existing vault into this form. **Every twin produced
+before that migration is orphaned by it**, because an alias is the only route back from a
+twin and `ORG_H7K2Q3` is not one this build can issue or resolve. Carrying both grammars
+was rejected: `is_alias_shaped` would be ambiguous and the allocator could not tell which
+numbers are taken.
 
 ## 6.3 Alias grammar
 
 ```
-alias         := prefix "_" suffix [ "_" disambiguator ]
+alias         := prefix "_" number
 prefix        := [A-Z] [A-Za-z0-9_]*        -- underscores allowed
 suffix        := [A-Z0-9]{3,8}              -- must contain >= 1 digit
 disambiguator := [0-9]+
@@ -686,7 +700,8 @@ CREATE TABLE project (
   id             TEXT PRIMARY KEY,
   name           TEXT NOT NULL,
   root_path      TEXT NOT NULL,
-  alias_style    TEXT NOT NULL,             -- opaque | typed | pseudonymous
+  alias_style    TEXT NOT NULL,             -- legacy, always 'allocated' — §6.2
+  project_key_enc BLOB NOT NULL,            -- legacy, always zero — nothing derives from it
   scope_strategy TEXT NOT NULL,             -- global | module | strict
   key_salt       BLOB NOT NULL,             -- for HMAC alias derivation
   created_at     INTEGER NOT NULL
@@ -805,7 +820,7 @@ in.
 ## 9.5 Re-key
 
 Re-keying regenerates every alias under a new project key. Used when a twin has been
-over-shared, or when the alias style changes. It is a full rewrite of `identities.alias`
+over-shared. It renumbers from scratch in UUID order, so it is a full rewrite of `identities.alias`
 inside one transaction, followed by invalidation of every generated twin.
 
 ---

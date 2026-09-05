@@ -18,40 +18,44 @@ use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::alias::{AliasStyle, ProjectKey, derive_in_concept};
+use crate::alias;
 use crate::detect::Detector;
 use crate::edit::{Edit, apply};
-use crate::model::{IdentityKey, IdentityNode, Origin, Status};
+use crate::model::{EntityType, IdentityKey, IdentityNode, Origin, Status};
 use crate::parser::{ArtifactParser, Candidate, ProjectContext};
 use crate::secrets;
 
 /// The identity graph as it stands during a sanitize run.
 ///
-/// Alias assignment is idempotent: the same identity always receives the same
-/// alias, and a collision is resolved by a deterministic disambiguator so two
-/// distinct identities can never share one (SDD §6.1, enforced by `ux_alias`).
-#[derive(Debug)]
+/// Alias assignment is idempotent: an identity keeps the alias it was first
+/// given, for the life of the project (SDD §6.5, enforced by `ux_alias`).
+///
+/// **The graph is the allocator.** Numbers are handed out per entity type in
+/// first-seen order — PRD §13 — which makes this type stateful in a way HMAC
+/// derivation was not. The state is not stored separately: every number this
+/// project has issued is already in the aliases it has issued, so
+/// [`Graph::restore_node`] rebuilds the counters as it loads the vault. There is
+/// no counter column to drift out of step with the rows it describes.
+#[derive(Debug, Default)]
 pub struct Graph {
-    key: ProjectKey,
-    style: AliasStyle,
     by_identity: HashMap<IdentityKey, Uuid>,
     nodes: HashMap<Uuid, IdentityNode>,
     aliases: HashMap<String, Uuid>,
+    /// Highest number issued per type. `ORG_004` means `next` holds 5 for
+    /// organizations, whether that row was written a second ago or last year.
+    next: HashMap<EntityType, u32>,
     /// Identities the user has confirmed as one concept — SDD §5. Members share
-    /// an alias suffix; nothing is ever merged without confirmation.
+    /// an alias *number*; nothing is ever merged without confirmation.
     concepts: HashMap<IdentityKey, String>,
+    /// The number each confirmed concept settled on, so `DB_TABLE_007` and
+    /// `DTO_007` are visibly the same thing.
+    concept_numbers: HashMap<String, u32>,
 }
 
 impl Graph {
-    pub fn new(key: ProjectKey, style: AliasStyle) -> Self {
-        Self {
-            key,
-            style,
-            by_identity: HashMap::new(),
-            nodes: HashMap::new(),
-            aliases: HashMap::new(),
-            concepts: HashMap::new(),
-        }
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Record a confirmed unification — SDD §5.
@@ -63,6 +67,15 @@ impl Graph {
     pub fn confirm_concept(&mut self, members: &[IdentityKey], concept: &str) {
         for member in members {
             self.concepts.insert(member.clone(), concept.to_owned());
+            // A member already loaded from the vault fixes the concept's number,
+            // so a later member joins the alias that is already in twins rather
+            // than starting a second one.
+            if let Some(uuid) = self.by_identity.get(member)
+                && let Some(node) = self.nodes.get(uuid)
+                && let Some((_, number)) = alias::parse(&node.alias)
+            {
+                self.concept_numbers.entry(concept.to_owned()).or_insert(number);
+            }
         }
     }
 
@@ -77,18 +90,7 @@ impl Graph {
             return &self.nodes[uuid];
         }
 
-        // Derive, then walk disambiguators until the alias is free. In practice
-        // the first attempt always succeeds; the loop exists so a collision is
-        // impossible rather than merely unlikely.
-        let concept = self.concepts.get(key).cloned();
-        let mut disambiguator = None;
-        let alias = loop {
-            let candidate = derive_in_concept(&self.key, key, self.style, disambiguator, concept.as_deref());
-            if !self.aliases.contains_key(&candidate) {
-                break candidate;
-            }
-            disambiguator = Some(disambiguator.unwrap_or(1) + 1);
-        };
+        let alias = self.allocate(key);
 
         let uuid = Uuid::new_v4();
         self.aliases.insert(alias.clone(), uuid);
@@ -106,17 +108,59 @@ impl Graph {
         &self.nodes[&uuid]
     }
 
+    /// The next free alias for this identity — PRD §13.
+    ///
+    /// A confirmed concept takes the number its first member took, so the twin
+    /// shows the relationship (SDD §5). Where that number is already spoken for
+    /// within *this* type — possible, because the counters are per type and a
+    /// concept crosses them — the counter wins and the concept simply does not
+    /// get to share. A duplicate alias would make restore ambiguous, which is
+    /// the one failure with no safe recovery (SDD §10.4).
+    fn allocate(&mut self, key: &IdentityKey) -> String {
+        let entity_type = key.entity_type;
+        let concept = self.concepts.get(key).cloned();
+
+        if let Some(concept) = &concept
+            && let Some(number) = self.concept_numbers.get(concept).copied()
+        {
+            let shared = alias::format_alias(entity_type, number);
+            if !self.aliases.contains_key(&shared) {
+                return shared;
+            }
+        }
+
+        let number = self.next.entry(entity_type).or_insert(1);
+        let mut alias = alias::format_alias(entity_type, *number);
+        // The counter cannot collide on its own; it can still meet a number a
+        // concept claimed for this type earlier.
+        while self.aliases.contains_key(&alias) {
+            *number += 1;
+            alias = alias::format_alias(entity_type, *number);
+        }
+        let issued = *number;
+        *number += 1;
+
+        if let Some(concept) = concept {
+            self.concept_numbers.entry(concept).or_insert(issued);
+        }
+        alias
+    }
+
     /// Reinstate a node loaded from the vault, preserving its stored UUID and
     /// alias.
     ///
-    /// Aliases must survive across sessions unchanged (SDD §6.5): re-deriving
-    /// them would be equivalent for the same project key, but a vault written by
-    /// an older grammar would silently re-alias everything, orphaning every twin
-    /// already sent to a model. The stored value always wins.
+    /// Aliases must survive across sessions unchanged (SDD §6.5). The stored
+    /// value always wins, and loading it is also how the allocator learns what
+    /// this project has already issued — there is no separate counter to load,
+    /// and therefore none to get out of step.
     pub fn restore_node(&mut self, key: &IdentityKey, uuid: &str, alias: &str, origin: Origin, status: Status) -> bool {
         let Ok(uuid) = uuid.parse::<Uuid>() else {
             return false;
         };
+        if let Some((entity_type, number)) = alias::parse(alias) {
+            let next = self.next.entry(entity_type).or_insert(1);
+            *next = (*next).max(number + 1);
+        }
         self.aliases.insert(alias.to_owned(), uuid);
         self.by_identity.insert(key.clone(), uuid);
         self.nodes.insert(
@@ -491,7 +535,7 @@ mod tests {
     use crate::verify::LeakScanner;
 
     fn graph() -> Graph {
-        Graph::new(ProjectKey::from_bytes([42; 32]), AliasStyle::Opaque)
+        Graph::new()
     }
 
     fn detector() -> Detector {
@@ -1042,14 +1086,23 @@ Vantor owns it.";
 
     #[test]
     fn an_unconfirmed_match_changes_nothing() {
-        // Proposals are inert. Nothing unifies until someone says so.
+        // Proposals are inert. Nothing unifies until someone says so, and two
+        // identities stay two identities with two aliases.
+        //
+        // This used to assert that their alias *suffixes* differed, which no
+        // longer says anything: counters are per type (PRD §13 shows `ORG_001`
+        // and `PRODUCT_001` side by side), so the first of any two kinds both
+        // land on 001 whether or not they are one concept. Sharing a number is
+        // still what unification *does* — it is no longer evidence that it
+        // happened.
         let mut g = graph();
         let table = IdentityKey::new("sql::invoice", EntityType::Table, "invoice");
         let dto = IdentityKey::new("ts::Invoice", EntityType::Dto, "Invoice");
         let a = g.intern(&table, Origin::Detected).alias.clone();
         let b = g.intern(&dto, Origin::Detected).alias.clone();
-        let suffix = |s: &str| s.rsplit('_').next().unwrap_or_default().to_owned();
-        assert_ne!(suffix(&a), suffix(&b));
+
+        assert_ne!(a, b, "two identities never share one alias");
+        assert_eq!(g.len(), 2);
     }
 
     #[test]

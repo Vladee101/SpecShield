@@ -54,7 +54,7 @@
     },
     {
       "real_name": "billing.vantor.internal",
-      "entity_type": "host",
+      "entity_type": "domain",
       "scope_path": "#/servers/0/url"
     },
     {
@@ -87,13 +87,13 @@
       "real_name": "subscriptions",
       "entity_type": "endpoint",
       "scope_path": "#/paths/~1subscriptions",
-      "note": "literal path segment; PRD \u00a79 lists `POST /subscriptions` as an Endpoint"
+      "note": "literal path segment; PRD §9 lists `POST /subscriptions` as an Endpoint"
     },
     {
       "real_name": "invoices",
       "entity_type": "endpoint",
       "scope_path": "#/paths/~1invoices~1{invoiceId}",
-      "note": "literal path segment; PRD \u00a79 lists `POST /subscriptions` as an Endpoint"
+      "note": "literal path segment; PRD §9 lists `POST /subscriptions` as an Endpoint"
     }
   ],
   "never_alias": [

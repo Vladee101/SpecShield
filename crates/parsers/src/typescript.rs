@@ -753,10 +753,7 @@ mod tests {
 /** Owns the CustomerSubscription lifecycle. */
 export class S {}
 ";
-        let mut g = specshield_core::sanitize::Graph::new(
-            specshield_core::alias::ProjectKey::from_bytes([7u8; 32]),
-            specshield_core::alias::AliasStyle::Opaque,
-        );
+        let mut g = specshield_core::sanitize::Graph::new();
         // Confirmed: a DTO is not aliased on its own any more (PRD §4.1), and
         // the property under test is that one name yields one alias — which
         // only has something to say when the name is aliased at all.

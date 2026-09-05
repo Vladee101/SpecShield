@@ -58,7 +58,7 @@
     },
     {
       "real_name": "billing.vantor.internal",
-      "entity_type": "host",
+      "entity_type": "domain",
       "scope_path": "project"
     },
     {

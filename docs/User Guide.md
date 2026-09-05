@@ -43,7 +43,7 @@ Both use the same engine and the same vault.
 
 ```bash
 cd /path/to/your/project
-specshield init . --alias-style typed
+specshield init .
 ```
 
 It asks for a passphrase, twice, with echo off. In a script set
@@ -52,15 +52,18 @@ It asks for a passphrase, twice, with echo off. In a script set
 This creates `.specshield/vault.bin`. **Add `.specshield/` to your
 `.gitignore`** — it holds the mapping from every alias back to a real name.
 
-Three alias styles, fixed at creation:
+There is one alias format, and it is meant to be read:
 
-| Style | Looks like | Trade |
-|---|---|---|
-| `opaque` | `SERVICE_H7K2Q3` | Strongest. Hardest for a model to reason about. |
-| `typed` *(default)* | `PrimaryService_H7K2Q3` | Keeps a generic category. Recommended. |
-| `pseudonymous` | `AuroraService` | Most readable. Weakest protection. |
+| Kind | Looks like |
+|---|---|
+| Organization | `ORG_001` |
+| Product | `PRODUCT_001` |
+| Payment provider | `PAYMENT_PROVIDER_001` |
+| Domain | `DOMAIN_001` |
 
-Changing the style later means a re-key, which changes every alias (§8).
+Numbers are handed out per kind in the order names are first seen, and stored, so
+an identity keeps its alias for the life of the project. They say nothing about
+the name they replace.
 
 ### Two things about the passphrase
 
@@ -98,8 +101,16 @@ prose, comments, and string literals.
 **A proprietary name you never enter, and that never appears as a declaration in
 code, is protected by nothing.** Spend twenty minutes on this before real work.
 
-Entity types: `organization`, `service`, `api`, `endpoint`, `table`, `column`,
-`dto`, `interface`, `enum`, `event`, `index`, `env-var`, `host`, `path-segment`.
+**Identity types** — aliased by default, so these are what `term` is usually for:
+`organization`, `product`, `brand`, `partner`, `payment-provider`, `person`,
+`tenant`, `environment`, `domain`.
+
+**Structure types** — `service`, `api`, `endpoint`, `table`, `column`, `dto`,
+`interface`, `enum`, `event`, `index`, `env-var`, `path-segment`. These are left
+in the clear on purpose: an agent that cannot read your architecture cannot help
+you extend it. Naming one here is the deliberate act of hiding something the
+model would otherwise get to read — worth doing for a genuinely secret internal
+service, and worth *not* doing for the other ninety.
 
 ---
 
@@ -151,8 +162,8 @@ specshield index .                    # walk, hash, record
 specshield export ../project-twin     # sanitize every file into a twin tree
 ```
 
-The export writes nothing unless **every** file passes the gate — a directory
-that is clean apart from one leak is not clean.
+The export reports what the gate found and writes the twin anyway — `--strict`
+refuses instead (§9). An unredacted secret refuses in both modes.
 
 Filenames and directories are aliased too, and consistently with the imports
 inside the files, so the twin still resolves as a project:

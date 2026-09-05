@@ -33,7 +33,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::{Kek, Keys, SALT_LEN};
 pub use crate::schema::SCHEMA_VERSION;
@@ -74,26 +74,23 @@ pub(crate) fn random_bytes(buf: &mut [u8]) -> Result<(), VaultError> {
     getrandom::fill(buf).map_err(|e| VaultError::Entropy(e.to_string()))
 }
 
-/// Project settings. Everything here is non-secret except the project key.
+/// Project settings. Nothing here is secret.
 ///
-/// Clears its key material on drop: `settings()` hands raw key bytes to a
-/// caller, and a `Settings` living in a local outlasts the moment the key was
-/// actually needed.
-#[derive(Debug, Clone, ZeroizeOnDrop)]
+/// `alias_style` and `project_key` were removed when aliases became allocated
+/// numbers (PRD §13): there is one alias format now, and no key to derive from.
+/// Their columns still exist and carry [`LEGACY_ALIAS_STYLE`] and a zero key —
+/// dropping a column in SQLite means rebuilding the table, and a destructive
+/// migration to delete two dead fields is a poor trade. They go the next time
+/// something else needs a DDL change.
+#[derive(Debug, Clone)]
 pub struct Settings {
-    #[zeroize(skip)]
     pub project_name: String,
-    #[zeroize(skip)]
     pub root_path: String,
-    #[zeroize(skip)]
-    pub alias_style: String,
-    #[zeroize(skip)]
     pub scope_strategy: String,
-    /// The HMAC key aliases are derived from (SDD §6.1). Two machines sharing it
-    /// produce identical twins with no coordination — which is why it is
-    /// encrypted at rest rather than sitting beside the database.
-    pub project_key: [u8; 32],
 }
+
+/// What the dead `project.alias_style` column now holds.
+pub const LEGACY_ALIAS_STYLE: &str = "allocated";
 
 /// One indexed file — the `files` row of SDD §9.1.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,9 +265,9 @@ impl Vault {
                 project_id,
                 keys.seal(&settings.project_name, &aad("project", "name", &project_id))?,
                 keys.seal(&settings.root_path, &aad("project", "root_path", &project_id))?,
-                settings.alias_style,
+                LEGACY_ALIAS_STYLE,
                 settings.scope_strategy,
-                keys.seal(&hex(&settings.project_key), &aad("project", "project_key", &project_id))?,
+                keys.seal(&hex(&[0u8; 32]), &aad("project", "project_key", &project_id))?,
                 now(),
             ],
         )?;
@@ -372,22 +369,21 @@ impl Vault {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )?;
 
-        let key_hex = self
-            .keys
-            .unseal(&key_enc, &aad("project", "project_key", &self.project_id))?;
-        let mut project_key = [0u8; 32];
-        unhex(&key_hex, &mut project_key)?;
-        let mut key_hex = key_hex;
-        key_hex.zeroize();
+        // The sealed key column is still read, only to prove it decrypts: a
+        // vault whose project row will not open is broken whatever the caller
+        // wanted, and finding that out here beats finding out later.
+        drop(
+            self.keys
+                .unseal(&key_enc, &aad("project", "project_key", &self.project_id))?,
+        );
+        drop(alias_style);
 
         Ok(Settings {
             project_name: self.keys.unseal(&name_enc, &aad("project", "name", &self.project_id))?,
             root_path: self
                 .keys
                 .unseal(&root_enc, &aad("project", "root_path", &self.project_id))?,
-            alias_style,
             scope_strategy,
-            project_key,
         })
     }
 
@@ -1381,16 +1377,6 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
-fn unhex(s: &str, out: &mut [u8]) -> Result<(), VaultError> {
-    if s.len() != out.len() * 2 {
-        return Err(VaultError::Corrupt);
-    }
-    for (i, slot) in out.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| VaultError::Corrupt)?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,9 +1411,7 @@ mod tests {
         Settings {
             project_name: "billing".to_owned(),
             root_path: "/home/x/billing".to_owned(),
-            alias_style: "opaque".to_owned(),
             scope_strategy: "module".to_owned(),
-            project_key: [7; 32],
         }
     }
 
@@ -1456,7 +1440,6 @@ mod tests {
         }
         let v = Vault::open(t.path(), "pw").unwrap();
         assert_eq!(v.identities().unwrap(), vec![identity()]);
-        assert_eq!(v.settings().unwrap().project_key, [7; 32]);
         assert_eq!(v.settings().unwrap().project_name, "billing");
     }
 
@@ -1733,13 +1716,15 @@ mod tests {
         let settings = v.settings().unwrap();
         assert_eq!(settings.project_name, "billing");
         assert_eq!(settings.root_path, "/home/x/billing");
-        assert_eq!(settings.project_key, [7u8; 32]);
 
         let identities = v.identities().unwrap();
         assert_eq!(identities.len(), 1);
         assert_eq!(identities[0].real_name, "Vantor");
         assert_eq!(identities[0].scope_path, "project");
-        assert_eq!(identities[0].alias, "ORG_H7K2Q3", "aliases must not move");
+        // Aliases *do* move, once: schema v5 renumbers `ORG_H7K2Q3` into the
+        // allocated form of PRD §13. Every twin made before that is orphaned by
+        // it, which is why it happens on a version bump and not silently.
+        assert_eq!(identities[0].alias, "ORG_001", "renumbered into the v5 grammar");
 
         let files = v.files().unwrap();
         assert_eq!(files.len(), 1);
@@ -1769,7 +1754,7 @@ mod tests {
             .find_identity("project", "ORG", "Vantor")
             .unwrap()
             .expect("the identity must be findable after migration");
-        assert_eq!(found.alias, "ORG_H7K2Q3");
+        assert_eq!(found.alias, "ORG_001", "renumbered by v5, and still findable");
     }
 
     #[test]

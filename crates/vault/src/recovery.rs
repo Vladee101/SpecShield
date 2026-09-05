@@ -273,9 +273,7 @@ mod tests {
         Settings {
             project_name: "t".to_owned(),
             root_path: "/tmp/t".to_owned(),
-            alias_style: "opaque".to_owned(),
             scope_strategy: "module".to_owned(),
-            project_key: [7; 32],
         }
     }
 

@@ -96,7 +96,6 @@ fn fail(message: impl Into<String>) -> AppError {
 #[derive(Debug, Serialize)]
 pub struct ProjectInfo {
     pub name: String,
-    pub alias_style: String,
     pub identity_count: usize,
     pub term_count: usize,
     /// Set when the project sits in a cloud-sync tree — PRD §10, SDD §17.4.
@@ -197,32 +196,20 @@ pub struct AuditRow {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-fn create_project(
-    state: State<'_, AppState>,
-    path: String,
-    passphrase: String,
-    alias_style: String,
-) -> Result<ProjectInfo> {
+fn create_project(state: State<'_, AppState>, path: String, passphrase: String) -> Result<ProjectInfo> {
     let root = std::path::PathBuf::from(&path);
     let vault_path = state::vault_path(&root);
     if vault_path.exists() {
         return Err(fail(format!("a vault already exists at {}", vault_path.display())));
     }
 
-    let mut project_key = [0u8; 32];
-    getrandom::fill(&mut project_key).map_err(|e| fail(format!("entropy unavailable: {e}")))?;
-
     let settings = vault::Settings {
         project_name: root
             .file_name()
             .map_or_else(|| "project".to_owned(), |n| n.to_string_lossy().into_owned()),
         root_path: root.display().to_string(),
-        alias_style: alias_style.to_lowercase(),
         scope_strategy: "module".to_owned(),
-        project_key,
     };
-    // The vault owns the key now; clear our copy off the stack.
-    project_key.zeroize();
     vault::Vault::create(&vault_path, &passphrase, &settings)?;
     state.open(&root, &passphrase)?;
     project_info(state)
@@ -239,10 +226,7 @@ fn project_info(state: State<'_, AppState>) -> Result<ProjectInfo> {
     state.with(|vault, root| {
         let settings = vault.settings()?;
         Ok(ProjectInfo {
-            // `Settings` clears its key on drop, which makes it non-movable
-            // field-by-field. Clone the two strings we need.
-            name: settings.project_name.clone(),
-            alias_style: settings.alias_style.clone(),
+            name: settings.project_name,
             identity_count: vault.identities()?.len(),
             term_count: vault.dictionary()?.len(),
             cloud_sync_warning: vault::cloud_sync_root(root).map(|provider| {
@@ -1061,9 +1045,6 @@ fn rekey_project_in(state: &AppState, confirm: bool) -> Result<usize> {
             vault.rotate_project_key(&fresh)?;
             fresh.zeroize();
 
-            let settings = vault.settings()?;
-            let project_key = alias::ProjectKey::from_bytes(settings.project_key);
-            let style = alias_style(&settings.alias_style);
             let concepts: std::collections::HashMap<String, String> = vault.concepts()?.into_iter().collect();
 
             let stored = vault.identities()?;
@@ -1080,7 +1061,7 @@ fn rekey_project_in(state: &AppState, confirm: bool) -> Result<usize> {
                 })
                 .collect();
 
-            let changed = specshield_core::rekey::rederive(&project_key, style, &mut identities);
+            let changed = specshield_core::rekey::rederive(&mut identities);
 
             let by_uuid: std::collections::HashMap<&str, &specshield_core::rekey::Rekeyed> =
                 identities.iter().map(|i| (i.uuid.as_str(), i)).collect();
@@ -1142,15 +1123,6 @@ fn resolve(root: &std::path::Path, given: &str) -> std::path::PathBuf {
         path.to_path_buf()
     } else {
         root.join(path)
-    }
-}
-
-/// The stored style name to the enum. Mirrors the CLI's helper of the same name.
-fn alias_style(stored: &str) -> alias::AliasStyle {
-    match stored {
-        "opaque" => alias::AliasStyle::Opaque,
-        "pseudonymous" => alias::AliasStyle::Pseudonymous,
-        _ => alias::AliasStyle::Typed,
     }
 }
 
@@ -1678,14 +1650,7 @@ fn to_secret_wire(f: &secrets::Finding) -> SecretFinding {
 }
 
 fn graph_from(vault: &vault::Vault) -> Result<Graph> {
-    let settings = vault.settings()?;
-    let style = match settings.alias_style.as_str() {
-        "opaque" => alias::AliasStyle::Opaque,
-        "pseudonymous" => alias::AliasStyle::Pseudonymous,
-        _ => alias::AliasStyle::Typed,
-    };
-    let mut settings = settings;
-    let mut graph = Graph::new(alias::ProjectKey::take_bytes(&mut settings.project_key), style);
+    let mut graph = Graph::new();
     for stored in vault.identities()? {
         let entity_type: EntityType = stored
             .entity_type
@@ -1840,9 +1805,7 @@ mod tests {
             let settings = vault::Settings {
                 project_name: "test".to_owned(),
                 root_path: root.display().to_string(),
-                alias_style: "opaque".to_owned(),
                 scope_strategy: "module".to_owned(),
-                project_key: [1; 32],
             };
             vault::Vault::create(&vault_path(&root), "pw", &settings).expect("create vault");
             Self(root)

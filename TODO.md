@@ -81,7 +81,16 @@ All five pass on `main`. If one fails after your change, that is your change.
 8. **Detection precision matters as much as recall.** A detector that flags
    everything makes the twin unreadable and degrades AI output. Both are gated
    in CI.
-9. **A single ordinary word is not an identity.** `crates/core/src/words.rs`,
+9. **Preserve architecture, remove identity.** PRD v2.0 §7. Only
+   `EntityType::is_identity` types are aliased by default — organizations,
+   products, brands, partners, payment providers, people, tenants, environments,
+   domains. Services, DTOs, tables, columns and the rest stay readable, because
+   an agent that cannot read your architecture cannot help you extend it.
+   `specshield term` promotes any name across that line.
+10. **An identity is aliased inside the compound that names it.**
+   `AcmeBillingService` → `ORG_001BillingService`. Company hidden, shape intact.
+   `restore` searches tokens for issued aliases so this round-trips.
+11. **A single ordinary word is not an identity.** `crates/core/src/words.rs`,
    PRD §4.4. `node`, `status`, `invoice` say nothing about who wrote them, and
    aliasing them is what made a real repository unexportable. A compound is
    always identifying; so is a single word nobody else uses (`Vantor`). A name
@@ -104,9 +113,10 @@ M0 and M1 complete. M2 (desktop shell) started. D-9 resolved.
 | M5 diff + git | done — engine, git, CLI, and the diff screen |
 | M6 hardening + packaging | engine and docs done; packaging and signing remain |
 
-Vault schema is at **v4**. v3 (wrapped data key) is a *content* migration and is
-not keyed on `user_version` — see `crates/vault/src/schema.rs` `DDL_VERSION`, and
-read it before adding a migration of either kind.
+Vault schema is at **v5**. v5 renumbers every alias into the `PREFIX_001` form
+of PRD v2.0 §13 and orphans every twin made before it. v3 (wrapped data key) is a
+*content* migration and is not keyed on `user_version`. See `crates/vault/src/schema.rs`
+`DDL_VERSION`, and read it before adding a migration of either kind.
 
 Corpus, current: all six projects gated, 99.5% recall / 95.6% precision over
 196 identifying occurrences, with 17 single-word occurrences left in the twin on

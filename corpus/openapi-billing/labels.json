@@ -132,6 +132,20 @@
       ]
     },
     {
+      "real_name": "billing.vantor.internal",
+      "entity_type": "domain",
+      "scope_path": "#/servers/0/url",
+      "note": null,
+      "occurrences": [
+        {
+          "file": "input/openapi.yaml",
+          "byte_start": 157,
+          "byte_end": 180,
+          "line": 8
+        }
+      ]
+    },
+    {
       "real_name": "CreateSubscription",
       "entity_type": "dto",
       "scope_path": "#/components/schemas/CreateSubscription",
@@ -276,20 +290,6 @@
           "byte_start": 1732,
           "byte_end": 1740,
           "line": 74
-        }
-      ]
-    },
-    {
-      "real_name": "billing.vantor.internal",
-      "entity_type": "host",
-      "scope_path": "#/servers/0/url",
-      "note": null,
-      "occurrences": [
-        {
-          "file": "input/openapi.yaml",
-          "byte_start": 157,
-          "byte_end": 180,
-          "line": 8
         }
       ]
     },

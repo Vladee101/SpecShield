@@ -35,6 +35,5 @@ pub mod unify;
 pub mod verify;
 pub mod words;
 
-pub use alias::{AliasStyle, ProjectKey};
 pub use edit::{Edit, EditError};
 pub use model::{EntityType, IdentityKey, IdentityNode, Occurrence, OccurrenceKind, Origin, Status};

@@ -288,7 +288,7 @@ mod tests {
         // A host and a service with the same string is a coincidence.
         let identities = vec![
             key("project", EntityType::Service, "billing"),
-            key("project", EntityType::Host, "billing"),
+            key("project", EntityType::Domain, "billing"),
         ];
         assert!(propose(&identities).is_empty());
     }

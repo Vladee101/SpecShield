@@ -37,9 +37,7 @@ impl Fixture {
         Settings {
             project_name: "sides".to_owned(),
             root_path: self.root.display().to_string(),
-            alias_style: "opaque".to_owned(),
             scope_strategy: "module".to_owned(),
-            project_key: [3; 32],
         }
     }
 

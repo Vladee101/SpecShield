@@ -13,7 +13,7 @@ use rusqlite::Connection;
 use crate::VaultError;
 
 /// Current schema version. Bump *and* add a migration; never edit V1 in place.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 const V1: &str = r"
 CREATE TABLE meta (
@@ -146,6 +146,56 @@ const V4: &str = r"
 DROP TABLE IF EXISTS edges;
 ";
 
+/// Renumber every alias into the `PREFIX_001` form — PRD §13.
+///
+/// Not DDL: it rewrites `identities.alias` for every row. It is here rather than
+/// in a passphrase-guarded step because aliases are stored **in the clear** —
+/// they are what gets sent to a model, so uniqueness has to be enforceable over
+/// ciphertext (§9.1) — and so this needs no key.
+///
+/// **Every twin produced before this migration is orphaned by it.** An alias is
+/// the only route back from a twin, and `ORG_H7K2Q3` is not a name this build
+/// can issue or resolve. There is no way to carry the old aliases forward: two
+/// grammars in one vault would make `is_alias_shaped` ambiguous and leave the
+/// allocator unable to tell which numbers are taken.
+fn renumber_aliases(conn: &Connection) -> Result<(), VaultError> {
+    use std::collections::HashMap;
+
+    use specshield_core::alias;
+    use specshield_core::model::EntityType;
+
+    // UUID order, so renumbering the same vault twice gives the same answer.
+    let mut rows: Vec<(String, String)> = conn
+        .prepare("SELECT uuid, entity_type FROM identities ORDER BY uuid")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    rows.sort();
+
+    // Park every alias somewhere unique first. `ux_alias` is a unique index, so
+    // assigning final values in place would collide the moment a number this
+    // pass hands out is one another row has not given up yet.
+    conn.execute("UPDATE identities SET alias = 'MIGRATING_' || uuid", [])?;
+
+    let mut next: HashMap<String, u32> = HashMap::new();
+    for (uuid, stored_type) in rows {
+        // A type this build no longer knows keeps a stable, obviously-migrated
+        // alias rather than blocking the upgrade. `HOST` became `DOMAIN` and
+        // `ENV` moved to environment names, so a v4 vault can hold both.
+        let entity_type = stored_type.parse::<EntityType>().ok();
+        let prefix = entity_type.map_or("LEGACY", EntityType::prefix);
+
+        let number = next.entry(prefix.to_owned()).or_insert(1);
+        let alias = entity_type.map_or_else(|| format!("LEGACY_{number:03}"), |t| alias::format_alias(t, *number));
+        *number += 1;
+
+        conn.execute(
+            "UPDATE identities SET alias = ? WHERE uuid = ?",
+            rusqlite::params![alias, uuid],
+        )?;
+    }
+    Ok(())
+}
+
 /// The highest version reachable by DDL alone. Equal to [`SCHEMA_VERSION`],
 /// and still not the same thing.
 ///
@@ -161,7 +211,7 @@ DROP TABLE IF EXISTS edges;
 /// can. It also survives an open that failed, which a stamp does not: a wrong
 /// passphrase runs this function and returns, and a vault that had recorded
 /// “already migrated” on the way past would never open again.
-const DDL_VERSION: i64 = 4;
+const DDL_VERSION: i64 = 5;
 
 /// Create or upgrade the schema. Structure only — see [`DDL_VERSION`].
 pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
@@ -183,6 +233,11 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), VaultError> {
     // v3 is deliberately absent: it has no DDL. See DDL_VERSION.
     if version < 4 {
         conn.execute_batch(V4)?;
+    }
+    // v5 has no DDL either, but unlike v3 it needs no passphrase: aliases are
+    // stored in the clear. Running it here keeps the whole upgrade in one place.
+    if version < 5 && version > 0 {
+        renumber_aliases(conn)?;
     }
     // Future DDL migrations append here, each guarded by `if version < N`.
 

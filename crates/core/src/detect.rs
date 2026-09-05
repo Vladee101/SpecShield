@@ -470,7 +470,7 @@ impl Detector {
                 continue;
             }
             push(
-                Self::candidate(m.as_str(), EntityType::Host, scope, m.start(), m.end(), kind, 0.9),
+                Self::candidate(m.as_str(), EntityType::Domain, scope, m.start(), m.end(), kind, 0.9),
                 &mut claimed,
                 &mut found,
             );
@@ -893,7 +893,7 @@ mod tests {
         for version in ["openapi: 3.1.0", "version: 2.4.0", "1.0.0"] {
             let found = d.scan_text(version, "project", OccurrenceKind::Reference);
             assert!(
-                found.iter().all(|c| c.entity_type != EntityType::Host),
+                found.iter().all(|c| c.entity_type != EntityType::Domain),
                 "{version} detected as a host: {:?}",
                 names(&found)
             );
@@ -910,7 +910,7 @@ mod tests {
         );
         let by_name = |n: &str| found.iter().find(|c| c.real_name == n).map(|c| c.entity_type);
         assert_eq!(by_name("VANTOR_BILLING_URL"), Some(EntityType::EnvVar));
-        assert_eq!(by_name("billing.vantor.internal"), Some(EntityType::Host));
+        assert_eq!(by_name("billing.vantor.internal"), Some(EntityType::Domain));
     }
 
     #[test]

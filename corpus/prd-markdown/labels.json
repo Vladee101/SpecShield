@@ -26,6 +26,20 @@
       ]
     },
     {
+      "real_name": "billing.vantor.internal",
+      "entity_type": "domain",
+      "scope_path": "project",
+      "note": null,
+      "occurrences": [
+        {
+          "file": "input/PRD.md",
+          "byte_start": 1250,
+          "byte_end": 1273,
+          "line": 36
+        }
+      ]
+    },
+    {
       "real_name": "CustomerSubscription",
       "entity_type": "dto",
       "scope_path": "project",
@@ -112,20 +126,6 @@
           "byte_start": 735,
           "byte_end": 754,
           "line": 22
-        }
-      ]
-    },
-    {
-      "real_name": "billing.vantor.internal",
-      "entity_type": "host",
-      "scope_path": "project",
-      "note": null,
-      "occurrences": [
-        {
-          "file": "input/PRD.md",
-          "byte_start": 1250,
-          "byte_end": 1273,
-          "line": 36
         }
       ]
     },

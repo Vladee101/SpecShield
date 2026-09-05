@@ -16,7 +16,18 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
+    // ---- Identity. Who you are, who you work with, where it runs.
     Organization,
+    Product,
+    Brand,
+    Partner,
+    PaymentProvider,
+    Person,
+    Tenant,
+    Environment,
+    Domain,
+
+    // ---- Structure. What you built. Left readable — see `is_identity`.
     Service,
     Api,
     Endpoint,
@@ -28,17 +39,29 @@ pub enum EntityType {
     Event,
     Index,
     EnvVar,
-    Host,
     PathSegment,
 }
 
 impl EntityType {
     /// Alias prefix for this type — the `prefix` production of the alias
-    /// grammar in SDD §6.3. Frozen: changing any of these invalidates every
-    /// stored alias and requires a vault migration.
+    /// grammar in SDD §6.3, and the left half of every row in PRD §13.
+    ///
+    /// Frozen: changing one invalidates every stored alias and needs a vault
+    /// migration. Two were changed when PRD v2.0 landed, and both had to be:
+    /// `HOST` became `DOMAIN` to match §13, and `ENV` moved to the new
+    /// environment-name type, so an env *variable* is now `ENV_VAR`. The
+    /// migration that renumbers every alias into the `_001` form carries them.
     pub const fn prefix(self) -> &'static str {
         match self {
             Self::Organization => "ORG",
+            Self::Product => "PRODUCT",
+            Self::Brand => "BRAND",
+            Self::Partner => "PARTNER",
+            Self::PaymentProvider => "PAYMENT_PROVIDER",
+            Self::Person => "PERSON",
+            Self::Tenant => "TENANT",
+            Self::Environment => "ENV",
+            Self::Domain => "DOMAIN",
             Self::Service => "SERVICE",
             Self::Api => "API",
             Self::Endpoint => "ENDPOINT",
@@ -49,50 +72,42 @@ impl EntityType {
             Self::Enum => "ENUM",
             Self::Event => "EVENT",
             Self::Index => "INDEX",
-            Self::EnvVar => "ENV",
-            Self::Host => "HOST",
+            Self::EnvVar => "ENV_VAR",
             Self::PathSegment => "PATH",
-        }
-    }
-
-    /// Generic category word used by [`AliasStyle::Typed`], which keeps the
-    /// category and hides the subject — SDD §6.2.
-    ///
-    /// [`AliasStyle::Typed`]: crate::alias::AliasStyle::Typed
-    pub const fn category(self) -> &'static str {
-        match self {
-            Self::Organization => "Org",
-            Self::Service | Self::Api => "Service",
-            Self::Endpoint => "Endpoint",
-            Self::Table | Self::Column => "Data",
-            Self::Dto | Self::Interface => "Model",
-            Self::Enum => "Enum",
-            Self::Event => "Event",
-            Self::Index => "Index",
-            Self::EnvVar | Self::Host => "Config",
-            Self::PathSegment => "Path",
         }
     }
 
     /// Does this kind of name say **who you are**, rather than what you built?
     ///
-    /// The distinction the product turns on — PRD §4.1. An AI agent has to see
-    /// the architecture to work on it: a twin in which `CustomerSubscription` is
-    /// `CoreModel_8WFF40` and `chargeInvoice` is `SERVICE_QQ21XV` tells the
-    /// model nothing it can build on, and asking it to extend a system it cannot
-    /// read is the opposite of the point.
+    /// The distinction the product turns on — PRD §7, *Preserve Structure /
+    /// Neutralize Identity*. An AI agent has to see the architecture to work on
+    /// it: a twin in which `CustomerSubscription` is `CoreModel_8WFF40` and
+    /// `chargeInvoice` is `SERVICE_QQ21XV` tells the model nothing it can build
+    /// on, and asking it to extend a system it cannot read is the opposite of
+    /// the point.
     ///
     /// What must not travel is the identity wrapped around that architecture:
-    /// the company, the client, the vendor, the host it runs on. Those are
+    /// the company, its customers and partners, the products it sells, the
+    /// people who work there, the domains and environments it runs on. Those are
     /// aliased by default. Everything else is left in the clear unless the user
     /// names it with `specshield term`, which promotes any name to an identity.
     ///
     /// Secrets are neither: they are redacted one-way and never enter the graph
-    /// (SDD §4.3).
+    /// (SDD §4.3). PRD §13 lists a `SECRET_###` pattern, but restoring a live
+    /// credential into code a model wrote is not something to offer — the
+    /// redaction marker stays.
     pub const fn is_identity(self) -> bool {
         match self {
-            // Who you are, who you work with, and where it runs.
-            Self::Organization | Self::Host => true,
+            Self::Organization
+            | Self::Product
+            | Self::Brand
+            | Self::Partner
+            | Self::PaymentProvider
+            | Self::Person
+            | Self::Tenant
+            | Self::Environment
+            | Self::Domain => true,
+
             // What you built. The model needs these.
             Self::Service
             | Self::Api
@@ -110,8 +125,16 @@ impl EntityType {
     }
 
     /// Every variant, for exhaustive iteration in tests and UI.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 21] = [
         Self::Organization,
+        Self::Product,
+        Self::Brand,
+        Self::Partner,
+        Self::PaymentProvider,
+        Self::Person,
+        Self::Tenant,
+        Self::Environment,
+        Self::Domain,
         Self::Service,
         Self::Api,
         Self::Endpoint,
@@ -123,7 +146,6 @@ impl EntityType {
         Self::Event,
         Self::Index,
         Self::EnvVar,
-        Self::Host,
         Self::PathSegment,
     ];
 }
@@ -168,19 +190,6 @@ impl IdentityKey {
             entity_type,
             real_name: real_name.into(),
         }
-    }
-
-    /// Canonical byte encoding fed to the alias HMAC — SDD §6.1.
-    ///
-    /// The separator must never appear unescaped in a component, or two
-    /// distinct keys could hash to the same alias.
-    pub(crate) fn hmac_input(&self) -> String {
-        format!(
-            "{}:{}:{}",
-            self.scope_path.replace(':', "::"),
-            self.entity_type.prefix(),
-            self.real_name
-        )
     }
 }
 
@@ -311,7 +320,21 @@ mod tests {
             .filter(|t| t.is_identity())
             .map(EntityType::prefix)
             .collect();
-        assert_eq!(identity, vec!["ORG", "HOST"]);
+        assert_eq!(
+            identity,
+            vec![
+                "ORG",
+                "PRODUCT",
+                "BRAND",
+                "PARTNER",
+                "PAYMENT_PROVIDER",
+                "PERSON",
+                "TENANT",
+                "ENV",
+                "DOMAIN",
+            ],
+            "PRD §13 — every one of them is a name a person or a company answers to"
+        );
     }
 
     #[test]
@@ -320,12 +343,5 @@ mod tests {
         for t in EntityType::ALL {
             assert!(seen.insert(t.prefix()), "duplicate prefix {}", t.prefix());
         }
-    }
-
-    #[test]
-    fn scope_separator_is_escaped_so_distinct_keys_cannot_collide() {
-        let a = IdentityKey::new("a:b", EntityType::Service, "X");
-        let b = IdentityKey::new("a", EntityType::Service, "b:X");
-        assert_ne!(a.hmac_input(), b.hmac_input());
     }
 }

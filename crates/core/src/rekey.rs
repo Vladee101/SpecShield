@@ -11,15 +11,16 @@
 //!
 //! # Why order matters
 //!
-//! Two identities can derive the same alias. The loser takes a deterministic
-//! `_2` suffix, so *which* one loses depends on which is processed first. Sorting
-//! by UUID before deriving makes that stable: re-keying the same vault twice
-//! produces the same answer, and two machines agree without coordinating.
+//! Numbers are handed out in sequence, so *which* identity gets `ORG_001`
+//! depends on which is processed first. Sorting by UUID before allocating makes
+//! that stable: renumbering the same vault twice produces the same answer.
 
 use std::collections::HashSet;
 
-use crate::alias::{AliasStyle, ProjectKey, derive_in_concept};
-use crate::model::IdentityKey;
+use std::collections::HashMap;
+
+use crate::alias;
+use crate::model::{EntityType, IdentityKey};
 
 /// One identity as storage holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,36 +34,59 @@ pub struct Rekeyed {
     pub concept: Option<String>,
 }
 
-/// Re-derive every alias, in place. Returns how many actually changed.
+/// Renumber every alias, in place. Returns how many actually changed.
 ///
-/// Derivation is deterministic, so an identity whose scope, type, name, and
-/// concept are unchanged keeps exactly the alias it had — under the *same*
-/// project key. Under a new one, everything moves.
+/// **This is now a renumbering, not a re-derivation, and the difference is
+/// visible to the user.** Aliases used to be a pure function of the project key
+/// and the identity, so re-keying under the *same* key changed nothing and under
+/// a new one changed everything. Numbers are allocated instead (PRD §13), so
+/// there is no key to change: this hands out `_001`, `_002`, … from scratch in
+/// UUID order, and the answer differs from what a project is carrying whenever
+/// identities were added or removed since.
+///
+/// It is still what a re-key is for — orphaning every twin already shared —
+/// and it is still the thing `unify --confirm` needs, because a concept only
+/// takes effect when its members are renumbered onto a shared number.
 ///
 /// The returned count is what a caller warns on: telling a user that "0 aliases
 /// changed" after confirming a concept is how the inert `unify --confirm` bug
 /// went unnoticed.
-pub fn rederive(project_key: &ProjectKey, style: AliasStyle, identities: &mut [Rekeyed]) -> usize {
+pub fn rederive(identities: &mut [Rekeyed]) -> usize {
     identities.sort_by(|a, b| a.uuid.cmp(&b.uuid));
 
     let mut used: HashSet<String> = HashSet::new();
+    let mut next: HashMap<EntityType, u32> = HashMap::new();
+    let mut concept_numbers: HashMap<String, u32> = HashMap::new();
     let mut changed = 0;
 
     for identity in identities.iter_mut() {
-        let mut disambiguator = None;
-        let alias = loop {
-            let candidate = derive_in_concept(
-                project_key,
-                &identity.key,
-                style,
-                disambiguator,
-                identity.concept.as_deref(),
-            );
-            if used.insert(candidate.clone()) {
-                break candidate;
+        let entity_type = identity.key.entity_type;
+
+        // A concept's members share a number where the type allows it — SDD §5.
+        let shared = identity
+            .concept
+            .as_ref()
+            .and_then(|c| concept_numbers.get(c).copied())
+            .map(|n| alias::format_alias(entity_type, n))
+            .filter(|a| !used.contains(a));
+
+        let alias = shared.unwrap_or_else(|| {
+            let number = next.entry(entity_type).or_insert(1);
+            let mut candidate = alias::format_alias(entity_type, *number);
+            while used.contains(&candidate) {
+                *number += 1;
+                candidate = alias::format_alias(entity_type, *number);
             }
-            disambiguator = Some(disambiguator.unwrap_or(1) + 1);
-        };
+            *number += 1;
+            candidate
+        });
+
+        if let Some(concept) = identity.concept.clone()
+            && let Some((_, number)) = alias::parse(&alias)
+        {
+            concept_numbers.entry(concept).or_insert(number);
+        }
+        used.insert(alias.clone());
 
         if alias != identity.alias {
             changed += 1;
@@ -81,50 +105,103 @@ mod tests {
     fn identity(uuid: &str, scope: &str, name: &str) -> Rekeyed {
         Rekeyed {
             uuid: uuid.to_owned(),
-            key: IdentityKey::new(scope, EntityType::Service, name),
+            key: IdentityKey::new(scope, EntityType::Organization, name),
             alias: String::new(),
             concept: None,
         }
     }
 
     #[test]
-    fn re_deriving_under_the_same_key_changes_nothing_the_second_time() {
-        let key = ProjectKey::from_bytes([4; 32]);
-        let mut identities = vec![
-            identity("a", "mod/a", "CustomerService"),
-            identity("b", "mod/b", "BillingService"),
-        ];
+    fn renumbering_is_stable_the_second_time() {
+        let mut identities = vec![identity("a", "mod/a", "Vantor"), identity("b", "mod/b", "Paylane")];
 
-        assert_eq!(rederive(&key, AliasStyle::Opaque, &mut identities), 2);
+        assert_eq!(rederive(&mut identities), 2);
         let after_first: Vec<String> = identities.iter().map(|i| i.alias.clone()).collect();
+        assert_eq!(after_first, vec!["ORG_001".to_owned(), "ORG_002".to_owned()]);
 
-        assert_eq!(rederive(&key, AliasStyle::Opaque, &mut identities), 0);
+        assert_eq!(rederive(&mut identities), 0, "nothing moved, so nothing is reported");
         let after_second: Vec<String> = identities.iter().map(|i| i.alias.clone()).collect();
         assert_eq!(after_first, after_second);
     }
 
     #[test]
-    fn a_new_project_key_moves_every_alias() {
-        // FR-11's whole purpose: an over-shared twin stops resolving.
-        let mut identities = vec![identity("a", "mod/a", "CustomerService")];
-        rederive(&ProjectKey::from_bytes([4; 32]), AliasStyle::Opaque, &mut identities);
-        let before = identities[0].alias.clone();
+    fn removing_an_identity_moves_the_ones_after_it() {
+        // The consequence of counting rather than deriving, and the reason a
+        // re-key still orphans twins: an alias is a position in a sequence, so
+        // deleting an earlier identity shifts every later one.
+        let mut identities = vec![
+            identity("a", "mod/a", "Vantor"),
+            identity("b", "mod/b", "Paylane"),
+            identity("c", "mod/c", "Meridian"),
+        ];
+        rederive(&mut identities);
+        assert_eq!(identities[2].alias, "ORG_003");
 
-        let changed = rederive(&ProjectKey::from_bytes([5; 32]), AliasStyle::Opaque, &mut identities);
-        assert_eq!(changed, 1);
-        assert_ne!(identities[0].alias, before);
+        identities.remove(1);
+        assert_eq!(rederive(&mut identities), 1);
+        assert_eq!(identities[1].alias, "ORG_002");
+    }
+
+    #[test]
+    fn numbers_are_per_type() {
+        // PRD §13 shows `ORG_001` and `PRODUCT_001` side by side: the counters
+        // are independent, and the first of each kind is 001.
+        let mut identities = vec![
+            Rekeyed {
+                uuid: "a".to_owned(),
+                key: IdentityKey::new("p", EntityType::Organization, "Vantor"),
+                alias: String::new(),
+                concept: None,
+            },
+            Rekeyed {
+                uuid: "b".to_owned(),
+                key: IdentityKey::new("p", EntityType::Product, "Gold Business Subscription"),
+                alias: String::new(),
+                concept: None,
+            },
+        ];
+        rederive(&mut identities);
+        assert_eq!(identities[0].alias, "ORG_001");
+        assert_eq!(identities[1].alias, "PRODUCT_001");
+    }
+
+    #[test]
+    fn a_concept_shares_its_number_across_types() {
+        // SDD §5. `DB_TABLE_001` and `DTO_001` are visibly the same thing to a
+        // reader and to a model, and they still restore unambiguously because
+        // the prefixes differ.
+        let mut identities = vec![
+            Rekeyed {
+                uuid: "a".to_owned(),
+                key: IdentityKey::new("db", EntityType::Table, "customer_subscription"),
+                alias: String::new(),
+                concept: Some("customersubscription".to_owned()),
+            },
+            Rekeyed {
+                uuid: "b".to_owned(),
+                key: IdentityKey::new("api", EntityType::Dto, "CustomerSubscription"),
+                alias: String::new(),
+                concept: Some("customersubscription".to_owned()),
+            },
+        ];
+        rederive(&mut identities);
+
+        let numbers: Vec<u32> = identities
+            .iter()
+            .map(|i| crate::alias::parse(&i.alias).expect("an alias").1)
+            .collect();
+        assert_eq!(numbers[0], numbers[1], "one concept, one number: {identities:?}");
     }
 
     #[test]
     fn no_two_identities_share_an_alias() {
         // The one failure with no safe recovery: a shared alias makes restore
         // ambiguous (SDD §10.4).
-        let key = ProjectKey::from_bytes([4; 32]);
         let mut identities: Vec<Rekeyed> = (0..200)
-            .map(|i| identity(&format!("{i:04}"), "mod/a", &format!("Service{i}")))
+            .map(|i| identity(&format!("{i:04}"), "mod/a", &format!("Company{i}")))
             .collect();
 
-        rederive(&key, AliasStyle::Opaque, &mut identities);
+        rederive(&mut identities);
 
         let unique: HashSet<&str> = identities.iter().map(|i| i.alias.as_str()).collect();
         assert_eq!(unique.len(), identities.len());
@@ -132,48 +209,20 @@ mod tests {
 
     #[test]
     fn the_outcome_does_not_depend_on_the_order_they_arrive_in() {
-        // Two identities can derive the same alias; the loser takes a `_2`.
-        // Which one loses must not depend on the order storage happened to
-        // return them, or two machines would disagree.
-        let key = ProjectKey::from_bytes([4; 32]);
-        let mut forwards = vec![
-            identity("a", "mod/a", "CustomerService"),
-            identity("b", "mod/b", "BillingService"),
-            identity("c", "mod/c", "InvoiceService"),
+        // Which identity gets `ORG_001` must not depend on the order storage
+        // happened to return them, or renumbering the same vault twice would
+        // give two answers.
+        let forwards_source = vec![
+            identity("a", "mod/a", "Vantor"),
+            identity("b", "mod/b", "Paylane"),
+            identity("c", "mod/c", "Meridian"),
         ];
-        let mut backwards: Vec<Rekeyed> = forwards.iter().rev().cloned().collect();
+        let mut forwards = forwards_source.clone();
+        let mut backwards: Vec<Rekeyed> = forwards_source.iter().rev().cloned().collect();
 
-        rederive(&key, AliasStyle::Opaque, &mut forwards);
-        rederive(&key, AliasStyle::Opaque, &mut backwards);
+        rederive(&mut forwards);
+        rederive(&mut backwards);
 
         assert_eq!(forwards, backwards);
-    }
-
-    #[test]
-    fn a_confirmed_concept_moves_its_members_and_nothing_else() {
-        // SDD §5: members of one concept share an alias suffix. Confirming a
-        // concept must move exactly those, which is what the caller reports.
-        let key = ProjectKey::from_bytes([4; 32]);
-        let mut identities = vec![
-            identity("a", "mod/a", "CustomerService"),
-            identity("b", "mod/b", "BillingService"),
-        ];
-        rederive(&key, AliasStyle::Opaque, &mut identities);
-        let untouched = identities[1].alias.clone();
-
-        identities[0].concept = Some("customerservice".to_owned());
-        let changed = rederive(&key, AliasStyle::Opaque, &mut identities);
-
-        assert_eq!(changed, 1, "only the confirmed member moves");
-        assert_eq!(identities[1].alias, untouched);
-    }
-
-    #[test]
-    fn an_empty_project_is_not_an_error() {
-        let mut nothing: Vec<Rekeyed> = Vec::new();
-        assert_eq!(
-            rederive(&ProjectKey::from_bytes([4; 32]), AliasStyle::Opaque, &mut nothing),
-            0
-        );
     }
 }

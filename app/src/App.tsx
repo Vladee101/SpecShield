@@ -61,9 +61,18 @@ const TOOL_LABELS: Record<Tool, string> = {
   vault: "Vault",
 };
 
-const ENTITY_TYPES: EntityType[] = [
-  "ORG", "SERVICE", "API", "ENDPOINT", "DB_TABLE", "COLUMN", "DTO",
-  "IFACE", "ENUM", "EVENT", "INDEX", "ENV", "HOST", "PATH",
+/// Identity first, because those are what the tool hides by default and what a
+/// user is nearly always reaching for. Structure below the rule — naming one of
+/// those is the deliberate act of hiding something the model would otherwise
+/// get to read.
+const IDENTITY_TYPES: EntityType[] = [
+  "ORG", "PRODUCT", "BRAND", "PARTNER", "PAYMENT_PROVIDER",
+  "PERSON", "TENANT", "ENV", "DOMAIN",
+];
+
+const STRUCTURE_TYPES: EntityType[] = [
+  "SERVICE", "API", "ENDPOINT", "DB_TABLE", "COLUMN", "DTO",
+  "IFACE", "ENUM", "EVENT", "INDEX", "ENV_VAR", "PATH",
 ];
 
 /// The document under review, held once at the top so Review and Sanitize
@@ -154,7 +163,6 @@ export function App() {
         {project && (
           <div className="row small muted">
             <span className="tag">{project.name}</span>
-            <span className="tag">{project.alias_style}</span>
             <span>{project.identity_count} identities</span>
             <button
               onClick={async () => {
@@ -269,7 +277,6 @@ function ProjectPanel({
 }) {
   const [path, setPath] = useState("");
   const [passphrase, setPassphrase] = useState("");
-  const [aliasStyle, setAliasStyle] = useState("typed");
   const [busy, setBusy] = useState(false);
 
   const run = async (fn: () => Promise<ProjectInfo>) => {
@@ -308,15 +315,6 @@ function ProjectPanel({
             placeholder="used to derive the vault key"
           />
         </label>
-        <label>
-          <div className="small muted">Alias style (new projects only — changing it later needs a re-key)</div>
-          <select value={aliasStyle} onChange={(e) => setAliasStyle(e.target.value)}>
-            <option value="typed">Typed — PrimaryService_H7K2Q3 (recommended)</option>
-            <option value="opaque">Opaque — SERVICE_H7K2Q3 (strongest)</option>
-            <option value="pseudonymous">Pseudonymous — AuroraService (most readable)</option>
-          </select>
-        </label>
-
         <div className="row">
           <button
             className="primary"
@@ -327,7 +325,7 @@ function ProjectPanel({
           </button>
           <button
             disabled={busy || !path || !passphrase}
-            onClick={() => void run(() => api.createProject(path, passphrase, aliasStyle))}
+            onClick={() => void run(() => api.createProject(path, passphrase))}
           >
             Create new
           </button>
@@ -422,9 +420,16 @@ function ReviewPanel({
             placeholder="a name only you can identify, e.g. your company"
           />
           <select style={{ width: 140 }} value={termType} onChange={(e) => setTermType(e.target.value as EntityType)}>
-            {ENTITY_TYPES.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
+            <optgroup label="Identity — hidden by default">
+              {IDENTITY_TYPES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </optgroup>
+            <optgroup label="Structure — readable unless you name it">
+              {STRUCTURE_TYPES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </optgroup>
           </select>
           <button
             disabled={!term}
@@ -1093,9 +1098,16 @@ function UnresolvedPanel({
                   value={types[token] ?? "SERVICE"}
                   onChange={(e) => setTypes({ ...types, [token]: e.target.value as EntityType })}
                 >
-                  {ENTITY_TYPES.map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
+                  <optgroup label="Identity">
+                    {IDENTITY_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </optgroup>
+                  <optgroup label="Structure">
+                    {STRUCTURE_TYPES.map((t) => (
+                      <option key={t} value={t}>{t}</option>
+                    ))}
+                  </optgroup>
                 </select>
               </td>
               <td>

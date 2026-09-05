@@ -1,260 +1,100 @@
-//! Alias derivation, grammar, and drift-tolerant matching — SDD §6.
+//! Alias allocation, grammar, and drift-tolerant matching — SDD §6, PRD §13.
 //!
-//! Aliases are HMAC-derived rather than sequence-allocated. Sequence allocation
-//! needs a central allocator: two developers on the same repository would
-//! produce different aliases for the same entity, giving divergent twins and
-//! cross-machine restore failures (Design Review A6). HMAC derivation needs only
-//! a shared project key.
+//! An alias is a prefix, an underscore, and a zero-padded number: `ORG_001`,
+//! `PRODUCT_001`, `PAYMENT_PROVIDER_001`. Numbers are allocated per type on
+//! first sight and stored in the vault, so an identity keeps its alias for the
+//! life of the project however many times it is rescanned and whatever order the
+//! files are walked in.
 //!
-//! **The grammar in this module is frozen.** Every alias in every vault depends
-//! on it, so a change here is a vault migration — see `PRAGMA user_version` in
-//! SDD §9.3.
+//! **This replaced HMAC derivation, and the trade is worth writing down.**
+//! Design Review A6 chose `ORG_H7K2Q3` — derived from a project key — precisely
+//! to avoid a central allocator: two developers on the same repository derive
+//! identical aliases with no coordination, whereas counters diverge the moment
+//! two people scan independently, and a twin one of them produced then restores
+//! to the wrong names in the other's vault.
+//!
+//! That concern is real and is now **out of scope rather than solved**: PRD §15
+//! puts team collaboration outside the MVP and §16 excludes multi-user projects.
+//! What the counter buys is the thing §13 asks for and A6 cost — a twin a person
+//! can read. `ORG_001 offers PRODUCT_001` is a sentence; `ORG_H7K2Q3 offers
+//! DTO_8WFF40` is a puzzle, and the model reads it as one too. If shared vaults
+//! ever come back, this decision comes back with them.
+//!
+//! **The grammar is frozen.** Every alias in every vault depends on it, so a
+//! change here is a vault migration — see `PRAGMA user_version` in SDD §9.3.
 
-use std::sync::LazyLock;
+use crate::model::EntityType;
 
-use data_encoding::{Encoding, Specification};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use zeroize::{Zeroize, ZeroizeOnDrop};
-
-use crate::model::IdentityKey;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// Number of base32 characters taken from the HMAC — the `suffix` production.
-const SUFFIX_LEN: usize = 6;
-
-/// Crockford base32: excludes I, L, O, and U so a suffix cannot be misread as
-/// a digit or accidentally spell a word.
-static CROCKFORD: LazyLock<Encoding> = LazyLock::new(|| {
-    let mut spec = Specification::new();
-    spec.symbols.push_str("0123456789ABCDEFGHJKMNPQRSTVWXYZ");
-    spec.encoding().expect("Crockford alphabet is exactly 32 symbols")
-});
+/// Digits in an allocated alias. Zero-padded, so `ORG_007` sorts beside
+/// `ORG_011` and the column width in a review table does not jump.
+///
+/// Not a limit: the thousandth organization in a project is `ORG_1000`, and the
+/// grammar reads any run of digits.
+const NUMBER_WIDTH: usize = 3;
 
 /// Regex form of the grammar, for the prompt envelope handed to the model
-/// (SDD §11). It is deliberately looser than [`is_alias_shaped`]: a model does
-/// not need the digit rule explained to it, and a looser pattern makes it more
+/// (SDD §11). Deliberately looser than [`is_alias_shaped`]: a model does not
+/// need the prefix list explained to it, and a looser pattern makes it more
 /// likely to leave a drifted token recognisable.
-pub const ENVELOPE_PATTERN: &str = r"^[A-Z][A-Za-z0-9_]*_[A-Z0-9]{3,8}$";
+pub const ENVELOPE_PATTERN: &str = r"^[A-Z][A-Z0-9_]*_[0-9]{3,}$";
 
-/// Per-project HMAC key. Two machines holding the same key derive identical
-/// aliases with no coordination.
+/// The alias for `entity_type` numbered `number` — PRD §13.
 ///
-/// Not `Debug`-printable and not `Clone`: it is key material.
-#[derive(ZeroizeOnDrop)]
-pub struct ProjectKey([u8; 32]);
-
-impl ProjectKey {
-    /// Take ownership of key bytes.
-    ///
-    /// The caller's array is *copied*, and this type can only zeroize its own
-    /// copy. Zeroize the source too — [`take_bytes`] does that for you.
-    ///
-    /// [`take_bytes`]: ProjectKey::take_bytes
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// Take key bytes and clear the caller's copy.
-    ///
-    /// Prefer this at every site that generates or loads a key: a 32-byte array
-    /// left on the stack is exactly the residue this type exists to avoid.
-    pub fn take_bytes(bytes: &mut [u8; 32]) -> Self {
-        let key = Self(*bytes);
-        bytes.zeroize();
-        key
-    }
-
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
+/// A formatter, not an allocator. Which number an identity gets is decided by
+/// [`crate::sanitize::Graph`], which is the only place that knows what a project
+/// has already issued.
+#[must_use]
+pub fn format_alias(entity_type: EntityType, number: u32) -> String {
+    format!("{}_{number:0NUMBER_WIDTH$}", entity_type.prefix())
 }
 
-impl std::fmt::Debug for ProjectKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ProjectKey(<redacted>)")
-    }
-}
-
-/// Compile-time proof that the key clears itself on drop — SDD §9.4.
+/// The type and number a token names, if it is an alias this build could have
+/// issued.
 ///
-/// A runtime test cannot check this without reading freed memory, which is
-/// undefined behaviour. Asserting the trait bound is the strongest honest
-/// guarantee available, and it fails the build if the derive is ever removed.
-const _: () = {
-    const fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-    assert_zeroize_on_drop::<ProjectKey>();
-};
-
-/// Alias readability, traded against protection — SDD §6.2.
+/// Matched against the known prefixes rather than a shape, which is what makes
+/// the grammar precise instead of heuristic: `MAX_RETRIES` and `HTTP_200` are
+/// not aliases and never were, but the old `[A-Z][A-Za-z0-9_]*_[A-Z0-9]{3,8}`
+/// rule had to carry a "contains a digit" clause to say so. `HTTP` is simply not
+/// a prefix.
 ///
-/// Fixed at project creation; changing it requires a re-key (SDD §9.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AliasStyle {
-    /// `SERVICE_H7K2Q3` — maximum protection, weakest AI output quality.
-    Opaque,
-    /// `PrimaryService_H7K2Q3` — retains a generic category, hides the subject.
-    #[default]
-    Typed,
-    /// `AuroraService` — most readable, weakest protection.
-    Pseudonymous,
-}
+/// The longest matching prefix wins, so `ENV_VAR_004` is an env var and not the
+/// environment `ENV` followed by nonsense.
+#[must_use]
+pub fn parse(token: &str) -> Option<(EntityType, u32)> {
+    let mut best: Option<(EntityType, u32)> = None;
 
-/// Derive the alias for an identity — SDD §6.1.
-///
-/// Deterministic in `(key, identity, style)`: the same inputs always produce the
-/// same alias, on any machine. `disambiguator` is `None` for the common case and
-/// `Some(n)` when the caller has hit a collision against the vault's `ux_alias`
-/// index, yielding `SERVICE_H7K2Q3_2`.
-pub fn derive(key: &ProjectKey, identity: &IdentityKey, style: AliasStyle, disambiguator: Option<u32>) -> String {
-    derive_in_concept(key, identity, style, disambiguator, None)
-}
-
-/// Derive an alias whose suffix comes from a confirmed concept rather than the
-/// identity — SDD §5, cross-artifact unification.
-///
-/// The SQL table `customer_subscription` and the OpenAPI schema
-/// `CustomerSubscription` are one concept in two artifacts. Giving them one
-/// alias is impossible: `ux_alias` maps an alias to a single real name, so
-/// restoring it would return the wrong surface form to one of the two files and
-/// break `restore(sanitize(x)) == x`.
-///
-/// Sharing the *suffix* achieves what unification is for without that cost:
-/// `DB_TABLE_H7K2Q3` and `DTO_H7K2Q3` are visibly the same thing to a reader and
-/// to a model, and they restore unambiguously because they are still distinct.
-pub fn derive_in_concept(
-    key: &ProjectKey,
-    identity: &IdentityKey,
-    style: AliasStyle,
-    disambiguator: Option<u32>,
-    concept: Option<&str>,
-) -> String {
-    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
-    match concept {
-        Some(concept) => mac.update(format!("concept:{concept}").as_bytes()),
-        None => mac.update(identity.hmac_input().as_bytes()),
-    }
-    let digest = mac.finalize().into_bytes();
-
-    let encoded = CROCKFORD.encode(&digest);
-    let suffix = digit_bearing_window(&encoded);
-    let entity_type = identity.entity_type;
-
-    let stem = match style {
-        AliasStyle::Opaque => format!("{}_{suffix}", entity_type.prefix()),
-        AliasStyle::Typed => format!("{}{}_{suffix}", qualifier(suffix), entity_type.category()),
-        AliasStyle::Pseudonymous => format!("{}{}", pseudonym(suffix), entity_type.category()),
-    };
-
-    match disambiguator {
-        Some(n) => format!("{stem}_{n}"),
-        None => stem,
-    }
-}
-
-/// First `SUFFIX_LEN`-character window of the encoded digest containing at least
-/// one digit.
-///
-/// The digit is what separates an alias from an ordinary `SCREAMING_SNAKE`
-/// constant: without it, `MAX_RETRIES` parses as a perfectly good alias and
-/// every constant in the model's output would be reported as an unresolved
-/// identity. Roughly 11% of raw windows are all-letters, so scanning forward
-/// costs nothing and keeps derivation deterministic.
-fn digit_bearing_window(encoded: &str) -> &str {
-    let bytes = encoded.as_bytes();
-    for start in 0..=bytes.len().saturating_sub(SUFFIX_LEN) {
-        let window = &encoded[start..start + SUFFIX_LEN];
-        if window.bytes().any(|b| b.is_ascii_digit()) {
-            return window;
+    for entity_type in EntityType::ALL {
+        let prefix = entity_type.prefix();
+        let Some(rest) = token.strip_prefix(prefix).and_then(|r| r.strip_prefix('_')) else {
+            continue;
+        };
+        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(number) = rest.parse::<u32>() else {
+            continue;
+        };
+        if best.is_none_or(|(current, _)| prefix.len() > current.prefix().len()) {
+            best = Some((entity_type, number));
         }
     }
-    // A 52-character base32 digest with no digit anywhere is not reachable in
-    // practice, but the fallback keeps the function total.
-    &encoded[..SUFFIX_LEN]
-}
-
-/// Deterministic generic qualifier for [`AliasStyle::Typed`].
-///
-/// Deliberately drawn from a bland, non-identifying word list: the point of
-/// typed mode is to give the model *a* category hint without disclosing the
-/// subject.
-fn qualifier(suffix: &str) -> &'static str {
-    const WORDS: [&str; 8] = [
-        "Primary",
-        "Secondary",
-        "Internal",
-        "External",
-        "Upstream",
-        "Downstream",
-        "Shared",
-        "Core",
-    ];
-    WORDS[pick(suffix, WORDS.len())]
-}
-
-/// Deterministic neutral name for [`AliasStyle::Pseudonymous`].
-fn pseudonym(suffix: &str) -> &'static str {
-    const NAMES: [&str; 12] = [
-        "Aurora", "Basalt", "Cobalt", "Dahlia", "Ember", "Fjord", "Garnet", "Harbor", "Indigo", "Juniper", "Kestrel",
-        "Lumen",
-    ];
-    NAMES[pick(suffix, NAMES.len())]
-}
-
-/// Stable index into a word list, derived from the already-hashed suffix.
-fn pick(suffix: &str, len: usize) -> usize {
-    suffix.bytes().fold(0_usize, |acc, b| acc.wrapping_add(b as usize)) % len
+    best
 }
 
 /// Does this token look like an alias? — SDD §6.3.
 ///
 /// ```text
-/// alias  := prefix "_" suffix [ "_" disambiguator ]
-/// prefix := [A-Z] [A-Za-z0-9_]*        // underscores allowed: DB_TABLE
-/// suffix := [A-Z0-9]{3,8}              // must contain at least one digit
-/// disambiguator := [0-9]+
+/// alias  := prefix "_" number
+/// prefix := one of the fourteen in `EntityType::prefix`
+/// number := [0-9]+
 /// ```
-///
-/// Hand-parsed rather than regex-matched because the digit rule and the
-/// rightmost-underscore split are both awkward to express as one pattern, and
-/// this is on the hot path of every restore.
 ///
 /// Used by the restore engine to decide what is worth looking up, and to
 /// classify unknown alias-shaped tokens as unresolved identities (SDD §12)
 /// rather than silently ignoring them.
+#[must_use]
 pub fn is_alias_shaped(token: &str) -> bool {
-    let stem = strip_disambiguator(token);
-
-    let Some((prefix, suffix)) = stem.rsplit_once('_') else {
-        return false;
-    };
-
-    prefix_is_valid(prefix) && suffix_is_valid(suffix)
-}
-
-/// Remove a trailing `_<digits>` collision suffix, but only when what precedes
-/// it is itself a plausible `prefix_suffix` pair — otherwise `SERVICE_014`
-/// would have its own suffix stripped.
-fn strip_disambiguator(token: &str) -> &str {
-    match token.rsplit_once('_') {
-        Some((stem, tail)) if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) && stem.contains('_') => {
-            stem
-        }
-        _ => token,
-    }
-}
-
-fn prefix_is_valid(prefix: &str) -> bool {
-    let mut chars = prefix.chars();
-    chars.next().is_some_and(|c| c.is_ascii_uppercase()) && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-fn suffix_is_valid(suffix: &str) -> bool {
-    (3..=8).contains(&suffix.len())
-        && suffix.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
-        && suffix.bytes().any(|b| b.is_ascii_digit())
+    parse(token).is_some()
 }
 
 /// Canonical form for drift-tolerant matching — SDD §6.4.
@@ -311,123 +151,105 @@ fn strip_leading_zeros(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::EntityType;
 
-    fn key() -> ProjectKey {
-        ProjectKey::from_bytes([7; 32])
-    }
-
-    fn ident(name: &str) -> IdentityKey {
-        IdentityKey::new("src/services", EntityType::Service, name)
+    #[test]
+    fn an_alias_is_a_prefix_and_a_padded_number() {
+        // PRD §13, verbatim. The zero padding is what keeps a review table from
+        // jumping a column width between the ninth and the tenth organization.
+        assert_eq!(format_alias(EntityType::Organization, 1), "ORG_001");
+        assert_eq!(format_alias(EntityType::Product, 1), "PRODUCT_001");
+        assert_eq!(format_alias(EntityType::PaymentProvider, 1), "PAYMENT_PROVIDER_001");
+        assert_eq!(format_alias(EntityType::Domain, 42), "DOMAIN_042");
     }
 
     #[test]
-    fn derivation_is_deterministic() {
-        let a = derive(&key(), &ident("CustomerService"), AliasStyle::Opaque, None);
-        let b = derive(&key(), &ident("CustomerService"), AliasStyle::Opaque, None);
-        assert_eq!(a, b);
+    fn padding_is_a_minimum_and_not_a_ceiling() {
+        // A project with a thousand organizations is unusual, not unsupported.
+        assert_eq!(format_alias(EntityType::Organization, 1000), "ORG_1000");
     }
 
     #[test]
-    fn different_scopes_yield_different_aliases() {
-        // The Design Review B1 case: same name, different module.
-        let a = IdentityKey::new("mod/a", EntityType::Enum, "Status");
-        let b = IdentityKey::new("mod/b", EntityType::Enum, "Status");
-        assert_ne!(
-            derive(&key(), &a, AliasStyle::Opaque, None),
-            derive(&key(), &b, AliasStyle::Opaque, None)
-        );
-    }
-
-    #[test]
-    fn different_project_keys_yield_different_aliases() {
-        let other = ProjectKey::from_bytes([9; 32]);
-        assert_ne!(
-            derive(&key(), &ident("CustomerService"), AliasStyle::Opaque, None),
-            derive(&other, &ident("CustomerService"), AliasStyle::Opaque, None)
-        );
-    }
-
-    #[test]
-    fn every_machine_readable_style_and_type_produces_a_grammatical_alias() {
-        for t in EntityType::ALL {
-            for style in [AliasStyle::Opaque, AliasStyle::Typed] {
-                let id = IdentityKey::new("scope", t, "Thing");
-                let alias = derive(&key(), &id, style, None);
-                assert!(is_alias_shaped(&alias), "{style:?}/{t:?} produced {alias}");
+    fn every_alias_this_build_can_issue_parses_back() {
+        // The round trip the restore engine depends on. A type whose prefix
+        // cannot be read back is a type whose aliases nobody can resolve.
+        for entity_type in EntityType::ALL {
+            for number in [1, 7, 99, 100, 12345] {
+                let alias = format_alias(entity_type, number);
+                assert_eq!(
+                    parse(&alias),
+                    Some((entity_type, number)),
+                    "{alias} must read back as what wrote it"
+                );
+                assert!(is_alias_shaped(&alias));
             }
         }
     }
 
     #[test]
-    fn pseudonymous_style_is_intentionally_outside_the_machine_grammar() {
-        // It trades matchability for readability; restore resolves it by exact
-        // vault lookup rather than by shape.
-        let alias = derive(&key(), &ident("A"), AliasStyle::Pseudonymous, None);
-        assert!(!is_alias_shaped(&alias), "{alias}");
+    fn the_longest_matching_prefix_wins() {
+        // `ENV_VAR` and `ENV` are both prefixes, and one is a prefix of the
+        // other. Without the longest-match rule an env var would read as an
+        // environment followed by nonsense, and restore would hand back the
+        // wrong name.
+        assert_eq!(parse("ENV_VAR_004"), Some((EntityType::EnvVar, 4)));
+        assert_eq!(parse("ENV_004"), Some((EntityType::Environment, 4)));
     }
 
     #[test]
-    fn disambiguator_is_grammatical() {
-        let alias = derive(&key(), &ident("A"), AliasStyle::Opaque, Some(2));
-        assert!(alias.ends_with("_2"), "{alias}");
-        assert!(is_alias_shaped(&alias), "{alias}");
-    }
-
-    #[test]
-    fn underscored_prefixes_are_grammatical() {
-        // DB_TABLE is a prefix in SDD §4.4, so the prefix production must admit
-        // underscores.
-        assert!(is_alias_shaped("DB_TABLE_H7K2Q3"));
-    }
-
-    #[test]
-    fn screaming_snake_constants_are_not_mistaken_for_aliases() {
-        // Without the digit rule every constant in AI output would be reported
-        // as an unresolved identity, drowning the real ones.
-        for token in ["MAX_RETRIES", "DEFAULT_TIMEOUT", "HTTP_OK", "API_BASE_URL"] {
-            assert!(!is_alias_shaped(token), "{token} should not look like an alias");
-        }
-    }
-
-    #[test]
-    fn alias_shape_rejects_ordinary_identifiers() {
+    fn ordinary_constants_are_not_aliases() {
+        // Matching against the known prefixes is what makes this precise rather
+        // than heuristic. The old shape rule needed a "contains a digit" clause
+        // to keep `MAX_RETRIES` out; `MAX` is simply not a prefix.
         for token in [
-            "customerService",
-            "CustomerService",
-            "SERVICE",
-            "_014",
-            "SERVICE_",
-            "lower_case_1",
+            "MAX_RETRIES",
+            "HTTP_200",
+            "ORG",
+            "ORG_",
+            "ORG_00A",
+            "_001",
+            "org_001",
+            "ORGANIZATION_001",
+            "",
         ] {
-            assert!(!is_alias_shaped(token), "{token} should not look like an alias");
+            assert!(!is_alias_shaped(token), "{token} is not an alias");
         }
     }
 
     #[test]
-    fn canonical_collapses_observed_model_drift() {
-        let want = canonical("SERVICE_014");
-        for drifted in [
-            "Service014",
-            "service_014",
-            "SERVICE-014",
-            "Service_014",
-            "SERVICE_14",
-            "SERVICE_014s",
-            "`SERVICE_014`",
-        ] {
-            assert_eq!(canonical(drifted), want, "{drifted} should canonicalize to {want}");
+    fn an_alias_from_the_old_grammar_is_not_recognised() {
+        // Deliberate, and the reason schema v5 renumbers rather than tolerating
+        // both. Two grammars in one vault would leave the allocator unable to
+        // tell which numbers are taken.
+        assert!(!is_alias_shaped("ORG_H7K2Q3"));
+        assert!(!is_alias_shaped("PrimaryService_H7K2Q3"));
+    }
+
+    #[test]
+    fn canonical_collapses_the_ways_a_model_mangles_an_alias() {
+        let target = canonical("ORG_001");
+        for drifted in ["org_001", "Org-001", "ORG001", "ORG_1", "ORG_001s"] {
+            assert_eq!(canonical(drifted), target, "{drifted} must normalize onto ORG_001");
         }
     }
 
     #[test]
     fn canonical_keeps_distinct_aliases_distinct() {
-        assert_ne!(canonical("SERVICE_014"), canonical("SERVICE_015"));
-        assert_ne!(canonical("SERVICE_014"), canonical("DTO_014"));
+        assert_ne!(canonical("ORG_001"), canonical("ORG_002"));
+        assert_ne!(canonical("ORG_001"), canonical("PRODUCT_001"));
+        // A trailing S is only dropped after a digit, so a name that genuinely
+        // ends in one survives.
+        assert_ne!(canonical("PARTNERS_001"), canonical("PARTNER_001"));
     }
 
     #[test]
-    fn canonical_does_not_strip_a_meaningful_trailing_s() {
-        assert_eq!(canonical("STATUS"), "STATUS");
+    fn the_envelope_pattern_describes_what_is_issued() {
+        // The model is handed this regex (SDD §11). If it does not match a real
+        // alias, the instruction is worse than none.
+        let re = regex::Regex::new(ENVELOPE_PATTERN).expect("valid pattern");
+        for entity_type in EntityType::ALL {
+            let alias = format_alias(entity_type, 7);
+            assert!(re.is_match(&alias), "{alias} must match the envelope pattern");
+        }
+        assert!(!re.is_match("MAX_RETRIES"));
     }
 }

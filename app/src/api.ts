@@ -17,7 +17,18 @@ import { invoke } from "@tauri-apps/api/core";
  * dictionary is the only protection for a name no rule can recognise.
  */
 export type EntityType =
+  // Identity — aliased by default. PRD §7, *Neutralize Identity*.
   | "ORG"
+  | "PRODUCT"
+  | "BRAND"
+  | "PARTNER"
+  | "PAYMENT_PROVIDER"
+  | "PERSON"
+  | "TENANT"
+  | "ENV"
+  | "DOMAIN"
+  // Structure — left readable so an agent can work on it. PRD §7,
+  // *Preserve Structure*. Naming one here is how you override that.
   | "SERVICE"
   | "API"
   | "ENDPOINT"
@@ -28,13 +39,11 @@ export type EntityType =
   | "ENUM"
   | "EVENT"
   | "INDEX"
-  | "ENV"
-  | "HOST"
+  | "ENV_VAR"
   | "PATH";
 
 export interface ProjectInfo {
   name: string;
-  alias_style: string;
   identity_count: number;
   term_count: number;
   /** Present when the project sits in a cloud-sync tree (PRD §10). */
@@ -295,8 +304,8 @@ export interface AuditRow {
 }
 
 export const api = {
-  createProject: (path: string, passphrase: string, aliasStyle: string) =>
-    invoke<ProjectInfo>("create_project", { path, passphrase, aliasStyle }),
+  createProject: (path: string, passphrase: string) =>
+    invoke<ProjectInfo>("create_project", { path, passphrase }),
 
   openProject: (path: string, passphrase: string) =>
     invoke<ProjectInfo>("open_project", { path, passphrase }),

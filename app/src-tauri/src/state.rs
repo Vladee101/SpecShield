@@ -98,9 +98,7 @@ mod tests {
             let settings = vault::Settings {
                 project_name: "test".to_owned(),
                 root_path: root.display().to_string(),
-                alias_style: "opaque".to_owned(),
                 scope_strategy: "module".to_owned(),
-                project_key: [1; 32],
             };
             vault::Vault::create(&vault_path(&root), "pw", &settings).expect("create vault");
             Self(root)
