@@ -757,8 +757,11 @@ export class S {}
             specshield_core::alias::ProjectKey::from_bytes([7u8; 32]),
             specshield_core::alias::AliasStyle::Opaque,
         );
+        // Confirmed: a DTO is not aliased on its own any more (PRD §4.1), and
+        // the property under test is that one name yields one alias — which
+        // only has something to say when the name is aliased at all.
         let d = specshield_core::detect::Detector::new()
-            .with_term("CustomerSubscription", specshield_core::model::EntityType::Dto);
+            .with_confirmed_term("CustomerSubscription", specshield_core::model::EntityType::Dto);
         let parser = crate::for_document(std::path::Path::new("s.ts"), source).unwrap();
         let out = specshield_core::sanitize::sanitize(
             source,

@@ -24,7 +24,12 @@ impl Fixture {
         std::fs::create_dir_all(root.join("src")).unwrap();
 
         let fixture = Self { root };
-        Vault::create(&fixture.vault_path(), "pw", &fixture.settings()).unwrap();
+        let vault = Vault::create(&fixture.vault_path(), "pw", &fixture.settings()).unwrap();
+        // Named, because a DTO is not aliased on its own any more (PRD §4.1).
+        // These tests are about the occurrence and redaction tables, and both
+        // need something actually aliased to record.
+        vault.add_term("CustomerInvoice", "DTO").unwrap();
+        drop(vault);
         fixture
     }
 

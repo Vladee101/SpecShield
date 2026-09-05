@@ -92,15 +92,19 @@ struct Score {
     /// Labelled occurrences nothing detected — the leaks, in other words.
     missed: Vec<(String, String, usize)>,
     /// Labelled occurrences of names that are a single ordinary word, which the
-    /// detector now leaves alone on purpose — PRD §4 and `core::words`.
-    ///
-    /// Counted apart from `expected` rather than deleted from the corpus. They
-    /// *are* the user's names: a table called `invoice` in a proprietary billing
-    /// schema is proprietary, and the product no longer hides it. Scoring them
-    /// as misses would make the headline number meaningless; dropping the labels
-    /// would hide what the relaxation cost. So they are reported beside it.
+    /// detector leaves alone on purpose — PRD §4.2 and `core::words`.
     ordinary: usize,
     ordinary_detected: usize,
+    /// Labelled occurrences of names that describe **what was built** rather
+    /// than **who built it** — PRD §4.1. Left in the twin on purpose, so an
+    /// agent can read the architecture it is being asked to work on.
+    ///
+    /// Counted apart from `expected` rather than deleted from the corpus. They
+    /// are still the user's names, and `specshield term` still hides any of them
+    /// on request — so what the corpus records is a *default*, and the number
+    /// here is what that default costs. Scoring them as misses would make the
+    /// headline meaningless; deleting the labels would hide the trade.
+    structural: usize,
 }
 
 impl Score {
@@ -216,6 +220,7 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
             gated.false_positives += dict.false_positives;
             gated.ordinary += dict.ordinary;
             gated.ordinary_detected += dict.ordinary_detected;
+            gated.structural += dict.structural;
         }
     }
 
@@ -227,22 +232,30 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
         gated.precision() * 100.0
     );
     println!();
-    if gated.ordinary > 0 {
-        // The cost of PRD §4, stated rather than assumed. These are labelled
-        // names the detector now leaves in the twin on purpose, because one
-        // ordinary word says nothing about who wrote it. A user who disagrees
-        // about any of them runs `specshield term` and gets it back.
-        println!(
-            "**{} labelled occurrence(s) are single ordinary words** and are left in the twin",
-            gated.ordinary
-        );
-        println!(
-            "deliberately (PRD §4) — `invoice`, `status`, `account`. {} of them were aliased",
-            gated.ordinary_detected
-        );
-        println!("anyway, because something else in the project confirmed the name.");
-        println!();
-    }
+    // The cost of PRD §4, stated rather than assumed. Both numbers are labelled
+    // names that reach the model on purpose, and both are recoverable with one
+    // `specshield term`.
+    println!(
+        "Recall above is over the **{} identity occurrence(s)** SpecShield hides by default —",
+        gated.expected
+    );
+    println!("organizations and hosts. Two other buckets are labelled and deliberately left in");
+    println!("the twin:");
+    println!();
+    println!(
+        "- **{} structural occurrence(s)** — what was *built*: DTOs, tables, columns, services.",
+        gated.structural
+    );
+    println!("  An agent that cannot read your architecture cannot help you extend it (PRD §4.1).");
+    println!(
+        "- **{} ordinary-word occurrence(s)** — an org or host whose name is a common word.",
+        gated.ordinary
+    );
+    println!();
+    println!("`specshield term <name>` moves any of them back. The corpus is thin on identity");
+    println!("fixtures precisely because it was built for the old scope — that is the gap to");
+    println!("close next, not the recall number.");
+    println!();
     println!("Ungated projects are reported for visibility but excluded from the");
     println!("verdict: their formats have no parser in this build, so their numbers");
     println!("measure the missing milestone rather than detection quality.");
@@ -318,22 +331,8 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
     }
 
     let mut score = Score::default();
-    let mut expected_spans: HashSet<(String, usize, usize)> = HashSet::new();
-    for entity in &labels.entities {
-        for occ in &entity.occurrences {
-            expected_spans.insert((occ.file.clone(), occ.byte_start, occ.byte_end));
-        }
-    }
-    // Recall is measured over the names the product still claims to catch:
-    // compounds, and single words nobody else uses. Single ordinary words are
-    // counted separately in `ordinary` — see `Score`.
-    score.expected = labels
-        .entities
-        .iter()
-        .filter(|e| specshield_core::words::is_identifying(&e.real_name))
-        .flat_map(|e| e.occurrences.iter().map(|o| (o.file.clone(), o.byte_start, o.byte_end)))
-        .collect::<HashSet<_>>()
-        .len();
+    let (expected_spans, labelled_spans) = label_spans(labels);
+    score.expected = expected_spans.len();
 
     // The project's known members, as the vault would supply them after a scan.
     // Without this the TypeScript parser sees each file in isolation and misses
@@ -404,25 +403,96 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
             // The same second bar `sanitize` applies — without it this scores a
             // pipeline nobody runs, which is how the offset bug survived in CI
             // for as long as it did.
-            if !detector.is_worth_aliasing(&candidate.real_name) {
+            if !detector.should_alias(&candidate.real_name, candidate.entity_type) {
                 continue;
             }
             let key = (file.to_owned(), candidate.byte_start, candidate.byte_end);
             if expected_spans.contains(&key) {
-                score.detected += 1;
                 hit.insert(key);
-            } else {
-                score.false_positives += 1;
-                score
-                    .unexpected
-                    .push((file.to_owned(), candidate.real_name.clone(), candidate.byte_start));
+                continue;
             }
+
+            // A detection *inside* a labelled occurrence covers it. An identity
+            // is aliased inside the compound that names it, so `VANTOR` at
+            // offset 1330 of `VANTOR_BILLING_URL` is a narrower span than the
+            // label and the same disclosure: the company name does not reach the
+            // model. Scoring it as a false positive would have punished the
+            // capability the product now depends on, and scoring the label as
+            // missed would have claimed a leak that did not happen.
+            let inside = |spans: &HashSet<(String, usize, usize)>| {
+                spans
+                    .iter()
+                    .find(|(f, s, e)| f == file && candidate.byte_start >= *s && candidate.byte_end <= *e)
+                    .cloned()
+            };
+            if let Some(span) = inside(&expected_spans) {
+                hit.insert(span);
+                continue;
+            }
+            // Inside a labelled name the product does not claim. Not a hit, and
+            // not a mistake either.
+            if inside(&labelled_spans).is_some() {
+                continue;
+            }
+
+            score.false_positives += 1;
+            score
+                .unexpected
+                .push((file.to_owned(), candidate.real_name.clone(), candidate.byte_start));
         }
 
+        // Counted from the set, not incremented per detection: two detections
+        // can cover one labelled occurrence — the whole token and the identity
+        // inside it — and recall is *occurrences covered*, which cannot exceed
+        // the number of them. Incrementing produced 115%.
+        score.detected += hit.len();
         tally_labels(labels, file, &hit, &mut score);
     }
 
     score
+}
+
+/// The two span sets scoring needs, because recall and precision ask different
+/// questions.
+///
+/// The first is what recall is measured against: occurrences of the entities
+/// SpecShield claims to hide. The second is every occurrence the corpus records,
+/// and it exists so a detection *inside* a label is never scored as a false
+/// positive — the `VANTOR` in the env var `VANTOR_BILLING_URL` is an identity
+/// found inside a structural name, which is exactly right and belongs in neither
+/// the miss column nor the wrong one.
+type Spans = HashSet<(String, usize, usize)>;
+
+fn label_spans(labels: &Labels) -> (Spans, Spans) {
+    let mut expected = Spans::new();
+    let mut labelled = Spans::new();
+    for entity in &labels.entities {
+        for occ in &entity.occurrences {
+            let span = (occ.file.clone(), occ.byte_start, occ.byte_end);
+            if is_claimed(entity) {
+                expected.insert(span.clone());
+            }
+            labelled.insert(span);
+        }
+    }
+    (expected, labelled)
+}
+
+/// Does the label name an identity type — PRD §4.1?
+///
+/// The corpus writes the serde form of `EntityType`, so this is the same list as
+/// [`specshield_core::model::EntityType::is_identity`], reached through the same
+/// spelling the labels use.
+fn identity_type(label: &str) -> bool {
+    serde_json::from_value::<EntityType>(serde_json::Value::String(label.to_owned())).is_ok_and(EntityType::is_identity)
+}
+
+/// Is this an entity SpecShield claims to hide by default?
+///
+/// An identity that is also identifying on its own. An organization called
+/// `admin` is a word; a DTO called `CustomerSubscription` is architecture.
+fn is_claimed(entity: &Entity) -> bool {
+    identity_type(&entity.entity_type) && specshield_core::words::is_identifying(&entity.real_name)
 }
 
 /// Everything labelled in one file, against what was actually found.
@@ -439,18 +509,19 @@ fn tally_labels(labels: &Labels, file: &str, hit: &HashSet<(String, usize, usize
                     continue;
                 }
                 let found = hit.contains(&(file.to_owned(), occ.byte_start, occ.byte_end));
-                if specshield_core::words::is_identifying(&entity.real_name) {
+                if is_claimed(entity) {
                     if !found {
                         score
                             .missed
                             .push((file.to_owned(), entity.real_name.clone(), occ.byte_start));
                     }
-                } else {
-                    // A single ordinary word. Deliberately not aliased, so it is
-                    // not a miss — but it is a name that reaches the model, and
-                    // the report says how many.
+                } else if identity_type(&entity.entity_type) {
+                    // An organization or host that is a single ordinary word.
                     score.ordinary += 1;
                     score.ordinary_detected += usize::from(found);
+                } else {
+                    // What was built. Left readable on purpose.
+                    score.structural += 1;
                 }
             }
         }

@@ -131,7 +131,11 @@ fn verification_reports_a_result_for_every_sanitize() {
     let out = sanitize::sanitize(
         source,
         "a.md",
-        &Detector::new().with_term("CustomerService", EntityType::Service),
+        // Confirmed, because a service name is not aliased on its own any more
+        // — what you built stays readable (PRD §4.1). Naming it is how a team
+        // hides an internal service that really is sensitive, and this test
+        // needs *something* aliased to have a twin worth verifying.
+        &Detector::new().with_confirmed_term("CustomerService", EntityType::Service),
         &mut graph(),
         Some(parser.as_ref()),
         &ProjectContext::default(),

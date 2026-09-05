@@ -74,6 +74,41 @@ impl EntityType {
         }
     }
 
+    /// Does this kind of name say **who you are**, rather than what you built?
+    ///
+    /// The distinction the product turns on — PRD §4.1. An AI agent has to see
+    /// the architecture to work on it: a twin in which `CustomerSubscription` is
+    /// `CoreModel_8WFF40` and `chargeInvoice` is `SERVICE_QQ21XV` tells the
+    /// model nothing it can build on, and asking it to extend a system it cannot
+    /// read is the opposite of the point.
+    ///
+    /// What must not travel is the identity wrapped around that architecture:
+    /// the company, the client, the vendor, the host it runs on. Those are
+    /// aliased by default. Everything else is left in the clear unless the user
+    /// names it with `specshield term`, which promotes any name to an identity.
+    ///
+    /// Secrets are neither: they are redacted one-way and never enter the graph
+    /// (SDD §4.3).
+    pub const fn is_identity(self) -> bool {
+        match self {
+            // Who you are, who you work with, and where it runs.
+            Self::Organization | Self::Host => true,
+            // What you built. The model needs these.
+            Self::Service
+            | Self::Api
+            | Self::Endpoint
+            | Self::Table
+            | Self::Column
+            | Self::Dto
+            | Self::Interface
+            | Self::Enum
+            | Self::Event
+            | Self::Index
+            | Self::EnvVar
+            | Self::PathSegment => false,
+        }
+    }
+
     /// Every variant, for exhaustive iteration in tests and UI.
     pub const ALL: [Self; 14] = [
         Self::Organization,
@@ -264,6 +299,19 @@ mod tests {
         for k in OccurrenceKind::ALL {
             assert_eq!(k.as_str().parse::<OccurrenceKind>().unwrap(), k);
         }
+    }
+
+    #[test]
+    fn only_identity_types_are_aliased_by_default() {
+        // Pinned as a list rather than a rule, because it is a product
+        // decision and not a derivation: someone adding an entity type has to
+        // decide which side it falls on, and this test makes them.
+        let identity: Vec<&str> = EntityType::ALL
+            .into_iter()
+            .filter(|t| t.is_identity())
+            .map(EntityType::prefix)
+            .collect();
+        assert_eq!(identity, vec!["ORG", "HOST"]);
     }
 
     #[test]

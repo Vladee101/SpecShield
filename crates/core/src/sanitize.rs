@@ -337,16 +337,19 @@ pub fn sanitize(
     }
     candidates.sort_by_key(|c| c.byte_start);
 
-    // Two bars, and the second one is why a real project is usable at all.
-    // Confidence says the detector is sure *what* this is; `is_worth_aliasing`
-    // says it is worth hiding. `Node`, `data` and `status` fail the second no
-    // matter how certain the parser was — PRD §4 and `crate::words`.
+    // Two bars, and the second one is the product. Confidence says the detector
+    // is sure *what* this is; `should_alias` says it is worth hiding — which for
+    // anything but an organization or a host means the user asked for it by
+    // name (PRD §4.1).
     //
-    // They become suggestions rather than disappearing, so `specshield scan`
-    // still shows them and `specshield term` is one command away.
+    // Everything else becomes a suggestion rather than disappearing, so
+    // `specshield scan` still lists it and `specshield term` is one command
+    // away. The detector's work is not wasted; it just no longer decides.
     let (confident, mut suggestions): (Vec<_>, Vec<_>) = candidates
         .into_iter()
-        .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE && detector.is_worth_aliasing(&c.real_name));
+        .partition(|c| c.confidence >= AUTO_APPLY_CONFIDENCE && detector.should_alias(&c.real_name, c.entity_type));
+
+    let confident = identity_wins(confident);
 
     // 3-4. Intern each identity and plan an edit for it.
     let mut edits: Vec<Edit> = Vec::with_capacity(confident.len());
@@ -425,6 +428,26 @@ pub fn sanitize(
             verification,
         })
     }
+}
+
+/// Drop candidates that overlap one already accepted, identity first.
+///
+/// Two can now cover the same bytes: `VANTOR_BILLING_URL` as an env var and the
+/// `VANTOR` inside it as an organization. Only one can be edited, and it is the
+/// identity — hiding who you are is the point, and the env var name is not
+/// aliased at all unless the user asked for it by name.
+fn identity_wins(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut accepted: Vec<(usize, usize)> = Vec::new();
+    let mut out = candidates;
+    out.sort_by_key(|c| (c.byte_start, !c.entity_type.is_identity()));
+    out.retain(|c| {
+        if accepted.iter().any(|(s, e)| c.byte_start < *e && *s < c.byte_end) {
+            return false;
+        }
+        accepted.push((c.byte_start, c.byte_end));
+        true
+    });
+    out
 }
 
 /// Compare the structure of `before` and `after` — SDD §7.2.
@@ -640,6 +663,74 @@ mod tests {
 
         assert_ne!(a.applied[0].alias, b.applied[0].alias, "Design Review B1");
         assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn what_you_built_stays_readable() {
+        // The product, in one assertion. An agent asked to extend this code has
+        // to be able to read it; a twin in which the domain model is opaque
+        // tells it nothing to build on.
+        let mut g = graph();
+        let d = Detector::new()
+            .with_term("Vantor", EntityType::Organization)
+            .with_term("CustomerSubscription", EntityType::Dto)
+            .with_term("chargeInvoice", EntityType::Service);
+        let source = "Vantor bills through CustomerSubscription and chargeInvoice.";
+        let out = sanitize(source, "project", &d, &mut g, None, &ProjectContext::default()).unwrap();
+
+        assert!(out.twin.contains("CustomerSubscription"), "{}", out.twin);
+        assert!(out.twin.contains("chargeInvoice"), "{}", out.twin);
+        assert!(!out.twin.contains("Vantor"), "who you are still goes: {}", out.twin);
+    }
+
+    #[test]
+    fn an_identity_inside_a_compound_is_replaced_in_place() {
+        // The half that makes the claim true. `VantorBillingService` says who
+        // you are *and* what you built; aliasing the whole token would hide the
+        // architecture, and aliasing none of it would publish the company.
+        let mut g = graph();
+        let d = Detector::new().with_term("Vantor", EntityType::Organization);
+        let source = "class VantorBillingService {}
+const vantor_invoice = 1;
+";
+        let out = sanitize(source, "project", &d, &mut g, None, &ProjectContext::default()).unwrap();
+
+        assert!(!out.twin.contains("Vantor"), "{}", out.twin);
+        assert!(!out.twin.contains("vantor"), "{}", out.twin);
+        assert!(out.twin.contains("BillingService"), "the shape survives: {}", out.twin);
+        assert!(out.twin.contains("_invoice"), "so does this one: {}", out.twin);
+
+        // And it comes back, or hiding it was worse than useless.
+        let restored = restore(&out.twin, &Vocabulary::new(g.vocabulary()));
+        assert_eq!(restored.text, source);
+    }
+
+    #[test]
+    fn a_word_inside_a_word_is_not_an_identity() {
+        // The rule that keeps the pass above from being a substring match: a
+        // match has to start at a word boundary or a camelCase hump.
+        let mut g = graph();
+        let d = Detector::new().with_term("Vantor", EntityType::Organization);
+        let out = sanitize("advantorous", "project", &d, &mut g, None, &ProjectContext::default()).unwrap();
+        assert_eq!(out.twin, "advantorous");
+    }
+
+    #[test]
+    fn a_structural_name_the_user_confirms_is_still_aliased() {
+        // The escape hatch has to reach the structural side too, or a team with
+        // a genuinely secret internal service has no way to hide it.
+        let mut g = graph();
+        let d = Detector::new().with_confirmed_term("CustomerSubscription", EntityType::Dto);
+        let out = sanitize(
+            "the CustomerSubscription model",
+            "project",
+            &d,
+            &mut g,
+            None,
+            &ProjectContext::default(),
+        )
+        .unwrap();
+        assert!(!out.twin.contains("CustomerSubscription"), "{}", out.twin);
     }
 
     #[test]

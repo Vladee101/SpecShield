@@ -107,6 +107,13 @@ const APPENDED_AFFIXES: &[&str] = &[
 pub struct Vocabulary {
     exact: HashMap<String, String>,
     canonical: HashMap<String, String>,
+    /// Aliases sorted longest-first, for finding one *inside* a token.
+    ///
+    /// An identity is aliased inside the compound that names it, so a twin
+    /// holds `ORG_H7K2Q3BillingService` — one token, resolvable only in part.
+    /// Longest-first because `JuniperOrg` and `JuniperOrgClient` could both be
+    /// issued and the shorter one must not win.
+    embedded: Vec<String>,
 }
 
 impl Vocabulary {
@@ -140,13 +147,43 @@ impl Vocabulary {
             exact.insert(alias, real);
         }
 
+        let mut embedded: Vec<String> = exact.keys().cloned().collect();
+        embedded.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+
         Self {
             exact,
             canonical: canonical_map
                 .into_iter()
                 .filter_map(|(k, v)| v.map(|real| (k, real)))
                 .collect(),
+            embedded,
         }
+    }
+
+    /// Aliases found *within* `token`, as non-overlapping `(offset, len)` pairs
+    /// in order.
+    ///
+    /// Looked up against the aliases this vault actually issued rather than
+    /// against the alias grammar, because the grammar is not one shape: the
+    /// pseudonymous style produces `JuniperOrg`, which no `PREFIX_SUFFIX` rule
+    /// would recognise. Matching what was issued works for all three styles and
+    /// cannot invent a match.
+    #[must_use]
+    pub fn embedded_in(&self, token: &str) -> Vec<(usize, usize)> {
+        let mut spans: Vec<(usize, usize)> = Vec::new();
+        for alias in &self.embedded {
+            let mut from = 0;
+            while let Some(offset) = token[from..].find(alias.as_str()) {
+                let at = from + offset;
+                let span = (at, alias.len());
+                if !spans.iter().any(|(s, l)| at < s + l && *s < at + alias.len()) {
+                    spans.push(span);
+                }
+                from = at + 1;
+            }
+        }
+        spans.sort_unstable();
+        spans
     }
 
     pub fn len(&self) -> usize {
@@ -203,6 +240,32 @@ pub fn restore(input: &str, vocabulary: &Vocabulary) -> Outcome {
                 byte_end: end,
                 line: line_of(input, start),
             });
+        } else {
+            // The token is not an alias, but it may *contain* one. An identity
+            // is aliased inside the compound that wraps it, so a twin holds
+            // `ORG_H7K2Q3BillingService` — one token, resolvable only in part.
+            // Without this the round trip loses the company name it just hid,
+            // which is worse than never hiding it.
+            //
+            // Matched against the aliases this vault issued, not against the
+            // alias grammar — the pseudonymous style produces `JuniperOrg`,
+            // which no `PREFIX_SUFFIX` rule would recognise.
+            for (offset, len) in vocabulary.embedded_in(token) {
+                let (from, to) = (start + offset, start + offset + len);
+                let embedded = &input[from..to];
+                if let Some((real, match_kind)) = vocabulary.resolve(embedded) {
+                    outcome.restored.push(Restored {
+                        alias: embedded.to_owned(),
+                        found: embedded.to_owned(),
+                        real_name: real.to_owned(),
+                        match_kind,
+                        byte_start: from,
+                        byte_end: to,
+                        line: line_of(input, from),
+                    });
+                    edits.push(Edit::new(from, to, real, None));
+                }
+            }
         }
     }
 

@@ -322,12 +322,22 @@ impl Detector {
 
     /// Should this name be aliased at all? — PRD §4.
     ///
-    /// A name a person confirmed always is. Otherwise it has to be identifying
-    /// on its own: see [`crate::words::is_identifying`] for why one ordinary
-    /// word is not.
+    /// Three questions in order, and the order is the product:
+    ///
+    /// 1. **Did a person name it?** Then it is theirs, whatever it is. This is
+    ///    how a service or a table gets hidden when it really does need to be.
+    /// 2. **Does it say who you are?** Only [`EntityType::is_identity`] types —
+    ///    organizations and hosts — are aliased on their own. What you *built*
+    ///    stays legible, because a model that cannot read your architecture
+    ///    cannot help you extend it.
+    /// 3. **Is it identifying at all?** A host called `localhost` or an org
+    ///    called `admin` is a word, not an identity — see [`crate::words`].
     #[must_use]
-    pub fn is_worth_aliasing(&self, name: &str) -> bool {
-        self.is_confirmed(name) || crate::words::is_identifying(name)
+    pub fn should_alias(&self, name: &str, entity_type: EntityType) -> bool {
+        if self.is_confirmed(name) {
+            return true;
+        }
+        entity_type.is_identity() && crate::words::is_identifying(name)
     }
 
     /// Case-insensitively, matching the export gate — see
@@ -348,8 +358,30 @@ impl Detector {
         let mut found: Vec<Candidate> = Vec::new();
         let mut claimed: Vec<(usize, usize)> = Vec::new();
 
+        // An identity is refused only by another identity. A *structural* claim
+        // must not suppress one, because the structural name is usually the
+        // thing wrapped around it: the `VANTOR_BILLING_URL` rule matched the
+        // whole env var, claimed the span, and hid the `VANTOR` inside it — so
+        // the company name went into the twin under a name the product does not
+        // alias any more. Found by the round-trip property test, on the input
+        // `Vantor VANTOR_BILLING_URL`.
+        //
+        // The two candidates then overlap, which is fine: only one of them is
+        // aliased, and `sanitize` drops the loser before planning edits.
         let push = |cand: Candidate, claimed: &mut Vec<(usize, usize)>, found: &mut Vec<Candidate>| {
-            if claimed.iter().any(|(s, e)| cand.byte_start < *e && *s < cand.byte_end) {
+            let hits = |spans: &[(usize, usize)]| spans.iter().any(|(s, e)| cand.byte_start < *e && *s < cand.byte_end);
+            if cand.entity_type.is_identity() {
+                let identities: Vec<(usize, usize)> = found
+                    .iter()
+                    .filter(|c| c.entity_type.is_identity())
+                    .map(|c| (c.byte_start, c.byte_end))
+                    .collect();
+                // Output of this pipeline is still off limits, or an alias gets
+                // aliased again.
+                if hits(&identities) || hits(&protected_regions(text)) {
+                    return;
+                }
+            } else if hits(claimed) {
                 return;
             }
             claimed.push((cand.byte_start, cand.byte_end));
@@ -369,12 +401,19 @@ impl Detector {
         // 1. Dictionary — highest confidence, claims spans first.
         if !self.dictionary.is_empty() {
             for m in self.matcher().find_iter(text) {
-                // The automaton matches substrings; an entity is a whole token.
-                // `plan` inside `planning` is not the term.
-                if !is_whole_token(text, m.start(), m.end()) {
+                let (term, entity_type) = &self.dictionary[m.pattern().as_usize()];
+                // The automaton matches substrings. A structural name is a whole
+                // token — `plan` inside `planning` is not the term. An identity
+                // is also caught inside a compound, because that is where a
+                // company name usually sits: `VantorBillingService`.
+                let bounded = if entity_type.is_identity() {
+                    is_subword(text, m.start(), m.end())
+                } else {
+                    is_whole_token(text, m.start(), m.end())
+                };
+                if !bounded {
                     continue;
                 }
-                let (term, entity_type) = &self.dictionary[m.pattern().as_usize()];
 
                 // The allowlist wins over the dictionary — PRD FR-10 says the
                 // user may mark *any* term never-alias, with no carve-out for
@@ -490,14 +529,26 @@ impl Detector {
         if !self.dictionary.is_empty() {
             let (automaton, types) = self.variant_matcher();
             for m in automaton.find_iter(text) {
-                if !is_whole_token(text, m.start(), m.end()) {
+                // An identity is caught inside the compound that wraps it, so
+                // `VantorBillingService` becomes `<org>BillingService` — the
+                // company hidden, the architecture still readable. That is the
+                // whole shape of the product (PRD §4.1), and it only applies to
+                // identity types: hunting for a *structural* name inside every
+                // identifier would be noise, and those are not aliased anyway.
+                let entity_type = types[m.pattern().as_usize()];
+                let bounded = if entity_type.is_identity() {
+                    is_subword(text, m.start(), m.end())
+                } else {
+                    is_whole_token(text, m.start(), m.end())
+                };
+                if !bounded {
                     continue;
                 }
                 push(
                     Candidate {
                         // The exact surface text, so restore is lossless.
                         real_name: text[m.start()..m.end()].to_owned(),
-                        entity_type: types[m.pattern().as_usize()],
+                        entity_type,
                         scope_path: scope.to_owned(),
                         byte_start: m.start(),
                         byte_end: m.end(),
@@ -614,6 +665,38 @@ fn is_sentence_noise(phrase: &str, text: &str, start: usize) -> bool {
 pub fn is_whole_token(text: &str, start: usize, end: usize) -> bool {
     let boundary = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric() && c != '_');
     boundary(text[..start].chars().next_back()) && boundary(text[end..].chars().next())
+}
+
+/// Does `[start, end)` sit on the boundaries of a *word within an identifier*?
+///
+/// Looser than [`is_whole_token`], and deliberately: an identity has to be
+/// caught inside the compound that wraps it. `VantorBillingService` and
+/// `vantor_invoice` both say who you are, and a rule that only fires on the bare
+/// token `Vantor` misses the two forms it actually appears in — which, once the
+/// product stopped aliasing what you *built*, became the only forms that matter.
+///
+/// A boundary is the start or end of the text, a non-alphanumeric character, or
+/// a camelCase hump. The hump test is what keeps this from being a substring
+/// match: `api` inside `rapid` starts mid-word with no case change and is
+/// refused, while the `Vantor` of `getVantorClient` is not.
+#[must_use]
+pub fn is_subword(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let matched_first = text[start..end].chars().next();
+    let after = text[end..].chars().next();
+
+    let opens = match (before, matched_first) {
+        (None, _) => true,
+        (Some(b), _) if !b.is_alphanumeric() => true,
+        // `getVantor` — a capital after something that is not one.
+        (Some(b), Some(f)) => f.is_uppercase() && !b.is_uppercase(),
+        _ => false,
+    };
+    let closes = match after {
+        None => true,
+        Some(a) => !a.is_alphanumeric() || a.is_uppercase(),
+    };
+    opens && closes
 }
 
 pub fn whole_token_spans(text: &str, needle: &str) -> Vec<(usize, usize)> {
