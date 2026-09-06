@@ -410,7 +410,7 @@ enum Command {
     },
 }
 
-/// The identity and structure categories a user can name — PRD §3, §13.
+/// The identity and structure categories a user can name — PRD §7, §13.
 ///
 /// Kept in step with `EntityType` by a test: a type the engine knows and the
 /// command line cannot name is a type nobody can use.

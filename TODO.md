@@ -17,12 +17,18 @@ output back to real names. Local-first desktop app; nothing goes to a server.
 
 | Document | What it settles |
 |---|---|
-| `Product Requirements Document (PRD).md` | Threat model (§4), success metrics (§5), FRs (§9) |
+| `Product Requirements Document (PRD).md` | What is protected (§4), success metrics (§5), principles (§7), FRs (§9), alias rules (§13) |
 | `Software Design Document (SDD).md` | Architecture, alias grammar (§6), vault schema (§9.1), gate (§8) |
 | `Design Review (PRD + SDD).md` | Why the v1.1 specs say what they say — findings A1–E |
 | `Implementation Plan.md` | Milestones M0–M6, decisions D-1…D-9, current status |
 
 When code and docs disagree, that is a bug in one of them. Say which.
+
+**There is one PRD.** `SpecShield (PRD) Revised.md` was a separate v2.0 document
+and is folded into the PRD above; its change log records what it changed and
+where its FR numbers went. The revision governs scope and principle, and v1.1's
+engineering requirements survive wherever the revision was silent — dropping
+FR-4b from a short document does not delete the export gate.
 
 ### Layout
 
@@ -91,8 +97,9 @@ All five pass on `main`. If one fails after your change, that is your change.
    `AcmeBillingService` → `ORG_001BillingService`. Company hidden, shape intact.
    `restore` searches tokens for issued aliases so this round-trips.
 11. **A single ordinary word is not an identity.** `crates/core/src/words.rs`,
-   PRD §4.4. `node`, `status`, `invoice` say nothing about who wrote them, and
-   aliasing them is what made a real repository unexportable. A compound is
+   PRD §4.2. An org called `admin` or an environment called `staging` says
+   nothing about who wrote it, and aliasing such names is what made a real
+   repository unexportable. A compound is
    always identifying; so is a single word nobody else uses (`Vantor`). A name
    the user confirms with `specshield term` overrides the rule — that is the
    escape hatch, and it has to keep working.
@@ -118,11 +125,16 @@ of PRD v2.0 §13 and orphans every twin made before it. v3 (wrapped data key) is
 *content* migration and is not keyed on `user_version`. See `crates/vault/src/schema.rs`
 `DDL_VERSION`, and read it before adding a migration of either kind.
 
-Corpus, current: all six projects gated, 99.5% recall / 95.6% precision over
-196 identifying occurrences, with 17 single-word occurrences left in the twin on
-purpose (PRD §4.4);
-secrets 6/6, 0 false positives. Every format now has a parser, so nothing is
-excluded from the verdict — see `crates/cli/src/report.rs`.
+Corpus, current: all seven projects gated. Over 49 identity occurrences:
+**49.0% rules-only**, **100% with dictionary**, **98.0% precision**. 225
+structural occurrences and 2 ordinary-word occurrences reach the model on
+purpose (PRD §4.1, §4.2); secrets 6/6, 0 false positives. Every format has a
+parser, so nothing is excluded from the verdict — see
+`crates/cli/src/report.rs`.
+
+The rules-only column is the one to watch: it is what the detector finds against
+an empty vault, and it is the only part of identity detection that works before
+a user has typed anything.
 
 Repo scale, measured on a synthetic 1,000-file / 151k-LOC TypeScript project
 (release build, this machine): index 0.03 s, full project export 11.5 s, rescan

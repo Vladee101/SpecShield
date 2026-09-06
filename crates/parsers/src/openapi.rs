@@ -302,7 +302,7 @@ fn classify(node: &NodeRef, enums: &BTreeSet<String>, out: &mut Vec<Candidate>) 
     // `paths./invoices/{invoiceId}` — the template names a resource and carries
     // a field name in the URL. Both are entities; the slashes are not.
     //
-    // PRD §9 lists `POST /subscriptions` as an Endpoint, and the literal
+    // PRD §13 lists `ENDPOINT` among the structural types, and the literal
     // segment is the half that reveals the resource: a project whose table is
     // `invoice` and whose path is `/invoices` has said the table name out loud.
     // The verification gate catches exactly that, which is how this was found.

@@ -12,10 +12,10 @@ Five documents, three audiences.
 
 If you only read one paragraph:
 
-> SpecShield reduces disclosure to a commercial LLM from **"names plus
-> semantics"** to **"semantics only"**. It does not make the submission
-> non-confidential. Material whose *business logic* is the secret should not go
-> to a commercial LLM, with or without this tool.
+> SpecShield reduces disclosure to a commercial LLM from **"who you are plus
+> what you built"** to **"what you built"**. It does not make the submission
+> non-confidential. Material whose *architecture* or *business logic* is the
+> secret should not go to a commercial LLM, with or without this tool.
 
 The two user guides cover the same capabilities through different surfaces. The
 application is at parity with the command line apart from `specshield report`,

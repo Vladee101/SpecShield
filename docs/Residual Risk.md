@@ -11,12 +11,19 @@ repository. A residual-risk statement that reads well has failed at its job.
 
 ## 1. The statement
 
-> SpecShield reduces disclosure to a commercial LLM from **"names plus
-> semantics"** to **"semantics only"**. It does not make the submission
+> SpecShield reduces disclosure to a commercial LLM from **"who you are plus
+> what you built"** to **"what you built"**. It does not make the submission
 > non-confidential.
 >
-> Teams handling material where the business logic *itself* is the secret should
-> not use commercial LLMs for that material, with or without SpecShield.
+> Teams handling material where the architecture or the business logic *itself*
+> is the secret should not use commercial LLMs for that material, with or
+> without SpecShield.
+
+The wording changed with PRD v2.0 and the change is not cosmetic. The product
+used to alias service, DTO, table and column names as well; it no longer does,
+because an agent that cannot read the architecture cannot help extend it (PRD
+§4.1). **The architecture now leaves the machine intact, by design.** That is a
+larger disclosure than v1.1 described. §2.1 and §2.2 state what it means.
 
 Everything below is detail on that sentence.
 
@@ -34,8 +41,9 @@ reading it learns the business rules, the algorithms, the data-model topology,
 the number of services and how they relate, the endpoint structure, and every
 comment the user chose to keep.
 
-`SERVICE_014 charges a 3% commission on ORG_007 payouts for EU customers above
-EUR 10k` has every name aliased and gives away the entire arrangement.
+`BillingService charges a 3% commission on ORG_007 payouts for EU customers
+above EUR 10k` has every *identity* aliased and gives away the entire
+arrangement — including, now, the name of the service that does it.
 
 **Who this matters to:** anyone whose competitive advantage is in *what* the
 system does rather than *whose* it is. For them the correct control is not to
@@ -46,6 +54,11 @@ send the material at all.
 A distinctive domain model plus endpoint shapes is often enough to identify an
 organization with every name replaced. Aliasing raises the effort; it does not
 make the twin anonymous. Treat a twin as pseudonymous, never as anonymous.
+
+**This got easier in v2.0, not harder.** Service, DTO, table and column names now
+travel verbatim, and a schema is a fingerprint. A reviewer weighing this should
+read it as: the twin hides the org chart and the customer list, and hands over
+the system design.
 
 ### 2.3 The provider retains the twin
 
@@ -65,9 +78,10 @@ which is the right response to over-sharing and nothing more than that.
 someone put it in the dictionary. Names nobody has named are found only if a
 heuristic happens to fire.
 
-The **export gate** is the safety net here, and it is a good one: it scans the
-twin for every name the vault knows and blocks on a hit, independent of whether
-detection was right. But the gate can only look for names the vault has already
+The **export gate** is the safety net here: it scans the twin for every name the
+vault knows and reports every hit, independent of whether detection was right.
+It *reports* rather than refuses — that changed in v2.0, and `--strict` restores
+refusal for CI. But the gate can only look for names the vault has already
 learned. **A proprietary name that has never been entered in the dictionary and
 never appeared structurally is not protected by anything.**
 
@@ -86,7 +100,7 @@ tool, the twin should be treated as having been logged.
 
 Marking a term never-alias (PRD FR-10) removes it from the export gate as well
 as from detection. It has to: otherwise the name stops being aliased, survives
-into the twin, and blocks every export from then on.
+into the twin, and is reported on every export from then on.
 
 So an allowlisted name **can leave in a twin**. That is the user's decision and
 the only way the gate opens, but it is a decision, and one worth reviewing
@@ -159,11 +173,13 @@ No code-signing certificate has been applied. On Windows this means SmartScreen
 warnings; on macOS, Gatekeeper refusal without an explicit override. Signing
 requires credentials the project does not hold.
 
-### 3.5 Two vault tables have no writers
+### 3.5 Relationships are specified and not built
 
-`redactions` and `edges` exist in the schema and nothing writes to them. Nothing
-depends on them either, so this is dead weight rather than a malfunction — but a
-reviewer reading the schema should not infer a feature from a table.
+`occurrences` and `redactions` are written now — the first drives
+`specshield where`, the second the one-way secret index. `edges` was dropped in
+schema v4 rather than kept empty: the SDD described a graph with `uses`, `writes`
+and `exposes` relations and no parser ever built one. A reviewer reading §5 of
+the SDD should not infer a relationship graph that does not exist.
 
 ### 3.6 Alias durability through a real model is unmeasured
 

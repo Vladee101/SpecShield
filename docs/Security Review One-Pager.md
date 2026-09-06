@@ -6,16 +6,23 @@
 
 ## What it is
 
-A local desktop application that rewrites proprietary identifiers in code and
-documents into stable opaque aliases, so the result can be sent to a commercial
-LLM, and rewrites the model's response back into real names.
+A local desktop application that rewrites **business identity** in code and
+documents into stable opaque aliases — the company, its customers, products,
+brands, vendors, domains, tenants, environments, and the people named in the
+repository — so the result can be sent to a commercial LLM, and rewrites the
+model's response back into real names.
+
+**The architecture is deliberately left readable.** Service, DTO, table, column,
+endpoint and file names travel verbatim, because an agent that cannot read the
+system cannot help extend it (PRD §4.1). Any of them can be promoted to an
+identity by name; none is by default.
 
 ## The one sentence that matters
 
-> It reduces disclosure from **"names plus semantics"** to **"semantics only"**.
-> It does not make the submission non-confidential. Material whose *business
-> logic* is the secret should not go to a commercial LLM, with or without this
-> tool.
+> It reduces disclosure from **"who you are plus what you built"** to **"what
+> you built"**. It does not make the submission non-confidential. Material whose
+> *architecture* or *business logic* is the secret should not go to a commercial
+> LLM, with or without this tool.
 
 ## What crosses the network
 

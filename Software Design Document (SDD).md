@@ -47,8 +47,9 @@ restored.
 # 2. Design Principles
 
 1. **Local-first** — all processing happens on the user's machine.
-2. **Deterministic** — identical identifiers under the same project key always produce
-   identical aliases, on any machine, with no central allocator.
+2. **Deterministic** — one vault always produces the same alias for the same identity,
+   and renumbering is an explicit operation. Aliases are allocated, not derived, so two
+   vaults do not agree; PRD §15 says so rather than implying otherwise.
 3. **Scoped identity** — an entity is identified by scope, type, and name, never by name
    alone.
 4. **AST for sanitize, lexer for restore** — sanitization needs structure to be correct;
@@ -703,7 +704,7 @@ CREATE TABLE project (
   alias_style    TEXT NOT NULL,             -- legacy, always 'allocated' — §6.2
   project_key_enc BLOB NOT NULL,            -- legacy, always zero — nothing derives from it
   scope_strategy TEXT NOT NULL,             -- global | module | strict
-  key_salt       BLOB NOT NULL,             -- for HMAC alias derivation
+  key_salt       BLOB NOT NULL,             -- Argon2id and the blind index; not aliases
   created_at     INTEGER NOT NULL
 );
 
@@ -817,11 +818,14 @@ Its advantage was convenience; its cost is a key at rest for local malware to
 take. What exists is the simpler half, and the passphrase remains the only way
 in.
 
-## 9.5 Re-key
+## 9.5 Renumber
 
-Re-keying regenerates every alias under a new project key. Used when a twin has been
-over-shared. It renumbers from scratch in UUID order, so it is a full rewrite of `identities.alias`
-inside one transaction, followed by invalidation of every generated twin.
+Reissues every alias. Used when a twin has been over-shared. It renumbers from scratch in
+UUID order, so it is a full rewrite of `identities.alias` inside one transaction, followed
+by invalidation of every generated twin.
+
+Named *re-key* in v1.1, when it changed the project key aliases were derived from. There is
+no such key now (§6.2), and the operation is what the name says: new numbers.
 
 ---
 
@@ -885,7 +889,7 @@ merely assumed.
 Restore reliability depends substantially on whether the model was told the placeholders
 are opaque. SpecShield generates the instruction and copies it with the twin:
 
-> Tokens matching `^[A-Z][A-Za-z0-9_]*_[A-Z0-9]{3,8}$` are opaque anonymized identifiers.
+> Tokens matching `^[A-Z][A-Z0-9_]*_[0-9]{3,}$` are opaque anonymized identifiers.
 > Preserve them exactly — do not rename, expand, translate, pluralize, or reformat them.
 > If you introduce a new entity, name it `NEW_<n>` and list every such name at the end of
 > your response.
@@ -1181,7 +1185,7 @@ This table is authoritative; the PRD references it rather than duplicating it.
 | Storage | SQLite | |
 | Encryption | SQLCipher via `rusqlite` (bundled) | |
 | Key storage | `keyring`, `argon2`, `zeroize` | OS credential store |
-| Hashing | BLAKE3 (checksums), HMAC-SHA256 (aliases) | |
+| Hashing | BLAKE3 (checksums), HMAC-SHA256 (blind index, redaction idempotency) | |
 | Scanning | `aho-corasick` | Verification gate |
 | File walking | `ignore` | gitignore-aware |
 | Parallelism | `rayon` | |
