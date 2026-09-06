@@ -13,14 +13,14 @@ examples (AWS's own `AKIAIOSFODNN7EXAMPLE`) or obviously-invalid placeholders.
 
 | Project | Entities | Occurrences | Secrets | Covers |
 |---|---:|---:|---:|---|
-| `identity` | 26 | 34 | — | every identity category in PRD §13, and the words that look like one |
+| `identity` | 30 | 63 | — | every identity category in PRD §13, and the words that look like one |
 | `prd-markdown` | 14 | 25 | — | prose entities, org names, business terminology |
 | `sql-schema` | 14 | 19 | — | tables, columns, the repeated `customer_id` case |
 | `openapi-billing` | 14 | 25 | — | paths, operationIds, schema names |
 | `ts-service` | 20 | 60 | — | declarations, references, imports, comments, string literals, path segments |
 | `mixed-repo` | 11 | 13 | — | one identity across four formats, plus ignore rules |
 | `adversarial` | 17 | 20 | 6 | the hostile cases below |
-| **Total** | **116** | **196** | **6** | |
+| **Total** | **120** | **225** | **6** | |
 
 The first five projects were built when SpecShield aliased everything it could
 name. `identity` was added afterwards, for PRD v2.0: it is the only one that
@@ -141,6 +141,7 @@ which is the failure mode that matters in a security tool.
 | `docs/ownership.md` | People, by three different markers. A customer's tenant and an environment named after them; `production` and `staging`, which are the same type and are not identity. |
 | `src/billing/charge-invoice.ts` | A person in a JSDoc `@author`, and vendors named in a doc comment rather than in prose. |
 | `docs/ordinary-words.md` | **Negative fixture.** Seven real companies whose names are ordinary English words — Square, Wise, Block, Segment, Amplitude, Paddle, Clerk — used as those words. Any detection is a false positive. |
+| `docs/diagrams/billing-flow.puml` | A sequence diagram: the densest identity per byte in a repository. A person, two vendors and a host in six lines of declarations, beside the shorthand every arrow refers to — which must survive, or the twin no longer renders. |
 
 ## Known gaps
 

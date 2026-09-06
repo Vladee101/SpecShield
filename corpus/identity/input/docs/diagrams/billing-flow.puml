@@ -1,0 +1,35 @@
+@startuml Vantor billing
+skinparam backgroundColor #FEFEFE
+!theme plain
+
+actor "Jane Okafor" as Ops
+participant BillingService
+participant "Stripe" as payments
+participant "Adyen" as fallback
+database customer_subscription
+node "api.vantor-freight.com" as edge
+
+Ops -> BillingService: chargeInvoice()
+BillingService -> payments: capture()
+payments --> BillingService: declined
+BillingService -> fallback: capture()
+BillingService -> customer_subscription: update
+edge --> BillingService
+
+note right of payments
+  Settlement is Stripe first,
+  Adyen on decline.
+end note
+
+class CustomerSubscription {
+  +customerId: UUID
+  +planTier: string
+  +chargeInvoice(): void
+}
+
+interface PaymentGateway {
+  +capture(): void
+}
+
+CustomerSubscription --> PaymentGateway
+@enduml

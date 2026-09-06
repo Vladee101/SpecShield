@@ -334,7 +334,7 @@ pub fn sanitize(
     //    classified is never reclassified by a heuristic.
     let structural = parser.map_or_else(Vec::new, |p| p.structural_candidates_in(&redacted, scope, context));
     let mut candidates = structural;
-    let claimed: Vec<(usize, usize)> = candidates.iter().map(|c| (c.byte_start, c.byte_end)).collect();
+    let claimed = claims(&candidates);
 
     // Some formats confine prose to specific regions — YAML values, and later
     // TypeScript comments and string literals. Outside them the text is the
@@ -366,24 +366,7 @@ pub fn sanitize(
 
     let mut from_prose: HashSet<usize> = HashSet::new();
     for candidate in detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference) {
-        // A structural claim covers the whole of what the grammar saw, and an
-        // identity *inside* it is a different fact rather than a competing
-        // reading of the same one. `./acme-billing` is one module path, and
-        // `acme` is who owns it; the parser is right about the first and has
-        // nothing to say about the second.
-        //
-        // Only a candidate covering a whole claim is contradicting the parser,
-        // and there the parser wins — it read the grammar and the prose pass
-        // guessed. Without this, the import specifier kept `acme-billing` while
-        // the file it names was rewritten, and the twin stopped being a
-        // TypeScript project that resolves.
-        let overlaps = claimed.iter().any(|(s, e)| {
-            let intersects = candidate.byte_start < *e && *s < candidate.byte_end;
-            let nested = candidate.byte_start >= *s
-                && candidate.byte_end <= *e
-                && (candidate.byte_start > *s || candidate.byte_end < *e);
-            intersects && !(nested && candidate.entity_type.is_identity())
-        });
+        let overlaps = suppressed(&candidate, &claimed);
         let in_prose = regions.as_ref().is_none_or(|regions| {
             regions
                 .iter()
@@ -421,6 +404,18 @@ pub fn sanitize(
             .contains(&candidate.byte_start)
             .then(|| resolved.get(&candidate.real_name).cloned().flatten())
             .flatten()
+            // ...unless the two disagree about what *kind* of name it is. The
+            // resolution exists to unify a prose mention with the declaration it
+            // refers to, which is only meaningful when both are talking about
+            // the same category of thing.
+            //
+            // A `PlantUML` parser calls `Stripe` a participant and the vendor
+            // table calls it a payment provider. Taking the parser's key there
+            // does not merge two mentions of one thing — it files an identity
+            // under a structural alias, and the twin says `SERVICE_001` where it
+            // means `PAYMENT_PROVIDER_001`. Identity wins the classification for
+            // the same reason it wins the span above.
+            .filter(|key| key.entity_type.is_identity() == candidate.entity_type.is_identity())
             .unwrap_or_else(|| IdentityKey::new(&candidate.scope_path, candidate.entity_type, &candidate.real_name));
         let node = graph.intern(&key, Origin::Detected);
         let (uuid, alias) = (node.uuid, node.alias.clone());
@@ -440,6 +435,17 @@ pub fn sanitize(
             kind: candidate.kind,
         });
     }
+
+    // A suggestion at a span that was aliased anyway is noise. It happens
+    // whenever two passes read one name differently and identity won: the
+    // structural reading lost the span but was still sitting in the review
+    // queue, so `specshield sanitize` listed `Stripe` as something to confirm
+    // immediately after replacing it.
+    suggestions.retain(|s| {
+        !applied
+            .iter()
+            .any(|hit| s.byte_start < hit.byte_end && hit.byte_start < s.byte_end)
+    });
 
     // 5. Apply. `apply` validates non-overlap and char boundaries, so a bad
     //    plan fails here rather than producing a corrupt twin.
@@ -495,6 +501,49 @@ pub fn sanitize(
 /// `VANTOR` inside it as an organization. Only one can be edited, and it is the
 /// identity — hiding who you are is the point, and the env var name is not
 /// aliased at all unless the user asked for it by name.
+/// Spans a parser has already read, with the *class* of each — identity or
+/// structure. See [`suppressed`].
+#[must_use]
+pub fn claims(candidates: &[Candidate]) -> Vec<(usize, usize, bool)> {
+    candidates
+        .iter()
+        .map(|c| (c.byte_start, c.byte_end, c.entity_type.is_identity()))
+        .collect()
+}
+
+/// Does a structural claim hide this prose candidate?
+///
+/// A structural claim says what a name *is for*. It does not say what kind of
+/// name it is, and it never suppresses an identity — whether the identity sits
+/// inside it (`acme` in the module path `./acme-billing`) or covers it exactly.
+///
+/// The exact-cover case is the one that cost a diagram. A `PlantUML` parser reads
+/// `participant "Stripe" as payments` and is right that Stripe is a
+/// participant; the vendor table is right that it is a payment provider.
+/// Letting the parser win did not file the name under the parser's type —
+/// structure is not aliased, so it dropped the name from consideration
+/// entirely, left the vendor in the twin, and taught every prose mention of
+/// `Stripe` in the same file that it was a service. Three wrong answers from one
+/// rule.
+///
+/// Structure still wins over structure: two readings of one span where neither
+/// is identity is a real disagreement, and there the parser read the grammar
+/// while the prose pass guessed.
+///
+/// Public because the corpus grader merges the same two sources and must merge
+/// them the same way. It had its own copy of this rule, and the copy went stale
+/// the day this one changed — reporting three vendors as missed that the
+/// pipeline aliases correctly.
+#[must_use]
+pub fn suppressed(candidate: &Candidate, claimed: &[(usize, usize, bool)]) -> bool {
+    claimed.iter().any(|(start, end, claim_is_identity)| {
+        let intersects = candidate.byte_start < *end && *start < candidate.byte_end;
+        // The one thing that gets through a claim it overlaps.
+        let pierces = candidate.entity_type.is_identity() && !*claim_is_identity;
+        intersects && !pierces
+    })
+}
+
 fn identity_wins(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let mut accepted: Vec<(usize, usize)> = Vec::new();
     let mut out = candidates;

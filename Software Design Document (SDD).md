@@ -1145,8 +1145,16 @@ build.
 
 ### V1.2
 
-- PlantUML, BPMN, ER diagrams
+- BPMN and ER diagrams
 - Richer OpenAPI semantics (examples, security schemes)
+
+PlantUML was listed here and has moved into the MVP: PRD v2.0 FR-2 lists it
+among the must-have formats, and the reason is the identity model rather than
+the format. A sequence diagram is the densest identity per byte in a
+repository — a handful of `participant`, `actor` and `node` declarations name
+the company, its people, its vendors and its hosts — so a build that cannot
+read one is a build that hands all of that over. See
+`crates/parsers/src/plantuml.rs` for why it needs no grammar.
 
 ### V2
 

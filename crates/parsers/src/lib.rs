@@ -11,6 +11,7 @@
 //! | YAML, JSON | `saphyr`, spanned nodes; JSON read as YAML 1.2 | M3 |
 //! | OpenAPI | semantic layer over the YAML/JSON node index | M3 |
 //! | TypeScript / JavaScript | Tree-sitter; properties scoped globally | M4 |
+//! | `PlantUML` | line-oriented patterns over the DSL | M4 |
 //!
 //! Three deliberate choices, all from the design review or the M0 spikes:
 //!
@@ -27,6 +28,7 @@
 
 pub mod markdown;
 pub mod openapi;
+pub mod plantuml;
 pub mod sql;
 pub mod text;
 pub mod typescript;
@@ -38,6 +40,7 @@ pub use specshield_core::parser::{ArtifactParser, Candidate, Document, ParseErro
 
 pub use crate::markdown::MarkdownParser;
 pub use crate::openapi::OpenApiParser;
+pub use crate::plantuml::PlantUmlParser;
 pub use crate::sql::SqlParser;
 pub use crate::text::TextParser;
 pub use crate::typescript::TypeScriptParser;
@@ -54,6 +57,10 @@ pub fn registry() -> Vec<Box<dyn ArtifactParser>> {
         // Ahead of the generic YAML parser: a specification is recognised by
         // content, and only this layer knows which of its keys are names.
         Box::new(OpenApiParser),
+        // Before YAML and JSON: a diagram is recognised by the `@startuml` in
+        // it as well as by its extension, and one committed as `.txt` must not
+        // fall through to the text parser with no fingerprint behind it.
+        Box::new(PlantUmlParser),
         Box::new(YamlParser),
         Box::new(JsonParser),
         Box::new(TypeScriptParser),
@@ -103,7 +110,16 @@ mod tests {
     fn implemented_names_are_stable() {
         assert_eq!(
             implemented(),
-            vec!["markdown", "sql", "openapi", "yaml", "json", "typescript", "text"]
+            vec![
+                "markdown",
+                "sql",
+                "openapi",
+                "plantuml",
+                "yaml",
+                "json",
+                "typescript",
+                "text"
+            ]
         );
     }
 }

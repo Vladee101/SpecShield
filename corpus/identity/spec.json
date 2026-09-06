@@ -6,8 +6,10 @@
       "entity_type": "organization",
       "scope_path": "project",
       "files": [
-        "docs/integrations.md"
-      ]
+        "docs/integrations.md",
+        "docs/diagrams/billing-flow.puml"
+      ],
+      "note": "Twice in prose and once in a diagram title. `@startuml Vantor billing` is the user's own text, and skipping the whole directive line left it in line 1 of the twin."
     },
     {
       "real_name": "FreightLedger",
@@ -125,8 +127,10 @@
       "entity_type": "domain",
       "scope_path": "project",
       "files": [
-        "docs/integrations.md"
-      ]
+        "docs/integrations.md",
+        "docs/diagrams/billing-flow.puml"
+      ],
+      "note": "A `node` in a deployment diagram. Found by the hostname rule, not by the keyword — which is the whole design: the keyword says where to look, the name says what it is."
     },
     {
       "real_name": "ops.vantor-freight.com",
@@ -173,7 +177,8 @@
       "entity_type": "table",
       "scope_path": "billing.public.customer_subscription",
       "files": [
-        "docs/integrations.md"
+        "docs/integrations.md",
+        "docs/diagrams/billing-flow.puml"
       ]
     },
     {
@@ -181,7 +186,8 @@
       "entity_type": "endpoint",
       "scope_path": "src/billing/charge-invoice.ts::BillingService.chargeInvoice",
       "files": [
-        "src/billing/charge-invoice.ts"
+        "src/billing/charge-invoice.ts",
+        "docs/diagrams/billing-flow.puml"
       ]
     },
     {
@@ -198,6 +204,39 @@
       "scope_path": "src/gateway/payment-gateway.ts::PaymentGateway",
       "files": [
         "src/billing/charge-invoice.ts"
+      ]
+    },
+    {
+      "real_name": "Ops",
+      "entity_type": "service",
+      "scope_path": "docs/diagrams/billing-flow.puml::Ops",
+      "files": [
+        "docs/diagrams/billing-flow.puml"
+      ],
+      "note": "An `actor` alias. Structure, not a person: typing every actor as Person aliased this in its declaration while every arrow went on saying `Ops`."
+    },
+    {
+      "real_name": "payments",
+      "entity_type": "service",
+      "scope_path": "docs/diagrams/billing-flow.puml::payments",
+      "files": [
+        "docs/diagrams/billing-flow.puml"
+      ]
+    },
+    {
+      "real_name": "PaymentGateway",
+      "entity_type": "interface",
+      "scope_path": "docs/diagrams/billing-flow.puml::PaymentGateway",
+      "files": [
+        "docs/diagrams/billing-flow.puml"
+      ]
+    },
+    {
+      "real_name": "planTier",
+      "entity_type": "column",
+      "scope_path": "docs/diagrams/billing-flow.puml::CustomerSubscription.planTier",
+      "files": [
+        "docs/diagrams/billing-flow.puml"
       ]
     }
   ],
@@ -220,7 +259,8 @@
   ],
   "requires": [
     "markdown",
-    "typescript"
+    "typescript",
+    "plantuml"
   ],
   "milestone": "M4"
 }
