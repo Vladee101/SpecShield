@@ -32,6 +32,7 @@ pub mod restore;
 pub mod sanitize;
 pub mod secrets;
 pub mod unify;
+pub mod vendors;
 pub mod verify;
 pub mod words;
 

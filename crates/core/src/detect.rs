@@ -171,6 +171,31 @@ static SCREAMING_SNAKE: LazyLock<Regex> =
 static HOSTNAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*){2,}\b").expect("valid regex"));
 
+/// A line that names a person out loud — `@author Jane Okafor`, `Contact: Jane
+/// Okafor`, a `Reviewed-by:` trailer. Group 1 is the name.
+///
+/// Built from [`crate::vendors::PERSON_MARKERS`] so the list stays in one place
+/// and reads as data rather than as a pattern.
+static PERSON_LINE: LazyLock<Regex> = LazyLock::new(|| {
+    let markers = crate::vendors::PERSON_MARKERS
+        .iter()
+        .map(|m| regex::escape(m))
+        .collect::<Vec<_>>()
+        .join("|");
+    // One to three capitalised words after the marker, **on the same line**.
+    // Three because `Jane Anne Okafor` happens; four starts matching sentences.
+    //
+    // Spaces and tabs rather than `\s`, because `\s` matches a newline and a
+    // name is not allowed to run into the next line. It did: a `Contact:` line
+    // followed by a `Reviewed-by:` line matched across the break as one person,
+    // and replacing that span ate the newline — which §7.2 caught as
+    // `lines: 4 -> 3` and abandoned the whole file's aliasing.
+    Regex::new(&format!(
+        r"(?i)(?:^|[\s*/#@\-])(?:{markers})[ \t]*[:=@]?[ \t]+((?-i:[A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+){{1,2}}))"
+    ))
+    .expect("valid regex")
+});
+
 static CAPITALIZED_PHRASE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*\b").expect("valid regex"));
 
@@ -282,6 +307,26 @@ impl Detector {
         })
     }
 
+    /// Known commercial services, built once — PRD §7 and [`crate::vendors`].
+    ///
+    /// Case-insensitive, because `stripe.charges.create()` names the company as
+    /// surely as `Stripe` does in a sentence.
+    fn vendor_matcher() -> &'static (aho_corasick::AhoCorasick, Vec<EntityType>) {
+        static MATCHER: std::sync::OnceLock<(aho_corasick::AhoCorasick, Vec<EntityType>)> = std::sync::OnceLock::new();
+        MATCHER.get_or_init(|| {
+            let automaton = aho_corasick::AhoCorasick::builder()
+                // `Checkout.com` must not lose to `Checkout` if both are ever
+                // listed, and `Plaid.com` must not be shadowed by a shorter
+                // entry.
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .ascii_case_insensitive(true)
+                .build(crate::vendors::VENDORS.iter().map(|(name, _)| *name))
+                .expect("vendor automaton");
+            let types = crate::vendors::VENDORS.iter().map(|(_, t)| *t).collect();
+            (automaton, types)
+        })
+    }
+
     /// The dictionary automaton, built once.
     fn matcher(&self) -> &aho_corasick::AhoCorasick {
         self.matcher.get_or_init(|| {
@@ -327,9 +372,10 @@ impl Detector {
     /// 1. **Did a person name it?** Then it is theirs, whatever it is. This is
     ///    how a service or a table gets hidden when it really does need to be.
     /// 2. **Does it say who you are?** Only [`EntityType::is_identity`] types —
-    ///    organizations and hosts — are aliased on their own. What you *built*
-    ///    stays legible, because a model that cannot read your architecture
-    ///    cannot help you extend it.
+    ///    your organization, its products and brands, the hosts it runs on, the
+    ///    vendors it pays, and the people who work on it — are aliased on their
+    ///    own. What you *built* stays legible, because a model that cannot read
+    ///    your architecture cannot help you extend it.
     /// 3. **Is it identifying at all?** A host called `localhost` or an org
     ///    called `admin` is a word, not an identity — see [`crate::words`].
     #[must_use]
@@ -444,7 +490,59 @@ impl Detector {
             }
         }
 
-        // 2. Rules.
+        // 2. Commercial services — PRD §7. The only identity category besides
+        //     hostnames that can be found without being told, because unlike
+        //     `Vantor` these names are the same in every company that uses them.
+        {
+            let (automaton, types) = Self::vendor_matcher();
+            for m in automaton.find_iter(text) {
+                let name = &text[m.start()..m.end()];
+                if self.is_allowed(name) {
+                    continue;
+                }
+                push(
+                    Candidate {
+                        // The exact surface text, so `stripe` restores to
+                        // `stripe` and `Stripe` to `Stripe`.
+                        real_name: name.to_owned(),
+                        entity_type: types[m.pattern().as_usize()],
+                        scope_path: scope.to_owned(),
+                        byte_start: m.start(),
+                        byte_end: m.end(),
+                        kind,
+                        confidence: 0.95,
+                    },
+                    &mut claimed,
+                    &mut found,
+                );
+            }
+        }
+
+        // 3. People, where a line says so out loud — PRD FR-3.
+        for caps in PERSON_LINE.captures_iter(text) {
+            let Some(name) = caps.get(1) else { continue };
+            if self.is_allowed(name.as_str()) {
+                continue;
+            }
+            push(
+                Self::candidate(
+                    name.as_str(),
+                    EntityType::Person,
+                    scope,
+                    name.start(),
+                    name.end(),
+                    kind,
+                    0.9,
+                ),
+                &mut claimed,
+                &mut found,
+            );
+        }
+
+        // 4. Shape rules. Lower confidence than anything above, and last
+        //    because a known company name must beat a guess about dots and
+        //    capitals: `stripe.charges.create` matches the hostname shape
+        //    exactly, and claiming it there would hide the vendor inside it.
         for m in SCREAMING_SNAKE.find_iter(text) {
             if self.is_allowed(m.as_str()) {
                 continue;
@@ -498,10 +596,20 @@ impl Detector {
             );
         }
 
-        // 3. Suggestions — proper-noun-shaped phrases. Never auto-applied.
+        // 5. Suggestions — proper-noun-shaped phrases. Never auto-applied.
         for m in CAPITALIZED_PHRASE.find_iter(text) {
             let phrase = m.as_str();
             if self.is_allowed(phrase) || is_sentence_noise(phrase, text, m.start()) {
+                continue;
+            }
+            // `Contact: Jane Okafor` — the marker is evidence that a person
+            // follows, so suggesting the marker itself as an organization is
+            // noise the user has to dismiss on every file that has a contact
+            // line. The name it introduces was already taken in pass 3.
+            if crate::vendors::PERSON_MARKERS
+                .iter()
+                .any(|marker| marker.eq_ignore_ascii_case(phrase))
+            {
                 continue;
             }
             push(
@@ -511,7 +619,7 @@ impl Detector {
             );
         }
 
-        // 4. Prose variants of everything found so far.
+        // 6. Prose variants of everything found so far.
         //
         // A heading reading "## Plan tiers" is the entity `PlanTier` written
         // out in prose, and it leaks the name just as surely. The verification
@@ -999,5 +1107,182 @@ mod tests {
 
         let found = d.scan_text("The invoice table.", "doc", OccurrenceKind::Reference);
         assert!(found.iter().all(|c| c.real_name != "invoice"), "{found:#?}");
+    }
+}
+
+#[cfg(test)]
+mod identity_detection {
+    use super::*;
+
+    fn scan(text: &str) -> Vec<Candidate> {
+        Detector::new().scan_text(text, "project", OccurrenceKind::Reference)
+    }
+
+    fn typed(text: &str, name: &str) -> Option<EntityType> {
+        scan(text)
+            .into_iter()
+            .find(|c| c.real_name == name)
+            .map(|c| c.entity_type)
+    }
+
+    #[test]
+    fn a_payment_provider_is_found_without_being_named() {
+        // PRD §8's worked example. `Stripe` is not a name the user has to type
+        // first, because unlike `Vantor` it means the same thing everywhere.
+        assert_eq!(
+            typed("BillingService charges Stripe.", "Stripe"),
+            Some(EntityType::PaymentProvider)
+        );
+    }
+
+    #[test]
+    fn a_vendor_is_found_in_the_case_the_code_uses() {
+        // `stripe.charges.create()` names the company as surely as a sentence
+        // does, and the surface text is kept so restore is byte-exact.
+        let found = scan("await stripe.charges.create(payload);");
+        assert!(
+            found
+                .iter()
+                .any(|c| c.real_name == "stripe" && c.entity_type == EntityType::PaymentProvider),
+            "{:?}",
+            names(&found)
+        );
+    }
+
+    #[test]
+    fn an_integration_partner_is_found_too() {
+        assert_eq!(
+            typed("Notifications go out via Twilio.", "Twilio"),
+            Some(EntityType::Partner)
+        );
+        assert_eq!(typed("Tokens are issued by Auth0.", "Auth0"), Some(EntityType::Partner));
+    }
+
+    #[test]
+    fn tooling_is_still_never_aliased() {
+        // The line between VENDORS and STOP_LIST: do you have an account with
+        // them? Everyone uses React and Postgres, and hiding them costs the
+        // model context for no disclosure at all.
+        let found = scan("A React front end talks to Postgres through Prisma.");
+        for tool in ["React", "Postgres", "Prisma"] {
+            assert!(!names(&found).contains(&tool), "{tool} must not be an entity");
+        }
+    }
+
+    #[test]
+    fn allowing_a_vendor_stops_it_being_aliased() {
+        // A team that does not mind saying which processor they use says so
+        // once, and the escape hatch has to reach the built-in table too.
+        let d = Detector::new().with_allowed("Stripe");
+        let found = d.scan_text("BillingService charges Stripe.", "project", OccurrenceKind::Reference);
+        assert!(!names(&found).contains(&"Stripe"));
+    }
+
+    #[test]
+    fn a_person_is_found_where_a_line_says_so() {
+        for text in [
+            " * @author Jane Okafor",
+            "Contact: Jane Okafor",
+            "Owner: Jane Okafor",
+            "Reviewed-by: Jane Okafor",
+            "# Maintainer: Jane Okafor",
+        ] {
+            assert_eq!(
+                typed(text, "Jane Okafor"),
+                Some(EntityType::Person),
+                "no person found in {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_with_three_names_is_found_whole() {
+        assert_eq!(
+            typed("@author Maria de Souza Lima", "Maria de Souza"),
+            None,
+            "a lowercase particle ends the name rather than joining it"
+        );
+        assert_eq!(
+            typed("@author Jane Anne Okafor", "Jane Anne Okafor"),
+            Some(EntityType::Person)
+        );
+    }
+
+    #[test]
+    fn prose_that_merely_capitalises_is_not_a_person() {
+        // The marker is what makes this precise. Without one, every capitalised
+        // pair in a specification would be a person, and a PRD is full of them.
+        let found = scan("The Billing Service handles Gold Business Subscription renewals.");
+        assert!(
+            !found.iter().any(|c| c.entity_type == EntityType::Person),
+            "{:?}",
+            found.iter().map(|c| (&c.real_name, c.entity_type)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_capitalised_phrase_is_still_only_a_suggestion() {
+        // How an unguessable product or brand gets found: surfaced for review,
+        // never applied. `specshield term` is what promotes it.
+        let found = scan("Acme Bank offers Gold Business Subscription.");
+        let phrase = found
+            .iter()
+            .find(|c| c.real_name == "Gold Business Subscription")
+            .expect("surfaced for review");
+        assert!(
+            phrase.confidence < crate::sanitize::AUTO_APPLY_CONFIDENCE,
+            "a guess at a product name must never be applied on its own"
+        );
+    }
+
+    #[test]
+    fn the_marker_word_itself_is_not_suggested() {
+        // `Contact` is capitalised, three letters, and starts a line, so the
+        // proper-noun pass surfaced it on every file with a contact line. It is
+        // evidence that a person follows, never a name in its own right.
+        let found = scan(
+            "Contact: Jane Okafor
+",
+        );
+        assert!(
+            !names(&found).contains(&"Contact"),
+            "a person marker is not an organization: {:?}",
+            names(&found)
+        );
+    }
+
+    fn names(candidates: &[Candidate]) -> Vec<&str> {
+        candidates.iter().map(|c| c.real_name.as_str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod person_lines {
+    use super::*;
+
+    #[test]
+    fn a_person_name_never_runs_into_the_next_line() {
+        // `\s` matches a newline, so `Contact: Jane Okafor` followed by
+        // `Reviewed-by: ...` matched `Jane Okafor\nReviewed` as one person.
+        // Replacing that span ate the line break, §7.2 saw `lines: 4 -> 3`, and
+        // the whole file's aliasing was abandoned — so two working detectors
+        // produced a completely unaliased twin.
+        let text = "# Billing integration\n\nContact: Jane Okafor\nReviewed-by: Samuel Adeyemi\n";
+        let found = Detector::new().scan_text(text, "p", OccurrenceKind::Reference);
+
+        let people: Vec<&str> = found
+            .iter()
+            .filter(|c| c.entity_type == EntityType::Person)
+            .map(|c| c.real_name.as_str())
+            .collect();
+        assert_eq!(people, vec!["Jane Okafor", "Samuel Adeyemi"]);
+
+        for candidate in &found {
+            assert!(
+                !candidate.real_name.contains('\n'),
+                "{:?} spans a line break",
+                candidate.real_name
+            );
+        }
     }
 }

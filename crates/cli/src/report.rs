@@ -239,8 +239,8 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
         "Recall above is over the **{} identity occurrence(s)** SpecShield hides by default —",
         gated.expected
     );
-    println!("organizations and hosts. Two other buckets are labelled and deliberately left in");
-    println!("the twin:");
+    println!("organizations, hosts, vendors, and people. Two other buckets are labelled and");
+    println!("deliberately left in the twin:");
     println!();
     println!(
         "- **{} structural occurrence(s)** — what was *built*: DTOs, tables, columns, services.",
