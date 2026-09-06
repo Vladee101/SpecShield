@@ -1042,6 +1042,13 @@ fn run_sanitize(
     if let Some(path) = out {
         std::fs::write(path, &result.twin)?;
         eprintln!("Twin written to {}", path.display());
+        // The twin went to a file, so stdout is free for the envelope.
+        // Silently dropping it here was worse than refusing the flag:
+        // `--envelope` is what stops a model mangling the aliases, and a
+        // user who asked for it and got nothing has no way to know.
+        if envelope {
+            println!("{}", prompt_envelope());
+        }
     } else {
         if envelope {
             println!("{}\n", prompt_envelope());

@@ -7,6 +7,7 @@ Five documents, three audiences.
 | [Security Review One-Pager](Security%20Review%20One-Pager.md) | The person approving use | You have ten minutes and a decision to make |
 | [Threat Model](Threat%20Model.md) | Security review | You want to know what is defended, where it is enforced, and how to check |
 | [Residual Risk](Residual%20Risk.md) | The person approving use | Before you approve. It is the least flattering document here, deliberately |
+| [Complete Reference](Complete%20Reference.md) | Anyone | You want every feature, every use case, and the guide in one place |
 | [Desktop User Guide](Desktop%20User%20Guide.md) | Analysts and engineers | You are about to use the application |
 | [User Guide](User%20Guide.md) | Engineers who prefer a terminal, or scripting CI | You want the command line |
 
