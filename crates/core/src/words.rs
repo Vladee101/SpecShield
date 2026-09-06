@@ -45,6 +45,12 @@ const MIN_LEN: usize = 3;
 /// `specshield term` and the disagreement is recorded in their vault.
 ///
 /// Compared lowercased, so `Node`, `node` and `NODE` are one entry.
+///
+/// Environment names are in here for a reason worth stating: `production`,
+/// `staging` and `uat` are an identity *type* under PRD §13, and every project
+/// on earth has them. An environment named after the customer it serves —
+/// `meridian-uat` — is identity and is aliased; `staging` is convention and is
+/// not. `specshield term staging` still wins if a team disagrees.
 const COMMON: &[&str] = &[
     "account",
     "action",
@@ -177,6 +183,7 @@ const COMMON: &[&str] = &[
     "description",
     "detail",
     "details",
+    "development",
     "device",
     "dialog",
     "diff",
@@ -430,6 +437,7 @@ const COMMON: &[&str] = &[
     "portal",
     "position",
     "post",
+    "preprod",
     "preview",
     "price",
     "pricing",
@@ -437,8 +445,10 @@ const COMMON: &[&str] = &[
     "priority",
     "private",
     "process",
+    "prod",
     "producer",
     "product",
+    "production",
     "products",
     "profile",
     "progress",
@@ -508,6 +518,7 @@ const COMMON: &[&str] = &[
     "sale",
     "sales",
     "sample",
+    "sandbox",
     "save",
     "scale",
     "scan",
@@ -558,6 +569,7 @@ const COMMON: &[&str] = &[
     "stack",
     "stage",
     "stages",
+    "staging",
     "start",
     "state",
     "states",
@@ -627,6 +639,7 @@ const COMMON: &[&str] = &[
     "trigger",
     "type",
     "types",
+    "uat",
     "unit",
     "units",
     "update",
@@ -785,5 +798,15 @@ mod tests {
             assert_eq!(*word, word.to_lowercase(), "{word} must be lowercase");
             assert!(seen.insert(*word), "{word} appears twice");
         }
+    }
+
+    #[test]
+    fn a_shared_environment_is_convention_and_a_customer_s_is_not() {
+        // Both are `EntityType::Environment`. What separates them is whether the
+        // name says whose it is — which is the whole distinction the word list
+        // exists to draw.
+        assert!(!is_identifying("production"));
+        assert!(!is_identifying("staging"));
+        assert!(is_identifying("meridian-uat"));
     }
 }

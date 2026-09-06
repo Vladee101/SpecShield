@@ -188,23 +188,19 @@ fn identity_keys_are_unique_within_a_project() {
 #[test]
 fn entity_types_are_known_to_the_core_model() {
     use specshield_core::EntityType;
-    let known: HashSet<String> = EntityType::ALL
-        .iter()
-        .map(|t| format!("{t:?}").to_lowercase())
-        .collect();
 
-    // The serde representation is snake_case, which differs from Debug for the
-    // two multi-word variants.
-    let alias = |s: &str| match s {
-        "env_var" => "envvar".to_owned(),
-        "path_segment" => "pathsegment".to_owned(),
-        other => other.to_owned(),
-    };
-
+    // Round-trip through serde rather than comparing against `Debug`. The
+    // spec files write the serde form, and a hand-kept table mapping one to the
+    // other goes stale the moment a multi-word variant is added — which is what
+    // happened: `payment_provider` and every other new identity type were
+    // rejected by a test whose whole job is to catch a name the core cannot
+    // produce.
     for (name, _dir, labels) in projects() {
         for entity in &labels.entities {
+            let parsed: Result<EntityType, _> =
+                serde_json::from_value(serde_json::Value::String(entity.entity_type.clone()));
             assert!(
-                known.contains(&alias(&entity.entity_type)),
+                parsed.is_ok(),
                 "{name}: unknown entity_type {:?} on {}",
                 entity.entity_type,
                 entity.real_name

@@ -1,0 +1,226 @@
+{
+  "description": "Every identity category in PRD §13, and the words that look like one. The other five projects were built when the product aliased everything it could name; this one exists to measure what v2.0 actually claims — that who you are leaves and what you built stays.",
+  "entities": [
+    {
+      "real_name": "Vantor",
+      "entity_type": "organization",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "FreightLedger",
+      "entity_type": "product",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ],
+      "note": "PascalCase, so the shape rules see a DTO. Structure is not aliased, so this needs `specshield term` — which is the point: a product name is unguessable."
+    },
+    {
+      "real_name": "Haulwise",
+      "entity_type": "brand",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "meridian-freight",
+      "entity_type": "tenant",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ],
+      "note": "A customer's tenant slug. Naming your customers is naming your business."
+    },
+    {
+      "real_name": "meridian-uat",
+      "entity_type": "environment",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ],
+      "note": "An environment named after the customer it belongs to — the case where an environment name is identity rather than convention."
+    },
+    {
+      "real_name": "production",
+      "entity_type": "environment",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ],
+      "note": "An environment name that is convention, not identity. Labelled so the report's ordinary-word bucket is exercised: it is an identity *type* and is deliberately left in the twin, because `production` says nothing about whose it is."
+    },
+    {
+      "real_name": "staging",
+      "entity_type": "environment",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ],
+      "note": "Ordinary, as above."
+    },
+    {
+      "real_name": "Stripe",
+      "entity_type": "payment_provider",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "Adyen",
+      "entity_type": "payment_provider",
+      "scope_path": "project"
+    },
+    {
+      "real_name": "Chargebee",
+      "entity_type": "payment_provider",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "Twilio",
+      "entity_type": "partner",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "SendGrid",
+      "entity_type": "partner",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "Auth0",
+      "entity_type": "partner",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "Sentry",
+      "entity_type": "partner",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "Datadog",
+      "entity_type": "partner",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "api.vantor-freight.com",
+      "entity_type": "domain",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "ops.vantor-freight.com",
+      "entity_type": "domain",
+      "scope_path": "project",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "Jane Okafor",
+      "entity_type": "person",
+      "scope_path": "project",
+      "note": "Twice, and by two different markers: a `Contact:` line in prose and a JSDoc `@author` in code."
+    },
+    {
+      "real_name": "Samuel Adeyemi",
+      "entity_type": "person",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ]
+    },
+    {
+      "real_name": "Priya Raghunathan",
+      "entity_type": "person",
+      "scope_path": "project",
+      "files": [
+        "docs/ownership.md"
+      ]
+    },
+    {
+      "real_name": "BillingService",
+      "entity_type": "service",
+      "scope_path": "src/billing/charge-invoice.ts::BillingService"
+    },
+    {
+      "real_name": "CustomerSubscription",
+      "entity_type": "dto",
+      "scope_path": "src/domain/customer-subscription.ts::CustomerSubscription"
+    },
+    {
+      "real_name": "customer_subscription",
+      "entity_type": "table",
+      "scope_path": "billing.public.customer_subscription",
+      "files": [
+        "docs/integrations.md"
+      ]
+    },
+    {
+      "real_name": "chargeInvoice",
+      "entity_type": "endpoint",
+      "scope_path": "src/billing/charge-invoice.ts::BillingService.chargeInvoice",
+      "files": [
+        "src/billing/charge-invoice.ts"
+      ]
+    },
+    {
+      "real_name": "amountDue",
+      "entity_type": "column",
+      "scope_path": "src/billing/charge-invoice.ts::BillingService.amountDue",
+      "files": [
+        "src/billing/charge-invoice.ts"
+      ]
+    },
+    {
+      "real_name": "PaymentGateway",
+      "entity_type": "interface",
+      "scope_path": "src/gateway/payment-gateway.ts::PaymentGateway",
+      "files": [
+        "src/billing/charge-invoice.ts"
+      ]
+    }
+  ],
+  "negative_files": [
+    "docs/ordinary-words.md"
+  ],
+  "never_alias": [
+    "React",
+    "Postgres",
+    "Prisma",
+    "Docker",
+    "Kubernetes",
+    "Square",
+    "Wise",
+    "Block",
+    "Segment",
+    "Amplitude",
+    "Paddle",
+    "Clerk"
+  ],
+  "requires": [
+    "markdown",
+    "typescript"
+  ],
+  "milestone": "M4"
+}

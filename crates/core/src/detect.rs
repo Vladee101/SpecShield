@@ -196,8 +196,16 @@ static PERSON_LINE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid regex")
 });
 
+/// A proper-noun-shaped phrase — the low-confidence suggestion pass.
+///
+/// Spaces and tabs between the words rather than `\s`, which matches a
+/// newline: a `## Money` heading followed by a paragraph starting `Card
+/// payments` suggested those two words, a blank line apart, as one
+/// organization. Never applied at 0.35, but it is the same defect that ate a
+/// line break when the person rule had it, and a suggestion spanning two
+/// paragraphs in `specshield scan` reads as a broken tool.
 static CAPITALIZED_PHRASE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[A-Z][a-z]{2,}(?:\s+[A-Z][a-z]{2,})*\b").expect("valid regex"));
+    LazyLock::new(|| Regex::new(r"\b[A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,})*\b").expect("valid regex"));
 
 /// Words that begin sentences constantly and would otherwise dominate the
 /// organization suggestions.
@@ -1282,6 +1290,29 @@ mod person_lines {
                 !candidate.real_name.contains('\n'),
                 "{:?} spans a line break",
                 candidate.real_name
+            );
+        }
+    }
+
+    #[test]
+    fn no_pass_ever_produces_a_candidate_spanning_a_line_break() {
+        // The rule, rather than one instance of it. Two passes have now shipped
+        // a pattern using `\\s` between words and both matched across a blank
+        // line; a replacement built from such a span deletes the line break, the
+        // SDD §7.2 check sees the document change shape, and the whole file goes
+        // through unaliased while reporting success.
+        //
+        // Prose with every shape that has caused it: a marker line above
+        // another marker line, a heading above a paragraph, a list.
+        let text = "# Billing\n\n## Money\n\nCard payments go through Stripe.\n\nContact: Jane Okafor\nReviewed-by: Samuel Adeyemi\n\n- Meridian Freight\n- Atlas Logistics\n";
+
+        for candidate in Detector::new().scan_text(text, "p", OccurrenceKind::Reference) {
+            assert!(
+                !candidate.real_name.contains('\n'),
+                "{:?} ({:?}, confidence {}) spans a line break",
+                candidate.real_name,
+                candidate.entity_type,
+                candidate.confidence
             );
         }
     }

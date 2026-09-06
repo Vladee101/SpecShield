@@ -13,15 +13,21 @@ examples (AWS's own `AKIAIOSFODNN7EXAMPLE`) or obviously-invalid placeholders.
 
 | Project | Entities | Occurrences | Secrets | Covers |
 |---|---:|---:|---:|---|
+| `identity` | 26 | 34 | — | every identity category in PRD §13, and the words that look like one |
 | `prd-markdown` | 14 | 25 | — | prose entities, org names, business terminology |
 | `sql-schema` | 14 | 19 | — | tables, columns, the repeated `customer_id` case |
 | `openapi-billing` | 14 | 25 | — | paths, operationIds, schema names |
 | `ts-service` | 20 | 60 | — | declarations, references, imports, comments, string literals, path segments |
 | `mixed-repo` | 11 | 13 | — | one identity across four formats, plus ignore rules |
 | `adversarial` | 17 | 20 | 6 | the hostile cases below |
-| **Total** | **90** | **162** | **6** | |
+| **Total** | **116** | **196** | **6** | |
 
-All six share one fictional domain — **Vantor**, a freight billing platform —
+The first five projects were built when SpecShield aliased everything it could
+name. `identity` was added afterwards, for PRD v2.0: it is the only one that
+measures what the product now claims — that who you are leaves and what you
+built stays — and it is where a new identity category gets its fixture.
+
+All seven share one fictional domain — **Vantor**, a freight billing platform —
 so cross-artifact unification is testable: the SQL table
 `customer_subscription`, the OpenAPI schema `CustomerSubscription`, and the
 TypeScript interface `CustomerSubscription` must resolve to **one** identity
@@ -94,7 +100,15 @@ labelled before `Subscription` could claim a span inside it).
 
 - **Recall** = labelled occurrences detected ÷ total labelled occurrences.
   Per-occurrence rather than per-entity: missing one occurrence of a detected
-  entity is still a leak.
+  entity is still a leak. Counted over **identity** occurrences only — the
+  structural labels are scored in their own bucket, because leaving them in the
+  twin is what the product does on purpose (PRD §4.1).
+- Two columns, and the left one is the honest one. **Rules-only** is what the
+  detector finds against an empty vault: the vendor table, the hostname rule,
+  and the person markers. **With dictionary** seeds the identity types nothing
+  could guess — organization, product, brand, tenant, environment — and nothing
+  else, so a grader that already knows `Stripe` is never measuring the vendor
+  table.
 - **Precision** = correct detections ÷ all detections. Hits in
   `negative_files`, on `never_alias` terms, and in `ignored_paths` all count
   against it.
@@ -119,13 +133,27 @@ which is the failure mode that matters in a security tool.
 | `planted-secrets.env` | Five secret classes for one-way redaction, including a low-confidence email. |
 | `secret-beside-dto.ts` | A credential three lines from a DTO: one must be redacted one-way, the other pseudonymized two-way, and they must not share a code path (SDD §4.3). |
 
+## The `identity` fixture
+
+| File | Covers |
+|---|---|
+| `docs/integrations.md` | Vendors, hostnames, an org, a product and a brand, beside the architecture that must stay legible. |
+| `docs/ownership.md` | People, by three different markers. A customer's tenant and an environment named after them; `production` and `staging`, which are the same type and are not identity. |
+| `src/billing/charge-invoice.ts` | A person in a JSDoc `@author`, and vendors named in a doc comment rather than in prose. |
+| `docs/ordinary-words.md` | **Negative fixture.** Seven real companies whose names are ordinary English words — Square, Wise, Block, Segment, Amplitude, Paddle, Clerk — used as those words. Any detection is a false positive. |
+
 ## Known gaps
 
 - **No `expected/` twin snapshots yet.** They arrive with the sanitizer in M1,
   as `insta` snapshots, so unintended transformation changes surface in review.
 - **Path-segment entities are labelled only where they appear in file
   *content*** (import specifiers). Filename-to-twin-path mapping is a
-  `files.twin_path` concern and is verified separately.
+  `files.twin_path` concern and is verified separately, in
+  `crates/project/tests/paths.rs`.
+- **Sub-token identity is not labelled anywhere.** `VANTOR` inside
+  `VANTOR_BILLING_URL` is a real detection the pipeline depends on, and the
+  generator matches whole tokens only, so there is no way to write the label.
+  Covered by unit tests and `crates/parsers/tests/identity_twin.rs` instead.
 - **The homoglyph fixture has no defined resolution yet.** It is labelled as two
   identities; whether the detector should unify them under Unicode confusable
   folding is an open M1 question, and the fixture exists to force the decision.

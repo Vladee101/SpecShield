@@ -232,33 +232,7 @@ pub(crate) fn run(corpus: &Path, strict: bool, verbose: bool) -> Result<()> {
         gated.precision() * 100.0
     );
     println!();
-    // The cost of PRD §4, stated rather than assumed. Both numbers are labelled
-    // names that reach the model on purpose, and both are recoverable with one
-    // `specshield term`.
-    println!(
-        "Recall above is over the **{} identity occurrence(s)** SpecShield hides by default —",
-        gated.expected
-    );
-    println!("organizations, hosts, vendors, and people. Two other buckets are labelled and");
-    println!("deliberately left in the twin:");
-    println!();
-    println!(
-        "- **{} structural occurrence(s)** — what was *built*: DTOs, tables, columns, services.",
-        gated.structural
-    );
-    println!("  An agent that cannot read your architecture cannot help you extend it (PRD §4.1).");
-    println!(
-        "- **{} ordinary-word occurrence(s)** — an org or host whose name is a common word.",
-        gated.ordinary
-    );
-    println!();
-    println!("`specshield term <name>` moves any of them back. The corpus is thin on identity");
-    println!("fixtures precisely because it was built for the old scope — that is the gap to");
-    println!("close next, not the recall number.");
-    println!();
-    println!("Ungated projects are reported for visibility but excluded from the");
-    println!("verdict: their formats have no parser in this build, so their numbers");
-    println!("measure the missing milestone rather than detection quality.");
+    explain_the_buckets(&gated);
 
     let total_dict = gated;
 
@@ -311,6 +285,47 @@ fn load_projects(corpus: &Path) -> Result<Vec<(PathBuf, Labels)>> {
     Ok(out)
 }
 
+/// What the headline numbers do and do not cover.
+///
+/// The cost of PRD §4, stated rather than assumed: both other buckets are
+/// labelled names that reach the model on purpose, and both are recoverable
+/// with one `specshield term`.
+fn explain_the_buckets(gated: &Score) {
+    // The cost of PRD §4, stated rather than assumed. Both numbers are labelled
+    // names that reach the model on purpose, and both are recoverable with one
+    // `specshield term`.
+    println!(
+        "Recall above is over the **{} identity occurrence(s)** SpecShield hides by default —",
+        gated.expected
+    );
+    println!("organizations, hosts, vendors, and people. Two other buckets are labelled and");
+    println!("deliberately left in the twin:");
+    println!();
+    println!(
+        "- **{} structural occurrence(s)** — what was *built*: DTOs, tables, columns, services.",
+        gated.structural
+    );
+    println!("  An agent that cannot read your architecture cannot help you extend it (PRD §4.1).");
+    println!(
+        "- **{} ordinary-word occurrence(s)** — an identity type whose name is a common word:",
+        gated.ordinary
+    );
+    println!("  an environment called `staging`, an org called `admin`. Identifying nothing,");
+    println!("  and left alone until someone says otherwise.");
+    println!();
+    println!("`specshield term <name>` moves any of them back.");
+    println!();
+    println!("The rules-only column is the number to watch. It is what the detector finds");
+    println!("with an empty vault — the vendor table, the hostname rule and the person");
+    println!("markers — and it is the only part of identity detection that works before a");
+    println!("user has typed anything. Everything else needs `specshield term` and always");
+    println!("will: nothing in a codebase can guess what your product is called.");
+    println!();
+    println!("Ungated projects are reported for visibility but excluded from the");
+    println!("verdict: their formats have no parser in this build, so their numbers");
+    println!("measure the missing milestone rather than detection quality.");
+}
+
 /// Score one project. With `use_dictionary`, the detector is seeded with the
 /// labelled Organization names — simulating a user who has done the FR-10 step.
 fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
@@ -318,9 +333,17 @@ fn score(dir: &Path, labels: &Labels, use_dictionary: bool) -> Score {
     if use_dictionary {
         for entity in &labels.entities {
             // Only the types no rule can recognise. Seeding the detector with
-            // everything would measure nothing.
-            if entity.entity_type == "organization" {
-                detector = detector.with_term(&entity.real_name, EntityType::Organization);
+            // everything would measure nothing — so the vendor table, the
+            // hostname rule and the person markers are left to earn their
+            // occurrences in *both* columns, and what gets seeded is the set a
+            // user genuinely has to type: their company, its products and
+            // brands, their customers' tenants, and environments named after
+            // them. Nothing in a codebase can guess `Haulwise`.
+            let Some(entity_type) = parse_type(&entity.entity_type) else {
+                continue;
+            };
+            if seeded(entity_type) {
+                detector = detector.with_term(&entity.real_name, entity_type);
             }
         }
     }
@@ -478,13 +501,32 @@ fn label_spans(labels: &Labels) -> (Spans, Spans) {
     (expected, labelled)
 }
 
+/// Which identity types the "with dictionary" column hands to the detector.
+///
+/// The split is the honest one: a type is seeded when nothing in this build
+/// could find it without being told, and left alone when something could. A
+/// grader that seeds `Stripe` is not measuring the vendor table, and one that
+/// seeds `Jane Okafor` is not measuring the person markers.
+fn seeded(entity_type: EntityType) -> bool {
+    use EntityType::{Brand, Environment, Organization, Product, Tenant};
+    matches!(entity_type, Organization | Product | Brand | Tenant | Environment)
+}
+
 /// Does the label name an identity type — PRD §4.1?
 ///
 /// The corpus writes the serde form of `EntityType`, so this is the same list as
 /// [`specshield_core::model::EntityType::is_identity`], reached through the same
 /// spelling the labels use.
 fn identity_type(label: &str) -> bool {
-    serde_json::from_value::<EntityType>(serde_json::Value::String(label.to_owned())).is_ok_and(EntityType::is_identity)
+    parse_type(label).is_some_and(EntityType::is_identity)
+}
+
+/// The corpus writes the serde form (`payment_provider`), which is not what
+/// `FromStr` reads — that takes the alias prefix (`PAYMENT_PROVIDER`). Going
+/// through the wrong one fails silently for every label and was worth exactly
+/// one wrong corpus report to find.
+fn parse_type(label: &str) -> Option<EntityType> {
+    serde_json::from_value::<EntityType>(serde_json::Value::String(label.to_owned())).ok()
 }
 
 /// Is this an entity SpecShield claims to hide by default?
