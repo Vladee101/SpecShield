@@ -190,20 +190,35 @@ pub fn twin_paths(index: &Index, detector: &Detector, graph: &mut Graph) -> Resu
 
     for path in index.files.keys() {
         let mut failed = None;
-        let twin = paths::twin_path(path, &context, |component| match component {
-            Component::Segment { key, suffix } => {
-                format!("{}{suffix}", graph.intern(key, Origin::Detected).alias)
-            }
+        let twin = paths::twin_path(path, &context, |component| {
+            // Which half of the name is proprietary — PRD §7, and the user's
+            // answer to it: rename only the identity part.
+            //
+            // `src/acme-billing/` is one directory carrying two facts. `acme`
+            // says whose it is and goes; `billing` says what it does and stays,
+            // because a tree a model cannot navigate is no more useful than a
+            // file it cannot read. So a segment is aliased whole only when the
+            // user has named it — `should_alias` asks exactly that — and
+            // otherwise goes through the detector like any other text.
+            let (text, suffix) = match component {
+                Component::Segment { key, suffix }
+                    if detector.should_alias(&key.real_name, EntityType::PathSegment) =>
+                {
+                    return format!("{}{suffix}", graph.intern(key, Origin::Detected).alias);
+                }
+                Component::Segment { key, suffix } => (key.real_name.as_str(), suffix),
+                Component::Text { text, suffix } => (text.as_str(), suffix),
+            };
             // Sanitizing the component as if it were a document is not a trick:
             // it is the same call the file's *contents* go through, which is
             // exactly why the tree and the import strings come out agreeing.
-            Component::Text { text, suffix } => {
-                match sanitize::sanitize(text, paths::PATH_SCOPE, detector, graph, None, &context) {
-                    Ok(result) => format!("{}{suffix}", result.twin),
-                    Err(e) => {
-                        failed = Some(e);
-                        format!("{text}{suffix}")
-                    }
+            // Aliasing a path segment the contents leave alone gives a twin
+            // whose imports no longer resolve.
+            match sanitize::sanitize(text, paths::PATH_SCOPE, detector, graph, None, &context) {
+                Ok(result) => format!("{}{suffix}", result.twin),
+                Err(e) => {
+                    failed = Some(e);
+                    format!("{text}{suffix}")
                 }
             }
         });

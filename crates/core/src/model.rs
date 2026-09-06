@@ -183,10 +183,31 @@ pub struct IdentityKey {
     pub real_name: String,
 }
 
+/// The scope every identity type shares — see [`IdentityKey::new`].
+pub const IDENTITY_SCOPE: &str = "identity";
+
 impl IdentityKey {
+    /// Scoping is per-file for structure and project-wide for identity, and the
+    /// difference is not a tuning knob.
+    ///
+    /// Design Review B1 scopes structure per file for a good reason: `customer_id`
+    /// in one table is a different column from `customer_id` in another, and
+    /// collapsing them would tell the model the two tables are joined when they
+    /// are not.
+    ///
+    /// None of that is true of who you are. Your company is your company in every
+    /// file that names it, and per-file scoping gave it `ORG_001` in one and
+    /// `ORG_002` in the next — one organization presented to the model as two,
+    /// with the twin's own file tree disagreeing with the imports inside it.
+    /// Restore still round-tripped, every alias mapping back to the same name,
+    /// which is why no test caught it.
     pub fn new(scope_path: impl Into<String>, entity_type: EntityType, real_name: impl Into<String>) -> Self {
         Self {
-            scope_path: scope_path.into(),
+            scope_path: if entity_type.is_identity() {
+                IDENTITY_SCOPE.to_owned()
+            } else {
+                scope_path.into()
+            },
             entity_type,
             real_name: real_name.into(),
         }

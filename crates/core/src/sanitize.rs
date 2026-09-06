@@ -366,9 +366,24 @@ pub fn sanitize(
 
     let mut from_prose: HashSet<usize> = HashSet::new();
     for candidate in detector.scan_text(&redacted, scope, crate::model::OccurrenceKind::Reference) {
-        let overlaps = claimed
-            .iter()
-            .any(|(s, e)| candidate.byte_start < *e && *s < candidate.byte_end);
+        // A structural claim covers the whole of what the grammar saw, and an
+        // identity *inside* it is a different fact rather than a competing
+        // reading of the same one. `./acme-billing` is one module path, and
+        // `acme` is who owns it; the parser is right about the first and has
+        // nothing to say about the second.
+        //
+        // Only a candidate covering a whole claim is contradicting the parser,
+        // and there the parser wins — it read the grammar and the prose pass
+        // guessed. Without this, the import specifier kept `acme-billing` while
+        // the file it names was rewritten, and the twin stopped being a
+        // TypeScript project that resolves.
+        let overlaps = claimed.iter().any(|(s, e)| {
+            let intersects = candidate.byte_start < *e && *s < candidate.byte_end;
+            let nested = candidate.byte_start >= *s
+                && candidate.byte_end <= *e
+                && (candidate.byte_start > *s || candidate.byte_end < *e);
+            intersects && !(nested && candidate.entity_type.is_identity())
+        });
         let in_prose = regions.as_ref().is_none_or(|regions| {
             regions
                 .iter()

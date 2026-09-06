@@ -219,10 +219,14 @@ fn a_rescan_does_not_throw_away_the_twin_path_mapping() {
     // `rescan` used to overwrite the column with the real path, so a routine
     // rescan silently orphaned every twin tree already produced — restore found
     // no mapping and left each file sitting at its alias name.
-    // A compound filename, so path aliasing actually renames it.
+    // An identity in the path, so path aliasing actually renames it. A
+    // compound structural name used to be enough and is not any more: the
+    // tree now keeps what was *built* and rewrites only who owns it, so
+    // `customer-subscription.ts` comes through untouched (PRD §7).
     let f = Fixture::new("twinpath");
+    f.vault().add_term("Vantor", "ORG").unwrap();
     f.write(
-        "src/customer-subscription.ts",
+        "src/vantor-billing/customer-subscription.ts",
         "export interface CustomerSubscription { id: string }\n",
     );
     f.export(0);
