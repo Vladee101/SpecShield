@@ -36,6 +36,29 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `app/src-tauri` is a workspace member, so every `--workspace` command
+      # builds it — and its build script needs the webview headers. Without
+      # these the job fails in `tauri-build`, nowhere near anything a reader
+      # would connect to the desktop app.
+      - name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev             libayatana-appindicator3-dev libxdo-dev patchelf
+      # `app/dist` is generated and gitignored, and `tauri.conf.json` points
+      # `frontendDist` at it. A fresh checkout has no such directory, so the
+      # Tauri build script fails on every platform — which is what made the
+      # first push's `test`, `clippy` and `rustdoc` jobs all red while the same
+      # commands passed locally, where a stale `dist/` happened to exist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: build the frontend the Tauri crate embeds
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -53,6 +76,26 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Tauri system dependencies (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev             libayatana-appindicator3-dev libxdo-dev patchelf
+      # `app/dist` is generated and gitignored, and `tauri.conf.json` points
+      # `frontendDist` at it. A fresh checkout has no such directory, so the
+      # Tauri build script fails on every platform — which is what made the
+      # first push's `test`, `clippy` and `rustdoc` jobs all red while the same
+      # commands passed locally, where a stale `dist/` happened to exist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: build the frontend the Tauri crate embeds
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
       - run: cargo test --workspace --all-features
 
   docs:
@@ -62,6 +105,29 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `app/src-tauri` is a workspace member, so every `--workspace` command
+      # builds it — and its build script needs the webview headers. Without
+      # these the job fails in `tauri-build`, nowhere near anything a reader
+      # would connect to the desktop app.
+      - name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev             libayatana-appindicator3-dev libxdo-dev patchelf
+      # `app/dist` is generated and gitignored, and `tauri.conf.json` points
+      # `frontendDist` at it. A fresh checkout has no such directory, so the
+      # Tauri build script fails on every platform — which is what made the
+      # first push's `test`, `clippy` and `rustdoc` jobs all red while the same
+      # commands passed locally, where a stale `dist/` happened to exist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: build the frontend the Tauri crate embeds
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
       # Intra-doc links carry the SDD cross-references; a broken one means the
       # code and the spec have drifted.
       - run: cargo doc --workspace --no-deps --document-private-items
@@ -128,7 +194,7 @@ jobs:
           set -euo pipefail
           cd target/reference-project
           SS=../release/specshield
-          "$SS" init . --alias-style opaque > /dev/null
+          "$SS" init . > /dev/null
 
           start=$(date +%s%N)
           "$SS" index > /dev/null
@@ -154,6 +220,29 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `app/src-tauri` is a workspace member, so every `--workspace` command
+      # builds it — and its build script needs the webview headers. Without
+      # these the job fails in `tauri-build`, nowhere near anything a reader
+      # would connect to the desktop app.
+      - name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev             libayatana-appindicator3-dev libxdo-dev patchelf
+      # `app/dist` is generated and gitignored, and `tauri.conf.json` points
+      # `frontendDist` at it. A fresh checkout has no such directory, so the
+      # Tauri build script fails on every platform — which is what made the
+      # first push's `test`, `clippy` and `rustdoc` jobs all red while the same
+      # commands passed locally, where a stale `dist/` happened to exist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: build the frontend the Tauri crate embeds
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
 
       # Built with the network, run without it. "No internet required" is a
       # promise in the PRD; this is the job that makes it a fact rather than an

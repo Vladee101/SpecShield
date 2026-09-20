@@ -20,7 +20,11 @@
 //! identities the project has and of what types, but not one name. That belongs
 //! in the security one-pager, not in a footnote.
 //!
-//! See [`crypto`] for the encryption and blind-index scheme.
+//! The encryption and blind-index scheme lives in the private `crypto` module;
+//! it is not part of the public surface, so this is a pointer to the source
+//! rather than a doc link. Linking it made `cargo doc -D warnings` fail, which
+//! is rustdoc correctly pointing out that the link breaks for anyone reading
+//! the published documentation.
 
 pub mod backup;
 mod crypto;

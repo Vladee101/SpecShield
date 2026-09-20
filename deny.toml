@@ -23,6 +23,17 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Our own crates declare `license = "UNLICENSED"`, which is not an SPDX
+# expression and is deliberately not in the allow list above. They are all
+# `publish = false`, so nothing here is distributed as a crate and the license
+# check has nothing to say about them — without this, cargo-deny fails the
+# build on the workspace itself rather than on a dependency.
+#
+# This does not settle the repository's licensing. See the README: no LICENSE
+# file means all rights reserved, which is a decision to make rather than a
+# default to inherit.
+private = { ignore = true }
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
