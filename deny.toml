@@ -3,6 +3,31 @@
 [advisories]
 yanked = "deny"
 
+# Six advisories, all of class `unmaintained` — **none is a vulnerability**.
+# Each is transitive through Tauri and unreachable from anything we could
+# change short of dropping the desktop shell.
+#
+# Listed by ID on purpose, rather than relaxing the policy with
+# `unmaintained = "workspace"`. That setting would stop reporting *every*
+# transitive unmaintained crate, including the seventh one, which nobody would
+# then look at. Naming these six means a new one still fails the build and
+# gets read by a person — which is the only reason to run this check.
+#
+# Worth re-reading when Tauri is upgraded: if an entry no longer applies,
+# cargo-deny says so, and it should be deleted rather than carried.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error, unmaintained. A proc macro, so build-time only, and only on Linux: it arrives through glib-macros and gtk3-macros, the GTK bindings the webview needs." },
+
+    # One root, five crates. `urlpattern` is the only thing that wants the
+    # `unic` family, and it comes from `tauri-utils` — reached through
+    # `tauri-build` and `tauri-codegen`, which run while the app is compiled.
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property, unmaintained. Via urlpattern <- tauri-utils." },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range, unmaintained. Via urlpattern <- tauri-utils." },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common, unmaintained. Via urlpattern <- tauri-utils." },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident, unmaintained. Via urlpattern <- tauri-utils." },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version, unmaintained. Via urlpattern <- tauri-utils." },
+]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
