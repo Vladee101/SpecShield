@@ -185,15 +185,22 @@ jobs:
       # repo, so the repo is generated rather than assumed. Release build: a
       # debug binary would measure the profile, not the code.
       - run: cargo build --release -p specshield-cli
-      - run: python3 bench/build_reference.py target/reference-project
+
+      # Not into `target/`. `Swatinem/rust-cache` saves and restores that tree,
+      # so the generated project came back on the next run and the script
+      # refused to write over it — "already exists; remove it first", which is
+      # the script being careful about someone's real directory rather than a
+      # bug in the script. It also meant a thousand throwaway files were being
+      # carried in the cache every run.
+      - run: python3 bench/build_reference.py "$RUNNER_TEMP/reference-project"
 
       - name: cold index under 30s, rescan under 2s
         env:
           SPECSHIELD_PASSPHRASE: ci-only-not-a-secret
         run: |
           set -euo pipefail
-          cd target/reference-project
-          SS=../release/specshield
+          SS="$PWD/target/release/specshield"
+          cd "$RUNNER_TEMP/reference-project"
           "$SS" init . > /dev/null
 
           start=$(date +%s%N)
@@ -248,6 +255,15 @@ jobs:
       # promise in the PRD; this is the job that makes it a fact rather than an
       # intention, and it fails loudly the day a dependency starts phoning home.
       - run: cargo test --workspace --all-features --no-run
+
+      # ubuntu-24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`,
+      # and `unshare --user` then fails with
+      # "write failed /proc/self/uid_map: Operation not permitted" before the
+      # test has a chance to run. The sysctl does not exist on older images, so
+      # failing to set it is not itself an error — the `unshare` below is what
+      # actually has to work, and it fails loudly if this did not help.
+      - name: permit unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: the whole suite passes with no route out
         run: |
