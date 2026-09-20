@@ -226,6 +226,10 @@ enforced, and what tests it. A claim that is not there is not a claim.
 
 ## License
 
-`UNLICENSED`, with no license file — which by default means all rights reserved.
-Settle this before making the repository public: with no license nobody may use
-the code, even where they can read it.
+[MIT](LICENSE). Use it, change it, ship it; the one condition is keeping the
+copyright notice.
+
+Dependencies sit in the same territory, with two exceptions argued
+individually in [`deny.toml`](deny.toml): `BSL-1.0` (permissive, and asks for
+less than MIT) and `MPL-2.0` (weak copyleft, per file; it does not reach ours,
+because we modify none of theirs). Checked in CI on every commit.
