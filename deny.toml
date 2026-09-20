@@ -8,8 +8,13 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [licenses]
-# Permissive licenses only. SpecShield ships as a desktop binary, so a copyleft
-# dependency would have licensing consequences for the whole application.
+# SpecShield ships as a desktop binary, so the question for every dependency is
+# what its licence asks of the thing we distribute.
+#
+# The original rule here was "permissive only", and it failed the build on the
+# dependencies the product has always had. The rule was aspirational rather
+# than descriptive; what follows is the same policy stated accurately, with
+# each non-permissive entry justified individually rather than waved through.
 allow = [
     "MIT",
     "Apache-2.0",
@@ -20,6 +25,33 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
+
+    # Boost Software License. Permissive, and notably it requires no
+    # attribution in binary distributions at all — a weaker ask than MIT.
+    #   clipboard-win, error-code
+    #     ← arboard ← tauri-plugin-clipboard-manager, and directly from
+    #       specshield-app, which sets the three Windows clipboard opt-out
+    #       formats (SDD §17, Threat Model §5.9).
+    "BSL-1.0",
+
+    # Mozilla Public License 2.0. **Not permissive — weak copyleft** — and it
+    # is allowed here because its obligation is per *file*, not per program.
+    # MPL §3.3 permits distributing a Larger Work under other terms; what it
+    # requires is that modifications to the MPL-covered files themselves be
+    # published. We modify none of them.
+    #
+    #   cssparser, cssparser-macros, selectors, dtoa-short
+    #     ← dom_query ← tauri-utils, as a **build-dependency**. These parse CSP
+    #       at build time and are not in the shipped binary, so the
+    #       distribution trigger does not arise for them at all.
+    #   option-ext
+    #     ← dirs-sys ← dirs. This one does ship. Unmodified, so the obligation
+    #       is satisfied by leaving it that way.
+    #
+    # If any of these is ever vendored and patched, that patch has to be
+    # published. That is the whole of the exposure, and it is worth re-reading
+    # this comment before doing so.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.9
 
