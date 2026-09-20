@@ -7,6 +7,19 @@ yanked = "deny"
 multiple-versions = "warn"
 wildcards = "deny"
 
+# The six workspace crates are declared as `{ path = "crates/..." }` with no
+# version, and a version-less path dependency resolves to `*` — which is what
+# `wildcards = "deny"` above exists to catch. For a dependency pulled from a
+# registry that rule is right: `*` means any future breaking release is
+# accepted sight unseen.
+#
+# It says nothing here. These crates are `publish = false` and are never
+# resolved from a registry; the path *is* the version. Adding a `version` field
+# to each would be a number to bump in lockstep across seven manifests, buying
+# nothing. This option is cargo-deny's own answer to that case, and it still
+# only applies to unpublished crates.
+allow-wildcard-paths = true
+
 [licenses]
 # SpecShield ships as a desktop binary, so the question for every dependency is
 # what its licence asks of the thing we distribute.
