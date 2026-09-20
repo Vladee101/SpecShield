@@ -2070,7 +2070,7 @@ mod tests {
                 "core:window:allow-start-dragging",
                 "clipboard-manager:allow-write-text",
             ],
-            "the webview's capability set changed — update docs/Threat Model.md §5.5 too"
+            "the webview's capability set changed — update docs/en/Threat Model.md §5.5 and its Russian translation too"
         );
 
         for forbidden in ["http:", "shell:", "fs:", "dialog:"] {

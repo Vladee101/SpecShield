@@ -165,13 +165,18 @@ specshield export ../project-twin     # sanitize every file into a twin tree
 The export reports what the gate found and writes the twin anyway — `--strict`
 refuses instead (§9). An unredacted secret refuses in both modes.
 
-Filenames and directories are aliased too, and consistently with the imports
-inside the files, so the twin still resolves as a project:
+**Only the identity-bearing part of a path is rewritten**, and consistently with
+the imports inside the files, so the twin still resolves as a project:
 
 ```
-src/domain/customer-subscription.ts   →   src/domain/PATH_4Y1B5S.ts
-import "../domain/customer-subscription"  →  import "../domain/PATH_4Y1B5S"
+src/vantor-billing/charge.ts          →   src/ORG_001-billing/charge.ts
+src/domain/customer-subscription.ts   →   src/domain/customer-subscription.ts
 ```
+
+The directory keeps `billing`, the file keeps its name, and every import inside
+still resolves. Renaming structure while the code kept referring to it by name
+was how an earlier build produced a twin that was no longer a TypeScript
+project.
 
 ### After an export: two questions the vault can now answer
 
@@ -181,7 +186,7 @@ files, not the twin's.
 
 ```bash
 specshield where CustomerSubscription    # every place the project uses this name
-specshield where ExternalModel_71MCXC    # and the same question from the other end
+specshield where ORG_001                 # and the same question from the other end
 ```
 
 Real names match ignoring case; an alias must match exactly, because an alias is
@@ -286,9 +291,12 @@ specshield unify                                   # list proposals
 specshield unify --confirm customersubscription    # accept one
 ```
 
-Confirmed members share an alias *suffix* with different prefixes —
-`DB_TABLE_MS7JMB`, `DTO_MS7JMB` — so a model sees the connection while restore
-stays unambiguous.
+Confirmed members share an alias *number* with different prefixes —
+`DB_TABLE_007`, `DTO_007` — so a model sees the connection while restore stays
+unambiguous.
+
+Confirming re-derives those aliases, so any twin already sent is orphaned: its
+aliases no longer resolve. Re-sanitize before the next request.
 
 **Nothing is ever unified without confirmation.** Three unrelated `Status` enums
 in three modules share a name and are three different things; merging them on
@@ -432,9 +440,13 @@ conversation, immediately, and no amount of re-keying takes it back.
 
 ### What is deliberately not aliased
 
-A name made of a single ordinary word — `node`, `status`, `data`, `invoice`,
-`account` — is left in the twin. On its own it says nothing about who you are,
-and aliasing it makes the twin unreadable and the report useless.
+**Structure** — services, DTOs, tables, columns, endpoints, file names — is left
+in the twin on purpose. An agent that cannot read your architecture cannot help
+you extend it.
+
+So is **an identity whose name is a single ordinary word**: an organization
+called `admin`, an environment called `staging`. On its own it says nothing about
+who you are, and aliasing it makes the twin unreadable and the report useless.
 
 If one of them really is yours, say so once:
 
@@ -517,7 +529,7 @@ This is not telemetry. There is none.
 | `audit` | Show or export the local audit log |
 | `backup` / `restore-vault` | Copy the vault; put a copy back |
 | `escrow` / `escrow-open` | Export and use a key escrow |
-| `rekey` | Regenerate every alias under a new key |
+| `rekey` | Reissue every alias; orphans every twin already shared |
 | `recover` | Inspect a vault that will not open |
 | `report` | Detection metrics against the golden corpus |
 
@@ -526,5 +538,7 @@ Every command takes `--project <path>` (default `.`). Omit `--passphrase` and
 
 ---
 
-*Security detail: `docs/Security Review One-Pager.md`, `docs/Threat Model.md`,
-and `docs/Residual Risk.md`.*
+*Security detail: [Security Review One-Pager](Security%20Review%20One-Pager.md),
+[Threat Model](Threat%20Model.md), [Residual Risk](Residual%20Risk.md). Every
+feature in one place: [Complete Reference](Complete%20Reference.md). Russian
+translation: [`docs/Руководство — командная строка.md`](../Руководство%20—%20командная%20строка.md).*

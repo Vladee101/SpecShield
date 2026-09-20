@@ -59,8 +59,9 @@ nothing, and a control that stops the product working protects nobody. `--strict
 
 Two further reductions a reviewer should weigh:
 
-- A name that is a single ordinary word — `node`, `status`, `invoice` — is
-  neither aliased nor scanned for unless the user names it (PRD §4.4).
+- A name that is a single ordinary word — an organization called `admin`, an
+  environment called `staging` — is neither aliased nor scanned for unless the
+  user names it (PRD §4.2).
 - The gate checks the *output* independently of detection, so a detection miss is
   still caught and named — but naming it is now where the guarantee ends.
 
@@ -130,7 +131,7 @@ vault itself will not open.
 ```bash
 cat app/src-tauri/capabilities/default.json          # the whole permission surface
 grep -rn "reqwest\|hyper\|ureq" crates/ app/src-tauri/src/   # no HTTP client
-cargo test --workspace                               # 319 tests, incl. the SDD §16 matrix
+cargo test --workspace                               # 439 tests, incl. the SDD §16 matrix
 cargo run -p specshield-cli -- report corpus --strict # detection metrics, enforced
 specshield audit --csv                               # exactly what is recorded
 ```
@@ -148,5 +149,7 @@ material where the logic itself is confidential.
 
 ---
 
-*Full detail: `docs/Threat Model.md` and `docs/Residual Risk.md`. Build:
-commit `db804a3`.*
+*Full detail: [Threat Model](Threat%20Model.md) and
+[Residual Risk](Residual%20Risk.md). Russian translation:
+[`docs/Краткая справка для безопасника.md`](../Краткая%20справка%20для%20безопасника.md).
+Build: commit `29cb980`.*

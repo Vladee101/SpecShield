@@ -103,12 +103,13 @@ company is `ORG_001`.
 
 Two properties matter to a reviewer:
 
-- **Deterministic.** The same identity always yields the same alias, so twins are
-  reproducible and two machines with the same project key agree without
-  coordinating. That is why the project key is sealed rather than stored beside
-  the database.
-- **Not a sequence.** A counter would leak how many entities exist and the order
-  they were found in. An HMAC leaks neither.
+- **Stable within a vault.** The same identity always yields the same alias, so a
+  twin is reproducible and restore is unambiguous. Renumbering is an explicit
+  operation (`specshield rekey`), never a side effect.
+- **A sequence, and that costs something.** The number says how many entities of
+  that type the vault has seen and in what order they were found. That is a real
+  disclosure the HMAC scheme did not make, and it was accepted in exchange for a
+  twin a person can read.
 
 Identity is `(scope_path, entity_type, real_name)` — never the name alone. Three
 unrelated `Status` enums in three modules are three identities with three
@@ -137,9 +138,10 @@ usable immediately by anyone who reads the conversation, and no re-keying takes
 it back.
 
 "Identifying" is narrower than it was, too. A name that is a single ordinary word
-— `node`, `status`, `invoice` — is neither aliased nor scanned for (PRD §4.4),
-unless the user names it with `specshield term`. A vault holding a type called
-`Node` used to make every `node_modules` in a lockfile a leak.
+— an organization called `admin`, an environment called `staging` — is neither
+aliased nor scanned for (PRD §4.2), unless the user names it with
+`specshield term`. A vault holding a type called `Node` used to make every
+`node_modules` in a lockfile a leak.
 
 `_` and `-` are word boundaries for this scan, so `old_vantor_id` is caught. The
 gate runs on the Rust side in both the CLI and the desktop app.
@@ -321,7 +323,8 @@ the model, by design:
 | P1 | Detector misses a name; twin is exported | **Reported, not blocked.** The gate scans the output independently of detection and names every hit; the user decides. `--strict` refuses. |
 | P2 | A name appears only inside a compound (`old_vantor_id`) | **Reported.** `_` and `-` are word boundaries for the gate. |
 | P3 | A name leaks through a file path rather than file contents | **Reported.** Twin paths go through the same gate as content. |
-| P1b | A name that is a single ordinary word is shared | **Accepted.** `node`, `status`, `invoice` are neither aliased nor scanned for unless named — PRD §4.4. This is a deliberate reduction in coverage. |
+| P1b | A name that is a single ordinary word is shared | **Accepted.** An org called `admin` or an environment called `staging` is neither aliased nor scanned for unless named — PRD §4.2. This is a deliberate reduction in coverage. |
+| P1c | Structure — a service, table or column name — is shared | **Accepted, and it is the product.** PRD §4.1: an agent that cannot read the architecture cannot help extend it. `specshield term` promotes any structural name to an identity. |
 | P4 | Attacker copies the vault file | **Mitigated.** Every sensitive column is AEAD-sealed under an Argon2id-derived key; the file alone yields aliases and counts, no names. |
 | P5 | Attacker copies the vault and knows the passphrase | **Not defended.** This is equivalent to having the project. |
 | P6 | Model returns a token that looks like an alias but is invented | **Blocked.** Unresolved identity; left standing; blocks patching until named by a human. |
@@ -347,7 +350,7 @@ Do not take this document's word for any of it. These are cheap to check:
 1. `cat app/src-tauri/capabilities/default.json` — the whole permission surface,
    pinned by `the_capability_set_stays_minimal`.
 2. `grep -rn "reqwest\|hyper\|ureq\|curl" crates/ app/src-tauri/src/` — no HTTP client is present.
-3. `cargo test --workspace` — 319 tests, including the SDD §16 error matrix.
+3. `cargo test --workspace` — 439 tests, including the SDD §16 error matrix.
 4. `cargo run -p specshield-cli -- report corpus --strict` — detection metrics
    against a committed, hand-labelled corpus.
 5. The `offline` CI job — the suite passing inside a network namespace.
@@ -357,6 +360,8 @@ Do not take this document's word for any of it. These are cheap to check:
 
 ## 9. Version and scope
 
-Describes the build at commit `db804a3` (M6 engine complete). Installers are
-unsigned and the desktop UI has not been driven through a running Tauri app; see
-the Residual Risk statement for the full list of gaps.
+Describes the build at commit `29cb980`. Installers are unsigned and the desktop
+UI has not been driven through a running Tauri app; see the Residual Risk
+statement for the full list of gaps.
+
+Russian translation: [`docs/Модель угроз.md`](../Модель%20угроз.md).

@@ -194,11 +194,17 @@ most significant unmeasured thing in the product.
 
 ### 3.7 Detection quality is measured on a synthetic corpus
 
-Recall 98.6% and precision 96.3% are measured against a hand-labelled corpus of
-six synthetic projects committed to this repository. They are honest numbers
+Recall 100% and precision 98.0% are measured against a hand-labelled corpus of
+seven synthetic projects committed to this repository. They are honest numbers
 against that corpus and they are enforced per commit in CI. They are not a
 prediction of performance on a real codebase, and the corpus was written by the
 same author as the detector.
+
+**Read the rules-only column instead.** Recall with the dictionary seeded is
+100%, which mostly measures that seeding a dictionary works. Against an empty
+vault — the vendor table, the hostname rule and the person markers, which is all
+a user has before they type anything — it is **49.0%**. That is the number that
+describes a first run.
 
 ---
 
@@ -235,6 +241,8 @@ substitute for an agreement with the model provider about retention.
 
 ## 6. Version
 
-Describes the build at commit `db804a3` (M6 engine complete): 319 tests, clippy
-clean, corpus gate at 98.6% recall / 96.3% precision, offline and performance
-gates enforced in CI.
+Describes the build at commit `29cb980`: 439 tests, clippy clean, corpus gate at
+100% recall / 98.0% precision (49.0% rules-only), offline and performance gates
+enforced in CI.
+
+Russian translation: [`docs/Остаточный риск.md`](../Остаточный%20риск.md).

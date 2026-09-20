@@ -1,42 +1,57 @@
-# SpecShield documentation
+# Документация SpecShield
 
-Five documents, three audiences.
+Шесть документов, три аудитории.
 
-| Document | For | Read it when |
+| Документ | Для кого | Когда читать |
 |---|---|---|
-| [Security Review One-Pager](Security%20Review%20One-Pager.md) | The person approving use | You have ten minutes and a decision to make |
-| [Threat Model](Threat%20Model.md) | Security review | You want to know what is defended, where it is enforced, and how to check |
-| [Residual Risk](Residual%20Risk.md) | The person approving use | Before you approve. It is the least flattering document here, deliberately |
-| [Complete Reference](Complete%20Reference.md) | Anyone | You want every feature, every use case, and the guide in one place |
-| [Desktop User Guide](Desktop%20User%20Guide.md) | Analysts and engineers | You are about to use the application |
-| [User Guide](User%20Guide.md) | Engineers who prefer a terminal, or scripting CI | You want the command line |
+| [Краткая справка для безопасника](Краткая%20справка%20для%20безопасника.md) | Тот, кто согласовывает применение | У вас десять минут и надо принять решение |
+| [Модель угроз](Модель%20угроз.md) | Проверка безопасности | Нужно знать, от чего защита, где она реализована и как это проверить |
+| [Остаточный риск](Остаточный%20риск.md) | Тот, кто согласовывает применение | Перед согласованием. Это намеренно самый нелестный документ здесь |
+| [Полный справочник](Полный%20справочник.md) | Всем | Нужны все возможности, все сценарии и руководство в одном месте |
+| [Руководство: приложение](Руководство%20—%20приложение.md) | Аналитики и инженеры | Вы собираетесь работать в приложении |
+| [Руководство: командная строка](Руководство%20—%20командная%20строка.md) | Инженеры, которым удобнее терминал, и те, кто пишет CI | Нужна командная строка |
 
-If you only read one paragraph:
+Если читать только один абзац:
 
-> SpecShield reduces disclosure to a commercial LLM from **"who you are plus
-> what you built"** to **"what you built"**. It does not make the submission
-> non-confidential. Material whose *architecture* or *business logic* is the
-> secret should not go to a commercial LLM, with or without this tool.
+> SpecShield сокращает раскрытие коммерческой языковой модели с **«кто вы плюс
+> что вы построили»** до **«что вы построили»**. Он не делает отправляемое
+> неконфиденциальным. Материал, секрет которого — сама *архитектура* или
+> *бизнес-логика*, не следует отправлять в коммерческую LLM ни с этим
+> инструментом, ни без него.
 
-The two user guides cover the same capabilities through different surfaces. The
-application is at parity with the command line apart from `specshield report`,
-which measures detection metrics against the golden corpus and is a CI tool.
-Desktop guide §12 is the short list of what differs.
+Два руководства описывают одни и те же возможности с разных сторон. Приложение
+равно командной строке во всём, кроме `specshield report`, который измеряет
+качество обнаружения на эталонном корпусе и является инструментом CI. §12
+руководства по приложению — короткий список отличий.
 
-## Where the specifications live
+## Язык
 
-The product and design documents sit in the repository root and are the source
-of record for requirements and architecture:
+Документы в `docs/` — русские. Английские оригиналы лежат в
+[`docs/en/`](en/README.md) и остаются каноническими: при расхождении прав
+английский текст, а русский — ошибка перевода, которую надо исправить.
 
-- `Product Requirements Document (PRD).md` — requirements, threat model §4,
-  success metrics §5
-- `Software Design Document (SDD).md` — architecture, alias grammar §6,
-  verification §7–8, vault §9, error matrix §16, security §17
-- `Implementation Plan.md` — milestones and decisions
-- `Design Review (PRD + SDD).md` — the review those two were revised against
-- `TODO.md` — what is done, what is not, and what is known to be wrong
+[Глоссарий](Глоссарий.md) фиксирует соответствие терминов. Он нужен потому, что
+исходный код, вывод CLI и интерфейс приложения остаются английскими: по русскому
+тексту читатель должен понимать, какое английское слово он увидит на экране.
 
-Where the documents in `docs/` and the specifications disagree, `docs/` describes
-**what was built** and says so explicitly. Two such divergences exist today and
-both are recorded in Residual Risk §3: there is no OS credential store, and
-encryption is per-value AEAD rather than SQLCipher.
+## Где лежат спецификации
+
+Продуктовые и проектные документы находятся в корне репозитория и являются
+источником истины по требованиям и архитектуре. Они **на английском** и
+переводу не подлежат: код ссылается на их разделы по номерам примерно в сотне
+комментариев (`PRD §4.1`, `SDD §7.2`), и вторая нумерованная копия неизбежно
+разойдётся с первой.
+
+- `Product Requirements Document (PRD).md` — требования, что защищается §4,
+  метрики §5, принципы §7, псевдонимы §13
+- `Software Design Document (SDD).md` — архитектура, грамматика псевдонимов §6,
+  проверка §7–8, хранилище §9, матрица ошибок §16, безопасность §17
+- `Implementation Plan.md` — этапы и принятые решения
+- `Design Review (PRD + SDD).md` — ревью, по итогам которого те два были
+  переработаны
+- `TODO.md` — что сделано, что нет и что заведомо неверно
+
+Там, где документы в `docs/` расходятся со спецификациями, `docs/` описывает
+**то, что построено**, и говорит об этом прямо. Сегодня таких расхождения два, и
+оба записаны в §3 «Остаточного риска»: хранилища учётных данных ОС нет, а
+шифрование — поэлементное AEAD, а не SQLCipher.

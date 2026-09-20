@@ -160,24 +160,29 @@ since.
 
 ### Names survived into it
 
-```
-The gate found vault names in the twin. **You still get the twin** — the banner is
-amber, lists what it found, and leaves the decision to you. An unredacted secret
-is different: that banner is red and there is no twin at all, in either mode.
-```
+**You still get the twin.** The banner is amber, lists what the gate found, and
+leaves the decision to you — whether `Vantor` matters in this particular file is
+your call, and you cannot make it from a refusal that shows you nothing.
 
-**You get no twin at all.** It is not shown and cannot be copied — there is no
-override.
-
-The table lists what leaked and where. Usually one of:
+The table lists what survived and where. Usually one of:
 
 - A name in prose or a comment that the parser did not treat as an identifier.
   The gate caught it in the output, which is exactly its job.
 - A name inside a compound like `old_vantor_id`. `_` and `-` are word boundaries
   for the scan.
-- A high-confidence secret still present in the twin.
 
 Fix the document or add the term, and sanitize again.
+
+### A secret survived into it
+
+**This is different, and there is no twin at all.** The banner is red, nothing is
+shown, nothing can be copied, and no flag turns it off. A name that gets through
+costs a competitor a guess; a credential that gets through is usable immediately
+by anyone who reads the conversation.
+
+Note that a secret which was *successfully redacted* does not do this — the
+marker is safe and the twin goes out. What refuses is a high-confidence secret
+redaction did not catch.
 
 ### The structural check
 
@@ -322,18 +327,22 @@ whatever was edited in between.
 
 ### Export a twin project
 
-Sanitizes every file into a new directory. Filenames and directories are aliased
-too, consistently with the imports inside the files, so the twin still resolves
-as a project:
+Sanitizes every file into a new directory. **Only the identity-bearing part of a
+path is rewritten**, consistently with the imports inside the files, so the twin
+still resolves as a project:
 
 ```
-src/domain/customer-subscription.ts   →   src/domain/PATH_4Y1B5S.ts
-import "../domain/customer-subscription"  →  import "../domain/PATH_4Y1B5S"
+src/vantor-billing/charge.ts          →   src/ORG_001-billing/charge.ts
+src/domain/customer-subscription.ts   →   src/domain/customer-subscription.ts
 ```
 
-**Nothing is written unless every file passes the gate.** A directory that is
-clean apart from one secret is not clean, so a refused export leaves no partial
-tree behind.
+The directory keeps `billing`, the file keeps its name, and every import inside
+still resolves.
+
+**The export is written, and reports what the gate found.** A file whose twin
+still holds an unredacted secret is skipped and named, rather than failing the
+whole export. Use the command line's `--strict` when you want an export that
+refuses outright.
 
 **Restore a twin project** is the inverse: every file back at its real path. It
 works only because the vault recorded the mapping when the twin was exported.
@@ -341,9 +350,9 @@ works only because the vault recorded the mapping when the twin was exported.
 ### Cross-artifact concepts
 
 The SQL table, the OpenAPI schema, and the TypeScript DTO can be one thing seen
-from three sides. Confirming a concept gives them a shared alias *suffix* with
-different prefixes — `DB_TABLE_MS7JMB`, `DTO_MS7JMB` — so a model sees the
-connection while restore stays unambiguous.
+from three sides. Confirming a concept gives them a shared alias *number* with
+different prefixes — `DB_TABLE_007`, `DTO_007` — so a model sees the connection
+while restore stays unambiguous.
 
 **Nothing is unified without confirmation.** A name match is not evidence: three
 unrelated `Status` enums share a name and are three different things.
@@ -425,4 +434,6 @@ interface can read a path on its own.
 ---
 
 *Security detail: [Security Review One-Pager](Security%20Review%20One-Pager.md),
-[Threat Model](Threat%20Model.md), [Residual Risk](Residual%20Risk.md).*
+[Threat Model](Threat%20Model.md), [Residual Risk](Residual%20Risk.md). Every
+feature in one place: [Complete Reference](Complete%20Reference.md). Russian
+translation: [`docs/Руководство — приложение.md`](../Руководство%20—%20приложение.md).*
