@@ -52,6 +52,14 @@ pub(crate) const CLEAR_AFTER: Duration = Duration::from_secs(120);
 pub(crate) enum Protection {
     /// The opt-out formats were set. History and cloud sync are suppressed on a
     /// cooperating system.
+    ///
+    /// Only the Windows `platform::write` below constructs this, so off Windows
+    /// the variant is matched — `lib.rs` turns it into the audit destination —
+    /// and never produced. That is dead code by the letter and the shape of the
+    /// design by intent: the caller must be able to name both outcomes on every
+    /// platform, or the audit log could not record which exports the OS may
+    /// have retained (Threat Model §5.9).
+    #[cfg_attr(not(windows), allow(dead_code))]
     OptedOut,
     /// The text was copied, but this platform has no opt-out implemented, so
     /// the OS may retain or sync it.
@@ -155,10 +163,18 @@ mod platform {
     //
     // The Tauri plugin handles the actual write on these platforms — see the
     // caller.
+    // Both signatures are dictated by the Windows twin above, which really can
+    // fail — `OpenClipboard` and `SetClipboardData` are fallible. Clippy is
+    // right that *these* bodies never do, and wrong that the `Result` is
+    // unnecessary: dropping it here would mean `write_protected` needed a
+    // `#[cfg]` branch of its own and the crate would have two public shapes
+    // for one operation.
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn write(_text: &str) -> Result<Protection, AppError> {
         Ok(Protection::NotAvailable)
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     pub(super) fn clear_if_unchanged(_expected: &str) -> Result<bool, AppError> {
         Ok(false)
     }
