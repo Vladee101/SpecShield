@@ -581,3 +581,24 @@ than showing an empty list.
   and the app warns. Moving the working copy out is still on the list.
 - **Windows + SQLCipher does not build.** That is settled (D-9); do not
   reintroduce `bundled-sqlcipher-vendored-openssl`.
+- **GitHub's push protection blocks this repository's own test fixtures, and
+  that is not fixable.** A push carrying `crates/core/src/secrets.rs` or
+  `sanitize.rs` is rejected with *GH013 — Stripe API Key*, naming the
+  `sk_live_abcdefghijklmnopqrstuvwx` and `sk_test_0000…` constants. They are the
+  alphabet in order and a run of zeros; nothing about them is real.
+
+  The tension is inherent: our own rule is
+  `[sr]k_(?:test|live)_[A-Za-z0-9]{16,}`, GitHub's is effectively the same,
+  so **any fixture that satisfies our test satisfies their scanner.** Weakening
+  the fixture means the test stops testing what it is for, and rewriting forty
+  commits of history over fake data is not proportionate.
+
+  Resolve it by allowing the detection: the rejection prints an unblock URL,
+  and *"used in tests"* is the accurate reason. Do not disable push protection
+  for the repository — the per-detection allowance is the narrow fix, and it
+  keeps the scanner working on everything else.
+
+  The same shape is in `ghp_aaaa…`, `whsec_0000…` and the AWS
+  `AKIAIOSFODNN7EXAMPLE` in `corpus/adversarial/`. None has tripped the scanner
+  so far; GitHub validates its own token formats, and the AWS string is their
+  published example.

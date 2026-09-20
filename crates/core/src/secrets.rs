@@ -299,6 +299,22 @@ mod tests {
         }
     }
 
+    // ---- A note for whoever arrives here from a rejected push. ----------------
+    //
+    // GitHub's secret scanner flags the `sk_live_…` and `sk_test_…` constants
+    // below and refuses the push (GH013, "Stripe API Key"). They are the
+    // alphabet a–x and a run of thirty-two zeros; neither is a real key.
+    //
+    // This cannot be fixed by choosing a better fixture. The rule under test is
+    // `[sr]k_(?:test|live)_[A-Za-z0-9]{16,}` and GitHub's is effectively
+    // the same one, so anything that satisfies the assertion satisfies their
+    // scanner too. A repository containing a secret detector cannot hold
+    // realistic fixtures without tripping other secret detectors.
+    //
+    // Allow the detection from the URL the rejection prints — "used in tests"
+    // is the accurate reason — rather than weakening the fixture or disabling
+    // push protection. See TODO.md §5.
+
     #[test]
     fn api_key_beside_a_dto_is_found() {
         let src = r#"const PAYLANE_KEY = "sk_test_00000000000000000000000000000000";"#;

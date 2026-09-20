@@ -886,6 +886,10 @@ const vantor_invoice = 1;
         assert_ne!(out.twin, "the status field");
     }
 
+    // The `sk_live_…` fixtures in this module are the alphabet a–x, not a key.
+    // GitHub's scanner refuses a push carrying them anyway; see the note in
+    // `secrets.rs` and TODO.md §5 for why that is not fixable here.
+
     #[test]
     fn secrets_are_redacted_before_detection_and_never_interned() {
         let source = "api_key = \"sk_live_abcdefghijklmnopqrstuvwx\"\nVantor owns it.";
